@@ -146,9 +146,10 @@ pub enum StopReason {
     Refused,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingLevel {
+    #[default]
     Off,
     Minimal,
     Low,
@@ -157,36 +158,20 @@ pub enum ThinkingLevel {
     XHigh,
 }
 
-impl Default for ThinkingLevel {
-    fn default() -> Self {
-        ThinkingLevel::Off
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolExecutionMode {
     Sequential,
+    #[default]
     Parallel,
 }
 
-impl Default for ToolExecutionMode {
-    fn default() -> Self {
-        ToolExecutionMode::Parallel
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum QueueMode {
     All,
+    #[default]
     OneAtATime,
-}
-
-impl Default for QueueMode {
-    fn default() -> Self {
-        QueueMode::OneAtATime
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -482,8 +467,13 @@ impl AssistantMessageEvent {
 // ---------------------------------------------------------------------------
 
 /// Top-level events emitted by the agent loop.
+///
+/// `MessageUpdate` carries the largest payload (a full [`AssistantMessageEvent`]),
+/// but events are emitted at low rate and frequently cloned by listeners, so the
+/// variant size is acceptable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum AgentEvent {
     AgentStart,
     AgentEnd {

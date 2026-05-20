@@ -77,7 +77,7 @@ impl LlmStream for MockStream {
             }
         };
 
-        let stream = futures::stream::iter(events.into_iter()).boxed();
+        let stream = futures::stream::iter(events).boxed();
         Ok(stream)
     }
 }

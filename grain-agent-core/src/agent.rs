@@ -500,19 +500,20 @@ impl Agent {
     }
 
     async fn build_loop_config(&self, skip_initial_steering_poll: bool) -> AgentLoopConfig {
-        let (thinking_level, _model) = {
+        let (thinking_level, model) = {
             let g = self.inner.lock().await;
             (g.thinking_level, g.model.clone())
         };
-        let model = self.inner.lock().await.model.clone();
-        let mut stream_options = StreamOptions::default();
-        stream_options.session_id = self.session_id.clone();
-        stream_options.transport = self.transport.clone();
-        stream_options.max_retry_delay_ms = self.max_retry_delay_ms;
-        stream_options.reasoning = if thinking_level == ThinkingLevel::Off {
-            None
-        } else {
-            Some(thinking_level)
+        let stream_options = StreamOptions {
+            session_id: self.session_id.clone(),
+            transport: self.transport.clone(),
+            max_retry_delay_ms: self.max_retry_delay_ms,
+            reasoning: if thinking_level == ThinkingLevel::Off {
+                None
+            } else {
+                Some(thinking_level)
+            },
+            ..StreamOptions::default()
         };
 
         let mut config = AgentLoopConfig::new(model, self.convert_to_llm.clone());

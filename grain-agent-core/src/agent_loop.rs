@@ -233,12 +233,12 @@ pub async fn run_agent_loop_continue(
             "Cannot continue: no messages in context".into(),
         ));
     }
-    if let Some(last) = context.messages.last() {
-        if last.role() == "assistant" {
-            return Err(AgentLoopError::Other(
-                "Cannot continue from message role: assistant".into(),
-            ));
-        }
+    if let Some(last) = context.messages.last()
+        && last.role() == "assistant"
+    {
+        return Err(AgentLoopError::Other(
+            "Cannot continue from message role: assistant".into(),
+        ));
     }
 
     let mut new_messages: Vec<AgentMessage> = Vec::new();
@@ -508,10 +508,10 @@ async fn stream_assistant_response(
 
     // 4) Resolve API key.
     let mut options = config.stream_options.clone();
-    if let Some(get_key) = &config.get_api_key {
-        if let Some(key) = get_key(config.model.provider.clone()).await {
-            options.api_key = Some(key);
-        }
+    if let Some(get_key) = &config.get_api_key
+        && let Some(key) = get_key(config.model.provider.clone()).await
+    {
+        options.api_key = Some(key);
     }
 
     // 5) Stream events.
@@ -932,13 +932,13 @@ async fn prepare_tool_call(
         if cancel.is_cancelled() {
             return Preparation::Immediate(AgentToolResult::error("Operation aborted"), true);
         }
-        if let Some(result) = outcome {
-            if result.block {
-                let reason = result
-                    .reason
-                    .unwrap_or_else(|| "Tool execution was blocked".into());
-                return Preparation::Immediate(AgentToolResult::error(reason), true);
-            }
+        if let Some(result) = outcome
+            && result.block
+        {
+            let reason = result
+                .reason
+                .unwrap_or_else(|| "Tool execution was blocked".into());
+            return Preparation::Immediate(AgentToolResult::error(reason), true);
         }
     }
 
