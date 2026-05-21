@@ -5,6 +5,10 @@
 - **`grain-agent-core`** — 与具体 LLM SDK 解耦的 agent 运行时（消息、工具、事件、循环、`Agent` 封装）。
 - **`grain-agent-harness`** — 工程化外壳（会话树、自定义消息、system prompt 装配、截断）。
 
+## 入门
+
+第一次使用，请先看 [getting-started.md](./getting-started.md)——从 mock provider 开始，逐步加入工具、事件订阅、会话持久化，最后给出对接真实 LLM provider 的 checklist。
+
 ## 模块索引
 
 ### grain-agent-core
