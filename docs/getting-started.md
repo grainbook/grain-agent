@@ -1,37 +1,146 @@
-# Getting Started
+# Your first agent (5 minutes)
 
-Walks you from zero through a full grain-agent setup: implement a mock LLM provider, register a tool, subscribe to events, persist sessions, and finally swap in a real LLM via `grain-llm-genai`.
+This tutorial assumes you've used ChatGPT or Claude as a user. **No prior agent / Rust-async experience needed.** By the end you'll have:
+
+1. A working coding-agent talking to Claude on your machine (5 min).
+2. A clear mental model of what's happening (10 min).
+3. A custom agent in Rust code with your own tool (30 min).
 
 中文版：[zh/getting-started.md](./zh/getting-started.md).
 
-> No external API keys required for sections 1–6; every example runs against an in-process mock. Section 7 shows how to plug in a real provider.
+---
+
+## Part 1 — What's an agent?
+
+A regular chatbot is a one-shot answer machine:
+
+> **You**: "What's in main.rs?"
+> **Claude**: "I can't see files on your computer."
+
+An **agent** is a chatbot with a tool belt. Your code gives the LLM a list of tools (functions it can call) and runs the conversation in a loop:
+
+```
+You         "What does main.rs do?"
+  ↓
+LLM         "I'll need to read it." → wants to call: read(path="main.rs")
+  ↓
+Your code   reads main.rs, sends back:    "<file contents>"
+  ↓
+LLM         "It's a hello-world program that..."
+```
+
+The LLM decides which tool to call; your code carries out the call. That back-and-forth loop is what `grain-agent` provides.
+
+This repo gives you:
+
+- **`grain-headless`** — a ready-to-run coding agent (read / list / search / write / shell tools, all built in).
+- **`grain-agent-core` + `grain-agent-harness`** — Rust libraries to build your own agent.
+
+We'll use both. Start with the CLI to see it work, then write your own agent.
 
 ---
 
-## 0. Prerequisites
+## Part 2 — Run a coding agent in 5 minutes
 
-- Rust stable. The workspace uses edition 2024 + resolver 3.
-- In the repo root:
+### 2.1 — Build it
 
-  ```bash
-  cargo build
-  cargo test
-  ```
-
-If both pass, you're set.
-
----
-
-## 1. New binary crate
-
-Outside the repo:
+You need Rust (stable) and an Anthropic API key (any provider works — we'll use Claude here because the default model is Claude).
 
 ```bash
-cargo new --bin my-agent
+git clone <this-repo> grain-agent
+cd grain-agent
+cargo build --release -p grain-ai-agent-headless --bin grain-headless
+```
+
+The binary lands at `./target/release/grain-headless`. Symlink it onto your PATH if you like, or use the full path.
+
+### 2.2 — Set your key
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Grain auto-detects keys by environment variable. Other supported providers: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `MOONSHOT_API_KEY`, more — see [llm-genai.md](./llm-genai.md) for the full table.
+
+### 2.3 — Ask it about a real project
+
+Point the CLI at any local code repo and ask a question:
+
+```bash
+./target/release/grain-headless \
+    -C ~/code/some-project \
+    --prompt "What does this project do? Look at the README and the main entry point."
+```
+
+You'll see the agent's reasoning live: tool calls (`→ read(...)`), tool results (`← read ...`), and the final answer. It read files on your behalf, fed them to Claude, and Claude answered with context.
+
+### 2.4 — Let it edit code
+
+Read-only by default. To let it touch files, pass `--allow-write`:
+
+```bash
+grain-headless -C ~/code/some-project --allow-write \
+    --prompt "Add a CHANGELOG.md with an initial 'Unreleased' section."
+```
+
+To also let it run shell commands (e.g. `cargo test`):
+
+```bash
+grain-headless -C ~/code/some-project --allow-write --allow-bash \
+    --prompt "Find and fix the failing test."
+```
+
+> ⚠️ `--allow-bash` lets the agent run any shell command. Run it in a project you can throw away, or inside a container, until you trust the model's behavior.
+
+### 2.5 — Multi-turn chat
+
+For longer back-and-forth, add `--interactive`:
+
+```bash
+grain-headless -C ~/code/some-project --interactive
+```
+
+You'll get a `> ` prompt. Type questions, press Enter. Type `/help` for built-in slash commands (`/skills`, `/doctor`, `/source`, `/clear`, `/exit`).
+
+### 2.6 — Sanity check + diagnostics
+
+Not sure if your environment is wired up? Run:
+
+```bash
+grain-headless -C . --doctor
+```
+
+It prints the workspace path, registered model count, which provider keys it sees in your env, and your git source info. No LLM calls — safe to run before keys are configured.
+
+---
+
+## Part 3 — How it works (the four pieces)
+
+Now that you've seen it run, here's the mental model. There are only four moving parts:
+
+| Piece | What it is | In `grain-agent` |
+|------|-----------|------------------|
+| **Model** | The LLM (Claude, GPT-4o, …) | `grain_agent_core::Model` |
+| **Tools** | Functions the LLM can call | implement `AgentTool` |
+| **System prompt** | Instructions the LLM gets at the start | `AgentOptions::system_prompt` |
+| **Loop** | Code that runs the conversation | `grain_agent_core::Agent` |
+
+Run the CLI again with **`--show-thinking`** to see the LLM's chain-of-thought streamed in dim text alongside its final answer. That's all the magic — the LLM thinks, picks a tool, your code runs the tool, the LLM continues.
+
+---
+
+## Part 4 — Build your own agent (with a custom tool)
+
+We'll write a tiny agent that knows the current weather. It demonstrates the full pattern — add a tool, register it, run a prompt.
+
+### 4.1 — New project
+
+```bash
+cargo new my-agent
 cd my-agent
 ```
 
-`Cargo.toml`:
+Edit `Cargo.toml`:
 
 ```toml
 [package]
@@ -41,184 +150,52 @@ edition = "2024"
 
 [dependencies]
 grain-agent-core    = { path = "../grain-agent/grain-agent-core" }
-grain-agent-harness = { path = "../grain-agent/grain-agent-harness" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-async-trait = "0.1"
-futures = "0.3"
-serde_json = "1"
-tokio-util = "0.7"
+grain-llm-genai     = { path = "../grain-agent/grain-llm-genai" }
+grain-llm-models    = { path = "../grain-agent/grain-llm-models" }
+tokio        = { version = "1", features = ["rt-multi-thread", "macros"] }
+async-trait  = "0.1"
+tokio-util   = "0.7"
+serde_json   = "1"
 ```
 
-Path adjustments depend on where your local checkout lives.
+(Adjust the `path = "..."` to wherever you cloned grain-agent.)
 
----
+### 4.2 — Write a tool
 
-## 2. Hello world: mock provider + single prompt
+A tool is a struct that implements `AgentTool`. The trait has two pieces:
 
-`grain-agent-core` doesn't depend on any LLM SDK — you have to provide an `LlmStream` implementation. The minimal one below always replies `"hello from mock"`:
+- **`definition()`** — name + description + JSON-Schema for arguments. The LLM reads this to decide when to call you.
+- **`execute(args)`** — the actual function. Returns text the LLM will see as the tool result.
 
-`src/main.rs`:
+Replace `src/main.rs`:
 
 ```rust
 use std::sync::Arc;
 use async_trait::async_trait;
-use futures::StreamExt;
 use grain_agent_core::{
-    Agent, AgentOptions, AssistantContent, AssistantMessage, AssistantMessageEvent,
-    AssistantStream, LlmContext, LlmStream, Model, StopReason, StreamError, StreamFn,
-    StreamOptions, TextContent, Usage,
+    Agent, AgentOptions, AgentTool, AgentToolError, AgentToolResult,
+    ToolDefinition, ToolUpdateCallback, UserContent,
 };
+use grain_llm_genai::GenaiStream;
+use grain_llm_models::Registry;
 use tokio_util::sync::CancellationToken;
 
-struct MockStream;
+/// Pretend weather lookup. In a real agent this would call a real API.
+struct WeatherTool { def: ToolDefinition }
 
-#[async_trait]
-impl LlmStream for MockStream {
-    async fn stream(
-        &self,
-        model: &Model,
-        _ctx: &LlmContext,
-        _opts: &StreamOptions,
-        _cancel: CancellationToken,
-    ) -> Result<AssistantStream, StreamError> {
-        let final_msg = AssistantMessage {
-            content: vec![AssistantContent::Text(TextContent {
-                text: "hello from mock".into(),
-            })],
-            api: model.api.clone(),
-            provider: model.provider.clone(),
-            model: model.id.clone(),
-            usage: Usage::default(),
-            stop_reason: StopReason::Stop,
-            error_message: None,
-            timestamp: 0,
-        };
-        Ok(futures::stream::iter(vec![
-            AssistantMessageEvent::Start { partial: final_msg.clone() },
-            AssistantMessageEvent::Done { result: final_msg },
-        ])
-        .boxed())
-    }
-}
-
-#[tokio::main]
-async fn main() {
-    let stream_fn: StreamFn = Arc::new(MockStream);
-
-    let model = Model {
-        id: "mock-1".into(),
-        name: "mock".into(),
-        api: "mock".into(),
-        provider: "mock".into(),
-        ..Default::default()
-    };
-
-    let mut opts = AgentOptions::new(model, stream_fn);
-    opts.system_prompt = "You are a helpful agent.".into();
-    let agent = Agent::new(opts);
-
-    agent.prompt_text("hi").await.unwrap();
-    for m in agent.state().await.messages {
-        println!("{}", m.role());
-    }
-}
-```
-
-```bash
-cargo run
-```
-
-Should print two roles — your `user` prompt and the mock `assistant`.
-
-**Hard contracts** for any `LlmStream` implementation:
-
-1. **Never** return `Err` for request / model / runtime failures. Surface failures as a terminal `AssistantMessageEvent::Error { result, .. }` (or `Done`) on the returned stream.
-2. The stream must end with **exactly one** terminal event.
-3. Fill `result.stop_reason` and `result.error_message` accurately — `Agent::finish_run` and subscribers both read them.
-
-Full contract: [core-stream.md](./core-stream.md).
-
----
-
-## 3. Add a tool
-
-Two-turn flow: first turn requests an `echo` tool call, second turn stops. Statefulness:
-
-```rust
-use std::sync::atomic::{AtomicUsize, Ordering};
-use grain_agent_core::ToolCall;
-
-struct MockStream { calls: AtomicUsize }
-
-#[async_trait]
-impl LlmStream for MockStream {
-    async fn stream(
-        &self,
-        model: &Model,
-        _ctx: &LlmContext,
-        _opts: &StreamOptions,
-        _cancel: CancellationToken,
-    ) -> Result<AssistantStream, StreamError> {
-        let n = self.calls.fetch_add(1, Ordering::SeqCst);
-        let msg = if n == 0 {
-            AssistantMessage {
-                content: vec![AssistantContent::ToolCall(ToolCall {
-                    id: "call-1".into(),
-                    name: "echo".into(),
-                    arguments: serde_json::json!({ "value": "ping" }),
-                })],
-                stop_reason: StopReason::ToolUse,
-                ..base(model)
-            }
-        } else {
-            AssistantMessage {
-                content: vec![AssistantContent::Text(TextContent { text: "done".into() })],
-                stop_reason: StopReason::Stop,
-                ..base(model)
-            }
-        };
-        Ok(futures::stream::iter(vec![
-            AssistantMessageEvent::Start { partial: msg.clone() },
-            AssistantMessageEvent::Done { result: msg },
-        ])
-        .boxed())
-    }
-}
-
-fn base(model: &Model) -> AssistantMessage {
-    AssistantMessage {
-        content: vec![],
-        api: model.api.clone(),
-        provider: model.provider.clone(),
-        model: model.id.clone(),
-        usage: Usage::default(),
-        stop_reason: StopReason::Stop,
-        error_message: None,
-        timestamp: 0,
-    }
-}
-```
-
-Tool implementation:
-
-```rust
-use grain_agent_core::{
-    AgentTool, AgentToolError, AgentToolResult, ToolDefinition, ToolUpdateCallback, UserContent,
-};
-
-struct EchoTool { def: ToolDefinition }
-
-impl EchoTool {
+impl WeatherTool {
     fn new() -> Self {
-        EchoTool {
+        WeatherTool {
             def: ToolDefinition {
-                name: "echo".into(),
-                label: "Echo".into(),
-                description: "Echo back the value".into(),
+                name: "current_weather".into(),
+                label: "Current Weather".into(),
+                description: "Return today's weather for a city. Returns a one-line summary.".into(),
                 parameters: serde_json::json!({
                     "type": "object",
-                    "properties": { "value": { "type": "string" } },
-                    "required": ["value"]
+                    "properties": {
+                        "city": { "type": "string", "description": "City name, e.g. \"Tokyo\"" }
+                    },
+                    "required": ["city"]
                 }),
                 execution_mode: None,
             },
@@ -227,8 +204,9 @@ impl EchoTool {
 }
 
 #[async_trait]
-impl AgentTool for EchoTool {
+impl AgentTool for WeatherTool {
     fn definition(&self) -> &ToolDefinition { &self.def }
+
     async fn execute(
         &self,
         _id: &str,
@@ -236,285 +214,130 @@ impl AgentTool for EchoTool {
         _cancel: CancellationToken,
         _on_update: ToolUpdateCallback,
     ) -> Result<AgentToolResult, AgentToolError> {
-        let v = args.get("value").and_then(|v| v.as_str()).unwrap_or("");
+        let city = args.get("city").and_then(|c| c.as_str()).unwrap_or("Unknown");
+        // Fake answer for the tutorial. Replace with a real HTTP call.
+        let summary = format!("In {city} today: sunny, 22°C, light breeze.");
         Ok(AgentToolResult {
-            content: vec![UserContent::text(format!("echo: {v}"))],
-            details: serde_json::json!({}),
+            content: vec![UserContent::text(summary)],
+            details: serde_json::json!({ "city": city }),
             terminate: None,
         })
     }
 }
-```
 
-Wire up in `main`:
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // 1. The LLM provider (genai-backed; reads ANTHROPIC_API_KEY etc. from env)
+    let stream = Arc::new(GenaiStream::builder().build());
 
-```rust
-let mut opts = AgentOptions::new(model, Arc::new(MockStream { calls: AtomicUsize::new(0) }));
-opts.tools = vec![Arc::new(EchoTool::new())];
-let agent = Agent::new(opts);
+    // 2. Pick a model — the registry knows its context window, capabilities, etc.
+    let registry = Registry::from_embedded_snapshot();
+    let model = registry
+        .to_core_model("anthropic/claude-sonnet-4-5")
+        .expect("model in registry");
 
-agent.prompt_text("ping").await.unwrap();
-assert_eq!(agent.state().await.messages.len(), 4);
-// 0: user("ping")  1: assistant(tool_use)  2: tool_result  3: assistant("done")
-```
+    // 3. Build an Agent with our custom tool and a focused system prompt.
+    let mut opts = AgentOptions::new(model, stream);
+    opts.system_prompt =
+        "You are a weather assistant. Use the current_weather tool to look up cities. \
+         Respond in one sentence.".into();
+    opts.tools = vec![Arc::new(WeatherTool::new())];
 
-Key points:
+    let agent = Agent::new(opts);
 
-- Tool `parameters` is JSON Schema, forwarded verbatim to the LLM.
-- `AgentToolResult.terminate = Some(true)` on **every** call in a batch ends the loop immediately.
-- `on_update` lets you emit partial results during long-running tools (surfaces as `ToolExecutionUpdate` events).
+    // 4. Subscribe to see what's happening (optional — pretty-prints events).
+    agent.subscribe(Arc::new(|event, _cancel| {
+        Box::pin(async move { println!("[event] {event:?}"); })
+    })).await;
 
-More: [core-types.md](./core-types.md), [core-agent-loop.md](./core-agent-loop.md).
+    // 5. Run a single prompt and wait for the loop to finish.
+    agent.prompt_text("What's the weather in Kyoto?").await?;
 
----
-
-## 4. Subscribe, steer, abort
-
-```rust
-use grain_agent_core::AgentEvent;
-
-let unsub = agent.subscribe(Arc::new(|event: AgentEvent, _signal| {
-    Box::pin(async move {
-        match event {
-            AgentEvent::ToolExecutionStart { tool_name, .. } => println!("→ {tool_name}"),
-            AgentEvent::ToolExecutionEnd { tool_name, is_error, .. } =>
-                println!("← {tool_name} done (error={is_error})"),
-            AgentEvent::AgentEnd { messages } => println!("agent end, {} new", messages.len()),
-            _ => {}
-        }
-    })
-})).await;
-
-agent.prompt_text("ping").await.unwrap();
-unsub.cancel().await;
-```
-
-**Subscribers are awaited serially per event** — do heavy work in `tokio::spawn`.
-
-Cancel mid-stream:
-
-```rust
-agent.abort().await;  // signals the inner stream + tool::execute via shared CancellationToken
-```
-
-Steer (insert mid-turn) vs follow-up (re-run after the agent looks done):
-
-```rust
-agent.steer(AgentMessage::user(/* ... */)).await;
-agent.follow_up(AgentMessage::user(/* ... */)).await;
-```
-
-Full API: [core-agent.md](./core-agent.md).
-
----
-
-## 5. Harness: sessions + custom messages
-
-`grain-agent-harness` adds three independent pieces on top of core:
-
-1. Session tree (`Session`/`SessionRepo`) — tree-shaped transcript, supports branching / fork / compaction.
-2. Custom messages (`branchSummary`/`compactionSummary`/`custom`) + `convert_to_llm` that projects them to LLM user messages.
-3. System-prompt assembly (`<available_skills>` XML block renderer).
-
-### 5.1 Sessions
-
-```rust
-use grain_agent_harness::{InMemorySessionRepo, SessionRepo};
-use grain_agent_core::{AgentMessage, TextContent, UserContent, UserMessage};
-
-let repo = InMemorySessionRepo::new();
-let session = repo.create(None).await.unwrap();
-let meta = session.metadata().await;
-
-session.append_message(AgentMessage::user(UserMessage {
-    content: vec![UserContent::Text(TextContent { text: "hi".into() })],
-    timestamp: 0,
-})).await.unwrap();
-session.append_session_name("first chat").await.unwrap();
-
-let reopened = repo.open(&meta).await.unwrap();
-let ctx = reopened.build_context().await;     // SessionContext { messages, thinking_level, model }
-```
-
-`build_context()` automatically handles compaction entries (only entries from `first_kept_entry_id` are kept; a `compactionSummary` is prepended). Full reference: [harness-session.md](./harness-session.md).
-
-### 5.2 Custom messages
-
-By default `Agent` drops every `AgentMessage::Custom`. Wire the harness `convert_to_llm` to project `branchSummary` / `compactionSummary` / `custom` to LLM user messages:
-
-```rust
-use std::sync::Arc;
-use grain_agent_core::ConvertToLlmFn;
-use grain_agent_harness::convert_to_llm;
-
-let convert: ConvertToLlmFn = Arc::new(|msgs| {
-    Box::pin(async move { convert_to_llm(msgs) })
-});
-
-let mut opts = AgentOptions::new(model, stream_fn);
-opts.convert_to_llm = Some(convert);
-```
-
-Reference: [harness-messages.md](./harness-messages.md).
-
-### 5.3 Skills in the system prompt
-
-```rust
-use grain_agent_harness::{format_skills_for_system_prompt, system_prompt::Skill};
-
-let skills = vec![Skill {
-    name: "Bash".into(),
-    description: "Runs shell commands".into(),
-    file_path: "/skills/bash/SKILL.md".into(),
-    disable_model_invocation: false,
-}];
-
-let block = format_skills_for_system_prompt(&skills);
-agent.set_system_prompt(format!("You are helpful.\n\n{block}")).await;
-```
-
-Skills with `disable_model_invocation = true` are filtered out of the rendered block. Reference: [harness-system-prompt.md](./harness-system-prompt.md).
-
-### 5.4 Context-window guard
-
-When the transcript grows close to the model's context window, `context_guard` truncates before the next request:
-
-```rust
-use std::sync::Arc;
-use grain_agent_harness::context_guard::{ContextGuard, ContextGuardPolicy};
-use grain_llm_models::Registry;
-
-let registry = Arc::new(Registry::from_embedded_snapshot());
-let guard = ContextGuard::new(registry, "anthropic/claude-sonnet-4-5")
-    .with_policy(ContextGuardPolicy::DropOldest)
-    .with_headroom_tokens(2048)
-    .into_transform_fn();
-
-let mut opts = AgentOptions::new(model, stream_fn);
-opts.transform_context = Some(guard);
-```
-
-Reference: [context-guard.md](./context-guard.md).
-
----
-
-## 6. Patterns to know
-
-### Rewrite a tool result (after_tool_call)
-
-```rust
-use grain_agent_core::{AfterToolCallFn, AfterToolCallResult, UserContent};
-
-let after: AfterToolCallFn = Arc::new(|ctx, _cancel| Box::pin(async move {
-    if ctx.tool_call.name == "echo" {
-        Some(AfterToolCallResult {
-            content: Some(vec![UserContent::text("[redacted]")]),
-            ..Default::default()
-        })
-    } else {
-        None
+    // 6. Inspect the final transcript.
+    let state = agent.state().await;
+    for msg in &state.messages {
+        println!("--- {} ---", msg.role());
     }
-}));
-opts.after_tool_call = Some(after);
+    Ok(())
+}
 ```
 
-### Swap model / thinking between turns
-
-```rust
-use grain_agent_core::{AgentLoopTurnUpdate, PrepareNextTurnFn, ThinkingLevel};
-
-let prepare: PrepareNextTurnFn = Arc::new(|ctx| Box::pin(async move {
-    if ctx.message.usage.total_tokens > 5_000 {
-        Some(AgentLoopTurnUpdate {
-            thinking_level: Some(ThinkingLevel::High),
-            ..Default::default()
-        })
-    } else {
-        None
-    }
-}));
-```
-
-Setters like `Agent::set_model(..)` only affect the **next** loop construction; running loops can only swap via `prepare_next_turn`.
-
-### Parallel vs sequential tool execution
-
-Default is `ToolExecutionMode::Parallel`. If any invoked tool's `execution_mode == Some(Sequential)`, the **whole batch** degrades to serial. Parallel mode still preserves source order in the resulting `ToolResultMessage[]`.
-
----
-
-## 7. Real LLM via `grain-llm-genai`
-
-Stop reading from `MockStream` — `grain-llm-genai` is the production `LlmStream` implementation.
-
-```toml
-[dependencies]
-grain-llm-models  = { path = "..." }
-grain-llm-genai   = { path = "..." }
-```
-
-```rust
-use std::sync::Arc;
-use grain_agent_core::{Agent, AgentOptions};
-use grain_llm_genai::{GenaiStream, OpenAiCompatPreset};
-use grain_llm_models::Registry;
-
-let stream = Arc::new(
-    GenaiStream::builder()
-        .with_openai_compat_preset(OpenAiCompatPreset::Common)    // kimi + siliconflow
-        .build(),
-);
-
-let model = Registry::from_embedded_snapshot()
-    .to_core_model("anthropic/claude-sonnet-4-5")
-    .unwrap();
-
-let agent = Agent::new(AgentOptions::new(model, stream));
-agent.prompt_text("Hello!").await.unwrap();
-```
-
-Required env var depends on the model. genai's auto-resolution + our `EnvKeyResolver::default_mapping()` together cover the canonical names (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `MOONSHOT_API_KEY`, …).
-
-Custom env var per provider:
-
-```rust
-GenaiStream::builder()
-    .with_env_override("openai", "MY_OPENAI_KEY")
-    .build();
-```
-
-Custom OpenAI-compat host:
-
-```rust
-use grain_llm_genai::OpenAiCompatEndpoint;
-GenaiStream::builder()
-    .with_openai_compat(OpenAiCompatEndpoint::new(
-        "my-host", "https://api.example.com/v1", "MY_HOST_API_KEY",
-    ))
-    .build();
-```
-
-Full surface: [llm-genai.md](./llm-genai.md), [llm-models.md](./llm-models.md).
-
----
-
-## 8. Further reading
-
-- [core-types.md](./core-types.md) — every data type / event
-- [core-stream.md](./core-stream.md) — provider implementation contract
-- [core-agent-loop.md](./core-agent-loop.md) — loop lifecycle, hook details
-- [core-agent.md](./core-agent.md) — `Agent` API
-- [harness-messages.md](./harness-messages.md) — custom message extension points
-- [harness-session.md](./harness-session.md) — session tree, fork, move-to
-- [harness-system-prompt.md](./harness-system-prompt.md) — skills XML rendering
-- [harness-truncate.md](./harness-truncate.md) — output truncation utilities
-- [context-guard.md](./context-guard.md) — context-window enforcement
-- [llm-models.md](./llm-models.md) — model registry / models.dev integration
-- [llm-genai.md](./llm-genai.md) — genai-backed `LlmStream` implementation
-
-Runnable minimal examples in the repo:
+### 4.3 — Run it
 
 ```bash
-cargo test -p grain-agent-core    smoke -- --nocapture
-cargo test -p grain-agent-harness smoke -- --nocapture
+export ANTHROPIC_API_KEY=...
+cargo run
 ```
+
+You'll see:
+
+- An `[event] ToolExecutionStart { tool_name: "current_weather", ... }`
+- Followed by `[event] ToolExecutionEnd { ... }`
+- And a final `[event] MessageEnd` containing Claude's one-sentence answer.
+
+That's the agent loop. The LLM saw your `current_weather` tool, decided to call it, your code returned a fake weather string, the LLM rolled that into its final answer.
+
+### 4.4 — What you can change next
+
+- **Real HTTP call** in `execute()` — swap `format!(...)` for a `reqwest::get(...)`.
+- **More tools** — add a `forecast_tool`, a `historical_temperature_tool`. Push each onto `opts.tools`.
+- **Persistence** — set `opts.session_id` and use `grain_agent_harness::JsonlSessionRepo` to save the transcript to disk between runs ([harness-session.md](./harness-session.md)).
+- **Long conversations** — wire `grain_agent_harness::compaction_prepare_next_turn` into `opts.prepare_next_turn` so old turns get summarized before they blow the context window ([context-guard.md](./context-guard.md)).
+- **Other providers** — point at `openai/gpt-4o` or `kimi/moonshot-v1-8k` instead. The OpenAI-compat preset handles Kimi out of the box ([llm-genai.md](./llm-genai.md)).
+
+---
+
+## Part 5 — When you hit a wall
+
+| Symptom | Most likely cause | Where to look |
+|---------|------------------|--------------|
+| "no api key" / "auth failed" | env var not set | run `grain-headless --doctor` to see what's detected |
+| "unknown model" | typo'd model id | check `Registry::from_embedded_snapshot().iter()` or [llm-models.md](./llm-models.md) |
+| Agent loops forever | tool always returns same result, model never gets unstuck | add `terminate: Some(true)` to your tool result or shorten your prompt |
+| Lost context after long chat | context window overflowed | enable [context-guard](./context-guard.md) or [compaction](./harness-messages.md) |
+| Tool didn't get called | description / JSON-schema unclear | rewrite the tool description like you'd describe it to a colleague |
+| Strange output mid-stream | UTF-8 / terminal issue | try `--output json` and pipe to `jq` |
+
+When you're really stuck, run `grain-headless --doctor` first — it prints workspace + env + registry health in one shot.
+
+---
+
+## Part 6 — Reference docs
+
+You now know enough to read the rest. Pick what you need:
+
+### Concepts and core API
+
+- [core-types.md](./core-types.md) — every data type
+- [core-stream.md](./core-stream.md) — the `LlmStream` contract (only matters if you implement a custom provider)
+- [core-agent-loop.md](./core-agent-loop.md) — the low-level loop, hooks
+- [core-agent.md](./core-agent.md) — the high-level `Agent` wrapper
+
+### Harness (sessions, prompts, budget enforcement)
+
+- [harness-messages.md](./harness-messages.md) — custom-message extension
+- [harness-session.md](./harness-session.md) — session tree + fork
+- [harness-system-prompt.md](./harness-system-prompt.md) — `<available_skills>` rendering
+- [harness-truncate.md](./harness-truncate.md) — output truncation
+- [context-guard.md](./context-guard.md) — context-window budget enforcement
+
+### LLM provider stack
+
+- [llm-models.md](./llm-models.md) — the model registry
+- [llm-genai.md](./llm-genai.md) — the `genai`-backed `LlmStream` implementation
+
+### `grain-headless` (the CLI) deep dives
+
+Every Phase added new CLI capabilities; the inline `--help` is the canonical reference:
+
+```bash
+grain-headless --help
+```
+
+Highlights:
+
+- Built-in tools: `read` / `list` / `glob` / `grep` / `source_info` (always), `write` / `edit` (with `--allow-write`), `bash` (with `--allow-bash`), `web_fetch` (with `--allow-web`), `semantic_search` (with `--allow-semantic-search` + `--features rig` build).
+- Outputs: `--output text` (human) or `--output json` (one event per line, for piping into jq).
+- Persistence: `--session <path>` JSONL transcript across runs; `--telemetry-file <path>` opt-in audit log.
+- Slash commands in `--interactive`: `/help`, `/clear`, `/skills`, `/doctor`, `/source`, `/compact`, `/exit`.
+- Config files: `.grain/config.toml` (per-workspace) or `~/.config/grain/config.toml` (user) — see [config](./config.md).
