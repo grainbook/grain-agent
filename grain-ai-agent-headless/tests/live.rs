@@ -305,13 +305,26 @@ async fn live_agent_with_workspace_tools_round_trip() {
     agent
         .subscribe(Arc::new(|event, _signal| {
             Box::pin(async move {
-                if let AgentEvent::ToolExecutionEnd {
-                    tool_name,
-                    is_error,
-                    ..
-                } = &event
-                {
-                    eprintln!("[tool {tool_name} done, is_error={is_error}]");
+                match &event {
+                    AgentEvent::ToolExecutionStart { tool_name, args, .. } => {
+                        eprintln!("→ {tool_name}({args})");
+                    }
+                    AgentEvent::ToolExecutionEnd { tool_name, is_error, result, .. } => {
+                        let preview = result
+                            .content
+                            .iter()
+                            .filter_map(|c| match c {
+                                UserContent::Text(t) => Some(t.text.as_str()),
+                                _ => None,
+                            })
+                            .next()
+                            .unwrap_or("")
+                            .chars()
+                            .take(200)
+                            .collect::<String>();
+                        eprintln!("← {tool_name} is_error={is_error}: {preview}");
+                    }
+                    _ => {}
                 }
             })
         }))

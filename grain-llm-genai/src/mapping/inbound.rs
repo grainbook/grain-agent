@@ -6,6 +6,7 @@
 //! Tested in isolation by feeding a hand-crafted sequence of events
 //! (see `tests/inbound.rs`).
 
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use genai::chat::{ChatStreamEvent, StreamEnd, ToolCall as GenaiToolCall};
@@ -35,6 +36,15 @@ pub struct InboundState {
     blocks: Vec<AssistantContent>,
     open: Option<OpenBlock>,
     started: bool,
+    /// Map from provider's `tool_call_id` to the index in `blocks` that
+    /// holds the in-flight ToolCall block. genai 0.6 streams tool-call
+    /// arguments as **cumulative** chunks — each subsequent chunk carries
+    /// the latest accumulated JSON for the same call_id. Without this
+    /// map, the old "push a new block every chunk" behavior produced N
+    /// duplicate ToolCall blocks for one call, which the agent loop
+    /// would then execute N times and which provider validation
+    /// (DeepSeek's 400, etc.) rejects as duplicate tool_call_ids.
+    tool_call_indices: HashMap<String, usize>,
 }
 
 #[derive(Debug)]
@@ -52,6 +62,7 @@ impl InboundState {
             blocks: Vec::new(),
             open: None,
             started: false,
+            tool_call_indices: HashMap::new(),
         }
     }
 
@@ -175,22 +186,44 @@ impl InboundState {
     fn on_tool_call(&mut self, tc: GenaiToolCall) -> Vec<AssistantMessageEvent> {
         let mut out = Vec::new();
         self.ensure_started(&mut out);
+
+        // genai 0.6 streams cumulative arguments: each ToolCallChunk for
+        // the same call_id carries the latest accumulated JSON. If we've
+        // already seen this id this turn, overwrite the existing block's
+        // arguments instead of appending a duplicate. The cumulative
+        // semantics mean we always end up with the final, complete JSON.
+        let arguments = normalize_tool_args(tc.fn_arguments);
+        if let Some(&idx) = self.tool_call_indices.get(&tc.call_id) {
+            if let AssistantContent::ToolCall(existing) = &mut self.blocks[idx] {
+                existing.arguments = arguments;
+                // No event — subscribers already saw a Toolcall{Start,End}
+                // for this id; they can refresh from the partial when
+                // they care about the latest args.
+            }
+            return out;
+        }
+
         if self.open.is_some() {
             self.close_open(&mut out);
         }
         let grain_tc = GrainToolCall {
-            id: tc.call_id,
+            id: tc.call_id.clone(),
             name: tc.fn_name,
-            arguments: tc.fn_arguments,
+            arguments,
         };
         self.blocks.push(AssistantContent::ToolCall(grain_tc));
         let idx = self.blocks.len() - 1;
+        self.tool_call_indices.insert(tc.call_id, idx);
         out.push(AssistantMessageEvent::ToolcallStart {
             partial: self.partial(),
             content_index: idx,
         });
-        // genai emits one ToolCallChunk per fully-assembled call, so close
-        // immediately. (Streaming partial tool-call args is not exposed.)
+        // Emit a paired End immediately for the *first* chunk of this id so
+        // subscribers that only watch Start/End boundaries see a
+        // well-formed sequence; subsequent argument refinements update
+        // the block silently. The agent loop only executes tool calls
+        // from the final AssistantMessage on `Done`, so it always picks
+        // up the fully-accumulated args.
         out.push(AssistantMessageEvent::ToolcallEnd {
             partial: self.partial(),
             content_index: idx,
@@ -285,4 +318,21 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Normalize a `tool_call.fn_arguments` value to a JSON object.
+///
+/// genai 0.6 sometimes delivers `fn_arguments` as a `Value::String` whose
+/// content is a JSON-encoded object (cumulative streaming sends partial
+/// JSON as a string until the call is complete). Our tools then run
+/// `serde_json::from_value::<ToolArgs>(args)` and fail with
+/// `invalid type: string "...", expected struct ToolArgs`. Re-parse the
+/// inner string when we see it; pass through everything else unchanged.
+fn normalize_tool_args(raw: serde_json::Value) -> serde_json::Value {
+    if let serde_json::Value::String(s) = &raw
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s)
+    {
+        return parsed;
+    }
+    raw
 }
