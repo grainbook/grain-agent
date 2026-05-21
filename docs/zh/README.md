@@ -1,13 +1,13 @@
 # grain-agent 使用文档
 
-> English version: [../README.md](../README.md). 此目录是中文本地化版本，已有的核心 / harness 模块文档保持完整；`grain-llm-models` / `grain-llm-genai` / `context_guard` 的中文版尚未翻译，请参考英文版。
+> English version: [../README.md](../README.md). 此目录是完整的中文本地化版本。
 
 本仓库是 [`@earendil-works/pi-agent-core`](https://github.com/earendil-works/pi) 的 Rust 移植，由四个 workspace crate 组成：
 
 - **`grain-agent-core`** — 与具体 LLM SDK 解耦的 agent 运行时（消息、工具、事件、循环、`Agent` 封装）。
 - **`grain-agent-harness`** — 工程化外壳（会话树、自定义消息、system prompt 装配、截断、context guard）。
-- **`grain-llm-models`** — 标准化模型注册表（models.dev 数据，descriptor + capability + 价格）。详见 [../llm-models.md](../llm-models.md)（英文）。
-- **`grain-llm-genai`** — 基于 [`genai`](https://crates.io/crates/genai) 的 `LlmStream` 实现（builder、env-key resolver、OpenAI-compat preset）。详见 [../llm-genai.md](../llm-genai.md)（英文）。
+- **`grain-llm-models`** — 标准化模型注册表（models.dev 数据，descriptor + capability + 价格）。
+- **`grain-llm-genai`** — 基于 [`genai`](https://crates.io/crates/genai) 的 `LlmStream` 实现（builder、env-key resolver、OpenAI-compat preset）。
 
 ## 入门
 
@@ -32,6 +32,14 @@
 | `session` | [harness-session.md](./harness-session.md) | 会话树、存储 trait、内存实现、分支与 fork |
 | `system_prompt` | [harness-system-prompt.md](./harness-system-prompt.md) | `<available_skills>` XML 块生成 |
 | `truncate` | [harness-truncate.md](./harness-truncate.md) | 工具输出 head/tail 截断工具 |
+| `context_guard` | [context-guard.md](./context-guard.md) | 基于 Registry 的 `transform_context` 预算守门 |
+
+### LLM 集成
+
+| Crate | 文档 | 简介 |
+|-------|------|------|
+| `grain-llm-models` | [llm-models.md](./llm-models.md) | 模型 descriptor + registry、vendored models.dev snapshot、可选 runtime fetch |
+| `grain-llm-genai` | [llm-genai.md](./llm-genai.md) | 基于 `genai` 0.5 的 `LlmStream`：builder、env keys、OpenAI-compat 路由 |
 
 ## 快速上手
 
