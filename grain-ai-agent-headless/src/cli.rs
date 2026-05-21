@@ -111,6 +111,12 @@ pub struct Args {
     /// for programmatic consumers (`jq`, scripts, …).
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output: OutputFormat,
+
+    /// Opt-in telemetry log: every `AgentEvent` is appended as one
+    /// JSON line to this file. Local-only; nothing is sent over the
+    /// network. Off when unset.
+    #[arg(long)]
+    pub telemetry_file: Option<PathBuf>,
 }
 
 impl Args {
@@ -260,6 +266,18 @@ pub async fn run(args: Args) -> Result<(), CliError> {
     opts.transform_context = Some(guard);
 
     let agent = Agent::new(opts);
+
+    // --- Telemetry subscription -------------------------------------------
+    if let Some(path) = &args.telemetry_file {
+        let sink = Arc::new(crate::telemetry::TelemetrySink::open(path)?);
+        let sink_clone = sink.clone();
+        agent
+            .subscribe(Arc::new(move |event, _signal| {
+                let s = sink_clone.clone();
+                Box::pin(async move { s.record(&event) })
+            }))
+            .await;
+    }
 
     // --- Session writer subscription --------------------------------------
     if let Some(path) = &args.session {

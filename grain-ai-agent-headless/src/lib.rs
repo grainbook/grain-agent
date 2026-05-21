@@ -30,11 +30,14 @@
 pub mod cli;
 pub mod config;
 pub mod diagnostics;
+pub mod extensions;
+pub mod migrations;
 pub mod prompt;
 pub mod runtime;
 pub mod session;
 pub mod skills;
 pub mod slash;
+pub mod telemetry;
 pub mod tools;
 pub mod workspace;
 
@@ -45,6 +48,12 @@ pub use cli::{
     Args, EventPrinter, EventSink, JsonEventPrinter, OpenAiCompatChoice, OutputFormat, run,
 };
 pub use config::{ArgDefaults, ConfigError, ConfigFile};
+pub use extensions::{Extension, ExtensionRegistry};
+pub use migrations::{
+    CURRENT_SCHEMA_VERSION, Migration, MigrationError, default_migrations, migrate_all,
+    migrate_session, schema_version_of, stamp_current_version,
+};
+pub use telemetry::{TelemetryError, TelemetrySink};
 pub use prompt::{
     DEFAULT_CODING_AGENT_SYSTEM_PROMPT, FULL_CODING_AGENT_SYSTEM_PROMPT,
     WRITE_ENABLED_CODING_AGENT_SYSTEM_PROMPT, coding_agent_system_prompt,
