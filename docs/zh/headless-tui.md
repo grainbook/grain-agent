@@ -32,6 +32,8 @@ FOOTER         快捷键提示
 
 弹层（help / doctor / skills / 主题 / provider）是定尺寸居中卡片，背景色取自主题的 `surface` slot，和主视图明显区分。
 
+**文本选择**：TUI 不捕获鼠标事件，终端原生的拖选 / 右键复制在 transcript / 弹层 / 输入框里都能用。粘贴用常规终端快捷键（macOS `⌘V`，Linux 多数终端 `Ctrl-Shift-V`）。
+
 ---
 
 ## 按键

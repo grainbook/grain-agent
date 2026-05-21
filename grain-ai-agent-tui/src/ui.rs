@@ -17,6 +17,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Clear, Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
     AppState, Focus, Overlay, SLASH_CATALOG, TranscriptKind, TranscriptLine,
@@ -282,10 +283,13 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &Pal
     frame.render_widget(Paragraph::new(line), area);
 
     if state.focus == Focus::Input && state.overlay.is_none() {
-        // "› " is 2 cells wide (one glyph + space).
-        let col_offset = 2 + state.input[..state.cursor.min(state.input.len())]
-            .chars()
-            .count() as u16;
+        // "› " is 2 cells wide (one glyph + space). After it we need
+        // the *visual* width of the input up to the byte-cursor, not
+        // the char count — CJK / emoji glyphs occupy 2 cells each and
+        // a naive `.chars().count()` parked the cursor inside the last
+        // wide glyph after typing it.
+        let prefix = &state.input[..state.cursor.min(state.input.len())];
+        let col_offset = 2 + UnicodeWidthStr::width(prefix) as u16;
         let cx = area
             .x
             .saturating_add(col_offset)

@@ -10,9 +10,7 @@ use std::io::{self, Stdout};
 use std::time::Duration;
 
 use crossterm::{
-    event::{
-        DisableMouseCapture, EnableMouseCapture, Event as CtEvent, KeyEventKind, poll, read,
-    },
+    event::{Event as CtEvent, KeyEventKind, poll, read},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -144,17 +142,17 @@ fn resolve_themes(themes_dir: &std::path::Path, requested: &str) -> (Vec<Theme>,
 fn init_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // Mouse capture is intentionally OFF. We don't consume any mouse
+    // events ourselves, and leaving it disabled lets the terminal's
+    // native text-selection (drag to highlight, ⌘C/Ctrl-Shift-C to
+    // copy) work directly — no Option/Shift bypass needed.
+    execute!(stdout, EnterAlternateScreen)?;
     Terminal::new(CrosstermBackend::new(stdout))
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
 }

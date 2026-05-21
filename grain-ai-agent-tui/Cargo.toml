@@ -14,6 +14,7 @@ tokio-util = { workspace = true }
 futures = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+unicode-width = { workspace = true }
 grain-agent-core = { workspace = true }
 grain-agent-harness = { workspace = true }
 grain-llm-models = { workspace = true }

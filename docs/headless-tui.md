@@ -32,6 +32,8 @@ FOOTER         shortcuts hint
 
 Overlays (help, doctor, skills, theme picker, provider picker) render as fixed-size centered cards on top of the layout, with a distinct background color from the theme's `surface` palette slot.
 
+**Text selection.** The TUI does not capture mouse events — your terminal's native drag-to-select / right-click-copy keeps working everywhere (transcript, overlays, input). Paste with the usual terminal shortcut (`⌘V` on macOS, `Ctrl-Shift-V` on most Linux terms).
+
 ---
 
 ## Keys
