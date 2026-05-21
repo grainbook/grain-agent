@@ -6,6 +6,19 @@
 //! Wiring: `cli::run` creates a [`TelemetrySink`] if `--telemetry-file`
 //! is set, subscribes it to the agent's event bus, and the sink writes
 //! one `{ "ts": ..., "event": ... }` line per `AgentEvent`.
+//!
+//! # Sensitive data warning
+//!
+//! Event payloads include the **full** content of `MessageEnd`
+//! (user prompts), `ToolExecutionStart { args }`, and
+//! `ToolExecutionEnd { result }`. Tool arguments can contain API keys,
+//! credentials, or other secrets the user typed; tool results contain
+//! whatever file contents the agent read. Treat the telemetry file as
+//! you would a shell-history log: do not share it without redaction.
+//! No automatic redaction is applied — that's intentional, so callers
+//! who need a complete audit trail get one, but it means callers who
+//! want to publish or ship the file should run their own scrubbing
+//! pass.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

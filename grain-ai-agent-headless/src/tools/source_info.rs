@@ -55,7 +55,14 @@ impl AgentTool for SourceInfoTool {
         _cancel: CancellationToken,
         _on_update: ToolUpdateCallback,
     ) -> Result<AgentToolResult, AgentToolError> {
-        let body = render_source_info_block(self.workspace.root(), 0);
+        // `render_source_info_block` shells out to `git` synchronously.
+        // Offload to a blocking worker so the agent runtime keeps moving
+        // while git is doing its thing (`git status` on a large repo can
+        // take seconds).
+        let root = self.workspace.root().to_path_buf();
+        let body = tokio::task::spawn_blocking(move || render_source_info_block(&root, 0))
+            .await
+            .map_err(|e| AgentToolError::msg(format!("source_info task: {e}")))?;
         Ok(AgentToolResult {
             content: vec![UserContent::text(body)],
             details: serde_json::json!({}),

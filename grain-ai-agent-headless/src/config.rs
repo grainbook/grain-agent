@@ -83,54 +83,65 @@ impl ConfigFile {
         Ok(merged)
     }
 
-    /// Apply this config's set fields onto `args` for every field that the
-    /// caller hasn't already specified on the command line. The CLI defaults
-    /// match clap's `default_value_t`, so we use a "looks like the default"
-    /// heuristic for booleans / paths; explicit fields the caller set
-    /// remain in place.
-    pub fn apply_to_args(&self, args: &mut crate::cli::Args, defaults: &ArgDefaults) {
-        if args.model == defaults.model
+    /// Apply this config's set fields onto `args`, but only for arguments
+    /// the user did NOT explicitly pass on the command line. `explicit`
+    /// is the set of clap argument ids whose value came from the user
+    /// (computed via `ArgMatches::value_source`); anything not in it had
+    /// the clap default and is overridable by config.
+    ///
+    /// Bool fields in the config are honored in both directions: a config
+    /// `allow_bash = false` will turn off the corresponding flag if the
+    /// CLI didn't enable it explicitly. This avoids the asymmetric "config
+    /// can enable but not disable" surprise reported in code review (L-4).
+    pub fn apply_to_args(
+        &self,
+        args: &mut crate::cli::Args,
+        explicit: &std::collections::HashSet<String>,
+        _defaults: &ArgDefaults,
+    ) {
+        if !explicit.contains("model")
             && let Some(m) = &self.model
         {
             args.model = m.clone();
         }
-        if args.headroom_tokens == defaults.headroom_tokens
+        if !explicit.contains("headroom_tokens")
             && let Some(h) = self.headroom_tokens
         {
             args.headroom_tokens = h;
         }
-        if !args.show_thinking
-            && let Some(true) = self.show_thinking
+        if !explicit.contains("show_thinking")
+            && let Some(b) = self.show_thinking
         {
-            args.show_thinking = true;
+            args.show_thinking = b;
         }
-        if matches!(args.openai_compat, crate::cli::OpenAiCompatChoice::Common)
+        if !explicit.contains("openai_compat")
             && let Some(s) = self.openai_compat.as_deref()
             && let Some(parsed) = parse_openai_compat(s)
         {
             args.openai_compat = parsed;
         }
-        if !args.allow_write
-            && let Some(true) = self.allow_write
+        if !explicit.contains("allow_write")
+            && let Some(b) = self.allow_write
         {
-            args.allow_write = true;
+            args.allow_write = b;
         }
-        if !args.allow_bash
-            && let Some(true) = self.allow_bash
+        if !explicit.contains("allow_bash")
+            && let Some(b) = self.allow_bash
         {
-            args.allow_bash = true;
+            args.allow_bash = b;
         }
-        if !args.allow_web
-            && let Some(true) = self.allow_web
+        if !explicit.contains("allow_web")
+            && let Some(b) = self.allow_web
         {
-            args.allow_web = true;
+            args.allow_web = b;
         }
-        if !args.allow_semantic_search
-            && let Some(true) = self.allow_semantic_search
+        if !explicit.contains("allow_semantic_search")
+            && let Some(b) = self.allow_semantic_search
         {
-            args.allow_semantic_search = true;
+            args.allow_semantic_search = b;
         }
-        if args.skills_dir.is_none()
+        if !explicit.contains("skills_dir")
+            && args.skills_dir.is_none()
             && let Some(d) = &self.skills_dir
         {
             args.skills_dir = Some(d.clone());
@@ -242,6 +253,60 @@ mod tests {
         assert_eq!(cfg.model.as_deref(), Some("openai/gpt-4o"));
         assert_eq!(cfg.allow_write, Some(true));
         assert_eq!(cfg.headroom_tokens, Some(8192));
+    }
+
+    #[test]
+    fn apply_to_args_respects_explicit_cli_flag() {
+        use crate::cli::Args;
+        use clap::Parser;
+        let mut args = Args::try_parse_from([
+            "grain-headless",
+            "--model",
+            "anthropic/claude-sonnet-4-5",
+        ])
+        .unwrap();
+        let cfg = ConfigFile {
+            model: Some("openai/gpt-4o".into()),
+            ..Default::default()
+        };
+        let mut explicit = std::collections::HashSet::new();
+        explicit.insert("model".to_string());
+        cfg.apply_to_args(&mut args, &explicit, &Args::cli_defaults());
+        // CLI explicitly set model — config must not override.
+        assert_eq!(args.model, "anthropic/claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn apply_to_args_uses_config_when_cli_implicit() {
+        use crate::cli::Args;
+        use clap::Parser;
+        let mut args = Args::try_parse_from(["grain-headless"]).unwrap();
+        let cfg = ConfigFile {
+            model: Some("openai/gpt-4o".into()),
+            allow_bash: Some(true),
+            ..Default::default()
+        };
+        let explicit = std::collections::HashSet::new();
+        cfg.apply_to_args(&mut args, &explicit, &Args::cli_defaults());
+        assert_eq!(args.model, "openai/gpt-4o");
+        assert!(args.allow_bash);
+    }
+
+    #[test]
+    fn apply_to_args_honors_explicit_false_in_config() {
+        use crate::cli::Args;
+        use clap::Parser;
+        // Args::default for allow_bash is false; config explicitly says
+        // false; expected behavior: stay false (i.e. config-as-stated wins
+        // when CLI wasn't given).
+        let mut args = Args::try_parse_from(["grain-headless"]).unwrap();
+        let cfg = ConfigFile {
+            allow_bash: Some(false),
+            ..Default::default()
+        };
+        let explicit = std::collections::HashSet::new();
+        cfg.apply_to_args(&mut args, &explicit, &Args::cli_defaults());
+        assert!(!args.allow_bash);
     }
 
     #[test]

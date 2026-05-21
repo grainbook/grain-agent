@@ -59,12 +59,27 @@ pub fn find_skills(dir: &Path) -> Result<Vec<Skill>, SkillsError> {
     for entry in entries.flatten() {
         let path = entry.path();
         let Ok(file_type) = entry.file_type() else { continue };
-        if !file_type.is_dir() {
+        // Refuse symlinked skill directories (and symlinked SKILL.md inside
+        // them): a `<dir>/.claude/skills/evil` pointing at `/etc/` lets a
+        // malicious workspace's skill metadata get injected into the system
+        // prompt with a path the LLM might then try to read. `file_type()`
+        // on Unix returns `is_symlink()` (not `is_dir()`) for symlinks-to-
+        // dirs, so this also covers the cross-platform fallback case.
+        if !file_type.is_dir() || file_type.is_symlink() {
             continue;
         }
         let skill_md = path.join("SKILL.md");
-        if !skill_md.is_file() {
-            continue;
+        match std::fs::symlink_metadata(&skill_md) {
+            Ok(m) if m.file_type().is_symlink() => {
+                eprintln!(
+                    "[warn] grain-headless: skipping symlinked skill file {}",
+                    skill_md.display()
+                );
+                continue;
+            }
+            Ok(m) if !m.is_file() => continue,
+            Err(_) => continue,
+            Ok(_) => {}
         }
         match read_skill(&skill_md, &path) {
             Ok(skill) => skills.push(skill),
@@ -135,10 +150,21 @@ fn parse_skill(content: &str, skill_md: &Path, dir: &Path) -> Skill {
 
 /// Extract the body between the first pair of `---` fences. Returns `None`
 /// if no frontmatter is present.
+///
+/// Tolerant of a leading UTF-8 BOM (`\u{FEFF}`) and CRLF line endings —
+/// both are common when SKILL.md is authored on Windows or saved via
+/// "UTF-8 with BOM" editors.
 fn extract_frontmatter(content: &str) -> Option<&str> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let body = content.strip_prefix("---")?;
-    let body = body.strip_prefix('\n').unwrap_or(body);
-    let end = body.find("\n---")?;
+    let body = body
+        .strip_prefix("\r\n")
+        .or_else(|| body.strip_prefix('\n'))
+        .unwrap_or(body);
+    // Match either Unix or CRLF closing fence.
+    let end = body
+        .find("\n---")
+        .or_else(|| body.find("\r\n---"))?;
     Some(&body[..end])
 }
 

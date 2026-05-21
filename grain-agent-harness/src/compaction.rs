@@ -261,13 +261,22 @@ async fn produce_summary(
     let mut summary = String::new();
     while let Some(event) = stream.next().await {
         match event {
-            AssistantMessageEvent::Done { result } | AssistantMessageEvent::Error { result, .. } => {
+            AssistantMessageEvent::Done { result } => {
                 for c in result.content {
                     if let AssistantContent::Text(t) = c {
                         summary.push_str(&t.text);
                     }
                 }
                 break;
+            }
+            // The summarizer hit an error. Don't silently take whatever
+            // partial / error text the provider emitted as a "summary"
+            // and replace the real transcript prefix with it — that
+            // would lose context permanently. Surface the failure
+            // cleanly; `compaction_prepare_next_turn` downgrades to
+            // "skip this turn" without breaking the loop.
+            AssistantMessageEvent::Error { error, .. } => {
+                return Err(CompactionError::StreamFailed(error));
             }
             _ => {}
         }

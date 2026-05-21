@@ -118,17 +118,35 @@ impl JsonlSessionStorage {
             }
         }
 
+        // Reconcile state.json with entries.jsonl. The append flow writes
+        // an entry to JSONL **before** updating state.json, so a crash
+        // between the two leaves entries.jsonl correct but state.json
+        // pointing at the previous leaf. To recover, we trust
+        // entries.jsonl when state.json's leaf is older than the last
+        // entry (specifically: when the last entry's id isn't already in
+        // the path-to-state.json-leaf).
         let state_path = dir.join(STATE_FILE);
-        let leaf_id = if state_path.exists() {
+        let state_leaf: Option<String> = if state_path.exists() {
             let raw = tokio::fs::read_to_string(&state_path)
                 .await
                 .map_err(io_err(state_path.display().to_string()))?;
-            // Tolerate corrupt state.json — fall back to the last entry id.
+            // Tolerate corrupt state.json — fall back to last entry id.
             serde_json::from_str::<StateFile>(&raw)
                 .map(|s| s.leaf_id)
-                .unwrap_or_else(|_| entries.last().map(|e| e.id.clone()))
+                .ok()
+                .flatten()
         } else {
-            entries.last().map(|e| e.id.clone())
+            None
+        };
+        let derived_leaf = entries.last().map(|e| e.id.clone());
+        let leaf_id = match (state_leaf, derived_leaf) {
+            (Some(s), Some(d)) if s == d => Some(s),
+            // state.json points to a different (older) leaf than the
+            // last entry on disk → trust the file, the JSONL is the
+            // source of truth.
+            (Some(_), Some(d)) => Some(d),
+            (Some(s), None) => Some(s),
+            (None, d) => d,
         };
 
         Ok(JsonlSessionStorage {

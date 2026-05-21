@@ -9,7 +9,7 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum, parser::ValueSource};
 use grain_agent_core::{
     Agent, AgentEvent, AgentMessage, AgentOptions, AssistantMessageEvent, Message,
 };
@@ -120,14 +120,41 @@ pub struct Args {
 }
 
 impl Args {
-    /// Hard-coded CLI defaults — used by `ConfigFile::apply_to_args` to
-    /// distinguish "user accepted the default" from "user set this
-    /// explicitly". Kept here so both sources of truth move together.
+    /// Hard-coded CLI defaults — used by `ConfigFile::apply_to_args` as a
+    /// reference, alongside the explicit-flag set computed by
+    /// [`Self::explicit_arg_ids`].
     pub fn cli_defaults() -> ArgDefaults {
         ArgDefaults {
             model: "anthropic/claude-sonnet-4-5".into(),
             headroom_tokens: 4096,
         }
+    }
+
+    /// Return the set of clap argument ids whose values came from the
+    /// user (not the clap-built-in default). Used by
+    /// `ConfigFile::apply_to_args` to avoid overriding flags the user
+    /// explicitly passed.
+    pub fn explicit_arg_ids(argv: &[String]) -> std::collections::HashSet<String> {
+        // Re-parse so we can ask `value_source` per-arg. The original
+        // `Args::parse()` already verified the input; we discard the
+        // result and only keep the ArgMatches.
+        let cmd = Args::command();
+        let matches = match cmd.try_get_matches_from(argv) {
+            Ok(m) => m,
+            // Shouldn't fail since we already parsed once, but fall back
+            // to "everything looks default" rather than panic.
+            Err(_) => return std::collections::HashSet::new(),
+        };
+        matches
+            .ids()
+            .filter_map(|id| {
+                let name = id.as_str();
+                match matches.value_source(name) {
+                    Some(ValueSource::CommandLine) => Some(name.to_string()),
+                    _ => None,
+                }
+            })
+            .collect()
     }
 }
 
@@ -168,8 +195,10 @@ pub async fn run(args: Args) -> Result<(), CliError> {
     // CLI flags win; config fills in fields the user accepted the default
     // for. Failures during load are logged but never break the agent.
     let mut args = args;
+    let argv: Vec<String> = std::env::args().collect();
+    let explicit = Args::explicit_arg_ids(&argv);
     match ConfigFile::load(workspace.root()) {
-        Ok(cfg) => cfg.apply_to_args(&mut args, &Args::cli_defaults()),
+        Ok(cfg) => cfg.apply_to_args(&mut args, &explicit, &Args::cli_defaults()),
         Err(e) => eprintln!("[warn] config load: {e}"),
     }
 
@@ -330,6 +359,7 @@ pub async fn run(args: Args) -> Result<(), CliError> {
             workspace: workspace.clone(),
             registry: registry.clone(),
             skills_dir: resolve_skills_dir(workspace.root(), args.skills_dir.as_deref()),
+            session_path: args.session.clone(),
         };
         run_interactive_loop(&agent, &ctx).await?;
     }
@@ -343,6 +373,9 @@ struct InteractiveContext {
     workspace: Arc<Workspace>,
     registry: Arc<Registry>,
     skills_dir: PathBuf,
+    /// Active JSONL session file (if any). `/clear` truncates it so the
+    /// next load doesn't show stale messages alongside the new transcript.
+    session_path: Option<PathBuf>,
 }
 
 /// Read-prompt-respond loop. Reads lines from stdin until EOF or `/exit`.
@@ -373,7 +406,28 @@ async fn run_interactive_loop(agent: &Agent, ctx: &InteractiveContext) -> Result
                 }
                 SlashCommand::Clear => {
                     agent.reset().await;
-                    eprintln!("(transcript cleared)");
+                    // Also truncate the session file (if any) so the next
+                    // load doesn't see a mix of pre-clear and post-clear
+                    // messages. Failures here are non-fatal — log and
+                    // continue with the in-memory clear.
+                    if let Some(path) = &ctx.session_path {
+                        match std::fs::OpenOptions::new()
+                            .write(true)
+                            .truncate(true)
+                            .open(path)
+                        {
+                            Ok(_) => eprintln!(
+                                "(transcript cleared; session file {} truncated)",
+                                path.display()
+                            ),
+                            Err(e) => eprintln!(
+                                "[warn] cleared in-memory transcript but failed to truncate {}: {e}",
+                                path.display()
+                            ),
+                        }
+                    } else {
+                        eprintln!("(transcript cleared)");
+                    }
                 }
                 SlashCommand::Skills => match find_skills(&ctx.skills_dir) {
                     Ok(skills) if skills.is_empty() => {

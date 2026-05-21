@@ -111,14 +111,19 @@ pub fn stamp_current_version(session_dir: &Path) -> Result<(), MigrationError> {
             Value::Number(CURRENT_SCHEMA_VERSION.into()),
         );
     }
-    fs::write(
-        &meta_path,
-        serde_json::to_string_pretty(&val).map_err(|source| MigrationError::Parse {
-            path: meta_path.display().to_string(),
-            source,
-        })?,
-    )
-    .map_err(|source| MigrationError::Io {
+    // Atomic-ish: write to a sibling temp file then rename so a crash
+    // during the write can't leave meta.json half-written (which would
+    // make the session unloadable next time around).
+    let pretty = serde_json::to_string_pretty(&val).map_err(|source| MigrationError::Parse {
+        path: meta_path.display().to_string(),
+        source,
+    })?;
+    let tmp = meta_path.with_extension("json.tmp");
+    fs::write(&tmp, pretty).map_err(|source| MigrationError::Io {
+        path: tmp.display().to_string(),
+        source,
+    })?;
+    fs::rename(&tmp, &meta_path).map_err(|source| MigrationError::Io {
         path: meta_path.display().to_string(),
         source,
     })?;
@@ -159,6 +164,28 @@ pub fn migrate_session(
 /// fresh sessions get `schemaVersion: 1` stamped on first save.
 pub fn default_migrations() -> Vec<Box<dyn Migration>> {
     Vec::new()
+}
+
+/// Sanity-check a migration table at startup: two migrations claiming the
+/// same `source_version` would mean `migrate_session` silently picks the
+/// first one and skips the second on every upgrade, corrupting session
+/// data. Catch that at registration time rather than on a live session.
+pub fn validate_migrations(
+    migrations: &[Box<dyn Migration>],
+) -> Result<(), MigrationError> {
+    let mut seen = std::collections::HashSet::new();
+    for m in migrations {
+        if !seen.insert(m.source_version()) {
+            return Err(MigrationError::Step {
+                step: m.name(),
+                reason: format!(
+                    "duplicate migration registered for source_version {}",
+                    m.source_version()
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Convenience: enumerate session sub-directories under a sessions root

@@ -51,7 +51,7 @@ pub use config::{ArgDefaults, ConfigError, ConfigFile};
 pub use extensions::{Extension, ExtensionRegistry};
 pub use migrations::{
     CURRENT_SCHEMA_VERSION, Migration, MigrationError, default_migrations, migrate_all,
-    migrate_session, schema_version_of, stamp_current_version,
+    migrate_session, schema_version_of, stamp_current_version, validate_migrations,
 };
 pub use telemetry::{TelemetryError, TelemetrySink};
 pub use prompt::{
