@@ -98,6 +98,11 @@ pub struct Args {
     /// LLM endpoints; safe to run before configuring keys.
     #[arg(long, default_value_t = false)]
     pub doctor: bool,
+
+    /// Register the `web_fetch` tool. Off by default — opt-in because the
+    /// agent can then reach arbitrary HTTP(S) endpoints.
+    #[arg(long, default_value_t = false)]
+    pub allow_web: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -188,6 +193,9 @@ pub async fn run(args: Args) -> Result<(), CliError> {
     }
     if args.allow_bash {
         tools.extend(coding_bash_tools(workspace.clone()));
+    }
+    if args.allow_web {
+        tools.extend(crate::runtime::coding_web_tools());
     }
     if args.allow_semantic_search {
         #[cfg(feature = "rig")]

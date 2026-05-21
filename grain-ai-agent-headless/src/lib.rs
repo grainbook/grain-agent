@@ -47,14 +47,15 @@ pub use prompt::{
 };
 pub use runtime::{
     coding_all_tools, coding_bash_tools, coding_full_tools, coding_read_tools,
-    coding_write_tools,
+    coding_web_tools, coding_write_tools,
 };
 pub use session::{SessionError, SessionWriter, load_messages};
 pub use skills::{DEFAULT_SKILLS_DIR, SkillsError, find_skills, resolve_skills_dir};
 pub use diagnostics::{SourceInfo, render_doctor_report, render_source_info_block, source_info};
 pub use slash::{HELP_TEXT, SlashCommand, parse as parse_slash_command};
 pub use tools::{
-    BashTool, EditTool, GlobTool, GrepTool, ListTool, ReadTool, SourceInfoTool, WriteTool,
+    BashTool, EditTool, GlobTool, GrepTool, ListTool, ReadTool, SourceInfoTool, WebFetchTool,
+    WriteTool,
 };
 pub use workspace::{Workspace, WorkspaceError};
 

@@ -10,7 +10,8 @@ use std::sync::Arc;
 use grain_agent_core::AgentTool;
 
 use crate::tools::{
-    BashTool, EditTool, GlobTool, GrepTool, ListTool, ReadTool, SourceInfoTool, WriteTool,
+    BashTool, EditTool, GlobTool, GrepTool, ListTool, ReadTool, SourceInfoTool, WebFetchTool,
+    WriteTool,
 };
 use crate::workspace::Workspace;
 
@@ -36,6 +37,11 @@ pub fn coding_write_tools(workspace: Arc<Workspace>) -> Vec<Arc<dyn AgentTool>> 
 /// Shell tool: Bash (`/bin/sh -c` with workspace-anchored cwd).
 pub fn coding_bash_tools(workspace: Arc<Workspace>) -> Vec<Arc<dyn AgentTool>> {
     vec![Arc::new(BashTool::new(workspace))]
+}
+
+/// Network tool(s): WebFetch (HTTP/HTTPS GET with HTML simplification).
+pub fn coding_web_tools() -> Vec<Arc<dyn AgentTool>> {
+    vec![Arc::new(WebFetchTool::new())]
 }
 
 /// Read + Write tools combined.
