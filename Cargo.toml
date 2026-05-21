@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["grain-agent-core", "grain-agent-harness", "grain-llm-models", "grain-llm-genai"]
+members = [
+    "grain-agent-core",
+    "grain-agent-harness",
+    "grain-llm-models",
+    "grain-llm-genai",
+    "grain-ai-agent-headless",
+]
 
 [workspace.package]
 edition = "2024"
@@ -18,6 +24,11 @@ uuid = { version = "1", features = ["v7"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 genai = "0.5"
 async-stream = "0.3"
+ignore = "0.4"
+regex = "1"
+globset = "0.4"
 grain-agent-core = { path = "grain-agent-core" }
+grain-agent-harness = { path = "grain-agent-harness" }
 grain-llm-models = { path = "grain-llm-models" }
 grain-llm-genai = { path = "grain-llm-genai" }
+grain-ai-agent-headless = { path = "grain-ai-agent-headless" }
