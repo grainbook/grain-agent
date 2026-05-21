@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["grain-agent-core", "grain-agent-harness", "grain-llm-models"]
+members = ["grain-agent-core", "grain-agent-harness", "grain-llm-models", "grain-llm-genai"]
 
 [workspace.package]
 edition = "2024"
@@ -16,5 +16,7 @@ tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 tokio-util = { version = "0.7" }
 uuid = { version = "1", features = ["v7"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+genai = "0.5"
 grain-agent-core = { path = "grain-agent-core" }
 grain-llm-models = { path = "grain-llm-models" }
+grain-llm-genai = { path = "grain-llm-genai" }

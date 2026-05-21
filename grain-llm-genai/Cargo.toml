@@ -1,0 +1,17 @@
+[package]
+name = "grain-llm-genai"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "genai-backed LlmStream implementation for grain-agent. Bridges grain-agent-core's transport-agnostic agent loop to the genai crate's multi-provider chat API. PR 3a: outbound mapping only — impl LlmStream, inbound mapping, and env/quirk config land in subsequent PRs."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+genai = { workspace = true }
+grain-agent-core = { workspace = true }
+grain-llm-models = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
