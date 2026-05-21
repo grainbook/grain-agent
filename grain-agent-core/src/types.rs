@@ -89,6 +89,30 @@ pub struct Cost {
     pub total: f64,
 }
 
+impl Cost {
+    /// Compute the USD cost for a single `Usage` reading using this
+    /// pricing table. Field semantics match `models.dev`: per-million-token
+    /// prices, with `cache_read` being the discounted rate for cached
+    /// prompt tokens. `usage.input` is the **total** prompt tokens (cached
+    /// + uncached), so the uncached share is `input - cache_read`.
+    ///
+    /// Returns 0.0 when the descriptor has no pricing data (all zeros).
+    pub fn cost_for(&self, usage: &Usage) -> f64 {
+        // Defensive: providers occasionally report `cache_read` greater
+        // than `input` due to retry double-counting. Clamp to keep the
+        // uncached share non-negative.
+        let cached = usage.cache_read.min(usage.input) as f64;
+        let uncached = (usage.input.saturating_sub(usage.cache_read)) as f64;
+        let cache_write = usage.cache_write as f64;
+        let output = usage.output as f64;
+        (uncached * self.input
+            + cached * self.cache_read
+            + cache_write * self.cache_write
+            + output * self.output)
+            / 1_000_000.0
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
@@ -583,5 +607,91 @@ impl fmt::Debug for AgentState {
             .field("pending_tool_calls", &self.pending_tool_calls)
             .field("error_message", &self.error_message)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod cost_tests {
+    use super::*;
+
+    fn pricing() -> Cost {
+        // DeepSeek V4-flash-style numbers post-discount (per 1M tokens).
+        Cost {
+            input: 0.14,
+            output: 0.28,
+            cache_read: 0.0028,
+            cache_write: 0.14,
+            total: 0.0,
+        }
+    }
+
+    #[test]
+    fn cost_for_all_uncached_input() {
+        let cost = pricing().cost_for(&Usage {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read: 0,
+            cache_write: 0,
+            total_tokens: 2_000_000,
+            cost: Cost::default(),
+        });
+        // 1M @ 0.14 + 1M @ 0.28 = 0.42
+        assert!((cost - 0.42).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cost_for_fully_cached_input_uses_cache_rate() {
+        let cost = pricing().cost_for(&Usage {
+            input: 1_000_000,
+            output: 0,
+            cache_read: 1_000_000,
+            cache_write: 0,
+            total_tokens: 1_000_000,
+            cost: Cost::default(),
+        });
+        // 0 uncached + 1M @ 0.0028 = 0.0028
+        assert!((cost - 0.0028).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cost_for_partial_cache_splits_correctly() {
+        let cost = pricing().cost_for(&Usage {
+            input: 1_000_000,
+            output: 500_000,
+            cache_read: 800_000,
+            cache_write: 0,
+            total_tokens: 1_500_000,
+            cost: Cost::default(),
+        });
+        // 200k @ 0.14 + 800k @ 0.0028 + 500k @ 0.28 = 0.028 + 0.00224 + 0.14
+        let expected = 0.2e6 * 0.14 / 1e6 + 0.8e6 * 0.0028 / 1e6 + 0.5e6 * 0.28 / 1e6;
+        assert!((cost - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cost_for_clamps_cache_read_above_input() {
+        // Providers occasionally report cache_read > input due to retries.
+        // Must not produce a negative uncached share.
+        let cost = pricing().cost_for(&Usage {
+            input: 1_000,
+            output: 0,
+            cache_read: 9_999,
+            cache_write: 0,
+            total_tokens: 1_000,
+            cost: Cost::default(),
+        });
+        // Uncached clamps to 0; treat all 1_000 as cached.
+        let expected = 1_000.0 * 0.0028 / 1_000_000.0;
+        assert!((cost - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cost_for_zero_pricing_yields_zero() {
+        let cost = Cost::default().cost_for(&Usage {
+            input: 999_999,
+            output: 999_999,
+            ..Usage::default()
+        });
+        assert_eq!(cost, 0.0);
     }
 }

@@ -9,6 +9,7 @@ members = [
     "grain-ai-agent-tui",
     "grain-script-boa",
     "grain-pi-compat",
+    "grain-deepseek-pack",
 ]
 
 [workspace.package]
@@ -45,6 +46,7 @@ grain-ai-agent-headless = { path = "grain-ai-agent-headless" }
 grain-ai-agent-tui = { path = "grain-ai-agent-tui" }
 grain-script-boa = { path = "grain-script-boa" }
 grain-pi-compat = { path = "grain-pi-compat" }
+grain-deepseek-pack = { path = "grain-deepseek-pack" }
 ratatui = "0.29"
 crossterm = "0.28"
 unicode-width = "0.2"

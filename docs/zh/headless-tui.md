@@ -32,7 +32,9 @@ FOOTER         快捷键提示
 
 弹层（help / doctor / skills / 主题 / provider）是定尺寸居中卡片，背景色取自主题的 `surface` slot，和主视图明显区分。
 
-**文本选择**：TUI 不捕获鼠标事件，终端原生的拖选 / 右键复制在 transcript / 弹层 / 输入框里都能用。粘贴用常规终端快捷键（macOS `⌘V`，Linux 多数终端 `Ctrl-Shift-V`）。
+**鼠标**：滚轮滚动 transcript（每档 3 行，跟 PgUp/PgDn 共享 follow-bottom 和追到底部即恢复跟踪的逻辑）。为了滚轮事件能到 app，鼠标 capture 是**开着**的，所以终端也会拦截左键拖选 —— 按住 **Option**（macOS）或 **Shift**（多数 Linux 终端）绕过 capture，即可用原生的拖选 / 右键复制。粘贴照常用 `⌘V` / `Ctrl-Shift-V`。
+
+**实时状态栏**：agent 跑起来时 footer 显示 `✻ Marinating… (Xm Ys · ↑input · ↓output tokens · cache N%)` 再加一个颜色化成本 chip（`$0.012`）。每 5 秒换一个动词、墙钟耗时、当前一轮累计 token 用量、prefix-cache 命中率（`cache_read / input_total`）、按 `models.dev` 价格表实时算出的 USD 成本。颜色阈值：绿 <$0.05 / 黄 0.05–0.20 / 红 ≥0.20。空闲时消失。`models.dev` 没记录价格的模型不显示 cost chip。
 
 ---
 

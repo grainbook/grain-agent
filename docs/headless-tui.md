@@ -32,7 +32,9 @@ FOOTER         shortcuts hint
 
 Overlays (help, doctor, skills, theme picker, provider picker) render as fixed-size centered cards on top of the layout, with a distinct background color from the theme's `surface` palette slot.
 
-**Text selection.** The TUI does not capture mouse events — your terminal's native drag-to-select / right-click-copy keeps working everywhere (transcript, overlays, input). Paste with the usual terminal shortcut (`⌘V` on macOS, `Ctrl-Shift-V` on most Linux terms).
+**Mouse:** the scroll wheel scrolls the transcript (3 rows per click, same follow-bottom / catch-up-to-tail semantics as PgUp/PgDn). Mouse capture is **on** to make the wheel work, which means terminals also intercept left-click drag for selection — hold **Option** (macOS) or **Shift** (most Linux terms) to bypass capture and use the native drag-to-select / right-click-copy. Paste still works as usual (`⌘V` / `Ctrl-Shift-V`).
+
+**Live status:** while the agent is running, the footer renders `✻ Marinating… (Xm Ys · ↑input · ↓output tokens · cache N%)` followed by a colored cost chip (`$0.012`). Rotating verb every 5s, wall-clock elapsed, cumulative LLM token usage for the current run, prefix-cache hit rate (`cache_read / input_total`), and live USD cost computed from the active model's pricing table in `models.dev`. Cost chip color: green <$0.05 / yellow $0.05–0.20 / red ≥$0.20. Disappears when idle. Pricing data is whatever `models.dev` reports — the chip is suppressed for any model with no pricing recorded.
 
 ---
 

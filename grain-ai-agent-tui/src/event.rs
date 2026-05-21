@@ -4,7 +4,7 @@
 //! [`crate::AppState::on_event`].
 
 use crossterm::event::KeyEvent;
-use grain_agent_core::AgentEvent;
+use grain_agent_core::{AgentEvent, Cost};
 
 /// Tagged union of every event the TUI main loop knows how to consume.
 ///
@@ -39,6 +39,17 @@ pub enum TuiEvent {
     AgentWorkerError(String),
     /// Worker successfully switched to a new provider profile. Carries
     /// the profile name + resolved model id so the UI can log a status
-    /// line ("(provider: openai-work · openai/gpt-4o)").
-    ProviderApplied { profile: String, model: String },
+    /// line ("(provider: openai-work · openai/gpt-4o)") plus the new
+    /// model's pricing table so the cost chip refreshes too.
+    ProviderApplied {
+        profile: String,
+        model: String,
+        cost: Cost,
+    },
+    /// Mouse wheel rolled up — translated into transcript scroll-up by
+    /// `amount` rows. Same follow-bottom semantics as PgUp.
+    ScrollUp { amount: u16 },
+    /// Mouse wheel rolled down — translated into transcript scroll-down
+    /// by `amount` rows. Same catch-up-to-tail semantics as PgDn.
+    ScrollDown { amount: u16 },
 }

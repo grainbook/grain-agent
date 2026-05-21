@@ -55,6 +55,11 @@ pub struct WorkerConfig {
     /// Honored only when the crate is built with the
     /// `scripts-boa` feature.
     pub scripts_dir: Option<PathBuf>,
+    /// Auto-escalation target model id (e.g. `"deepseek/deepseek-v4-pro"`).
+    /// `None` → no escalation hook installed.
+    pub escalate_to: Option<String>,
+    /// Failure-signal count that triggers `escalate_to`. Defaults to 3.
+    pub escalate_after: u32,
 }
 
 impl From<&Args> for WorkerConfig {
@@ -77,6 +82,8 @@ impl From<&Args> for WorkerConfig {
             profiles: Vec::new(),
             initial_profile_idx: None,
             scripts_dir: a.scripts_dir.clone(),
+            escalate_to: a.escalate_to.clone(),
+            escalate_after: a.escalate_after,
         }
     }
 }
@@ -91,6 +98,11 @@ pub struct WorkerHandles {
     pub allow_bash: bool,
     pub allow_web: bool,
     pub allow_semantic_search: bool,
+    /// Per-million-token pricing for the booted model (read from the
+    /// embedded models.dev snapshot). Used by the footer to render a
+    /// live cost chip. `Cost::default()` (all zeros) when pricing is
+    /// unknown — the footer suppresses the chip in that case.
+    pub model_cost: grain_agent_core::Cost,
 }
 
 /// Errors that can happen *before* the worker successfully takes over.
@@ -171,7 +183,11 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         };
 
     // --- System prompt + skills block -------------------------------------
-    let mut system_prompt = match &cfg.system_prompt_file {
+    // Pin the prompt for the lifetime of this session. The harness's
+    // `PinnedSystemPrompt` freezes `base + <available_skills>` at
+    // session start; never re-render in the hot path so the upstream
+    // prefix cache (Anthropic, OpenAI, DeepSeek …) stays warm.
+    let base_prompt = match &cfg.system_prompt_file {
         Some(path) => std::fs::read_to_string(path).map_err(|e| WorkerInitError::SystemPrompt {
             path: path.clone(),
             source: e,
@@ -179,13 +195,14 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         None => coding_agent_system_prompt(cfg.allow_write, cfg.allow_bash).to_string(),
     };
     let skills_dir = resolve_skills_dir(workspace.root(), cfg.skills_dir.as_deref());
-    if let Ok(skills) = find_skills(&skills_dir) {
-        let block = grain_agent_harness::format_skills_for_system_prompt(&skills);
-        if !block.is_empty() {
-            system_prompt.push_str("\n\n");
-            system_prompt.push_str(&block);
-        }
-    }
+    let skills = find_skills(&skills_dir).unwrap_or_default();
+    let pinned = grain_agent_harness::PinnedSystemPrompt::build(base_prompt, &skills);
+    eprintln!(
+        "[info] system prompt pinned ({} bytes, digest {:016x})",
+        pinned.len(),
+        pinned.digest()
+    );
+    let system_prompt = pinned.to_string_owned();
 
     // --- Session restore ---------------------------------------------------
     let prior_messages = match &cfg.session {
@@ -274,11 +291,47 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         .into_transform_fn();
 
     // --- AgentOptions ------------------------------------------------------
+    // Snapshot the pricing table before `model` moves into AgentOptions —
+    // the footer renders a live cost chip from this.
+    let model_cost = model.cost.clone();
     let mut opts = AgentOptions::new(model, stream);
     opts.system_prompt = system_prompt;
     opts.tools = tools;
     opts.messages = prior_messages;
     opts.transform_context = Some(guard);
+    // Storm suppressor: blocks the 3rd identical (tool, args) call
+    // within a 60s window and feeds a reflection note back to the
+    // model. Provider-agnostic — defaults are tuned for coding
+    // agents that occasionally lock onto a useless grep / search.
+    opts.before_tool_call = Some(grain_agent_harness::storm_hook(
+        grain_agent_harness::StormConfig::default(),
+    ));
+    // Auto-escalation: when configured, swap to `escalate_to` after
+    // `escalate_after` cumulative failure signals. Missing target
+    // model just disables the hook (logged once at startup).
+    if let Some(target_id) = &cfg.escalate_to {
+        match registry.to_core_model(target_id) {
+            Some(target) => {
+                eprintln!(
+                    "[info] escalation armed: → {} after {} failure(s)",
+                    target.id, cfg.escalate_after
+                );
+                opts.prepare_next_turn =
+                    Some(grain_agent_harness::failure_escalation_hook(
+                        grain_agent_harness::EscalationConfig::new(
+                            cfg.escalate_after,
+                            target,
+                        ),
+                    ));
+            }
+            None => {
+                eprintln!(
+                    "[warn] --escalate-to '{target_id}' not in registry; \
+                     escalation disabled"
+                );
+            }
+        }
+    }
     let agent = Arc::new(Agent::new(opts));
 
     // --- Channels ----------------------------------------------------------
@@ -292,6 +345,7 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         allow_bash: cfg.allow_bash,
         allow_web: cfg.allow_web,
         allow_semantic_search: cfg.allow_semantic_search,
+        model_cost: model_cost.clone(),
     };
 
     // --- Per-instance subscriptions: telemetry + session ------------------
@@ -304,6 +358,7 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     let registry_for_task = registry.clone();
     let skills_dir_for_task = skills_dir.clone();
     let evt_tx_for_task = evt_tx.clone();
+    let model_cost_for_task = model_cost.clone();
     // Captured by the worker task closure so the Boa worker stays
     // alive for the whole agent lifetime; dropping at task end sends
     // Shutdown to that worker thread.
@@ -378,6 +433,7 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             let _ = evt_tx_for_task.send(TuiEvent::ProviderApplied {
                 profile: name,
                 model: active_model_id.clone(),
+                cost: model_cost_for_task.clone(),
             });
         }
 
@@ -472,10 +528,12 @@ async fn run_command_loop(
                     }
                     Some(model) => {
                         let model = override_model_provider(model, profile);
+                        let cost = model.cost.clone();
                         agent.set_model(model).await;
                         let _ = evt_tx.send(TuiEvent::ProviderApplied {
                             profile: profile.name.clone(),
                             model: profile.model.clone(),
+                            cost,
                         });
                     }
                 }

@@ -22,7 +22,10 @@
 pub mod agent_harness;
 pub mod compaction;
 pub mod context_guard;
+pub mod escalation;
 pub mod messages;
+pub mod prefix_pin;
+pub mod repair;
 pub mod session;
 pub mod session_jsonl;
 pub mod system_prompt;
@@ -45,6 +48,12 @@ pub use messages::{
     COMPACTION_SUMMARY_SUFFIX, BranchSummaryMessage, CompactionSummaryMessage, CustomMessage,
     branch_summary_message, compaction_summary_message, convert_to_llm, custom_message,
 };
+pub use escalation::{
+    EscalationConfig, EscalationState, count_failures, decide_escalation,
+    failure_escalation_hook,
+};
+pub use prefix_pin::{PinnedSystemPrompt, append_only_guard};
+pub use repair::{StormConfig, storm_hook};
 pub use session::{
     InMemorySessionRepo, InMemorySessionStorage, Session, SessionContext, SessionError,
     SessionMetadata, SessionRepo, SessionStorage, SessionTreeEntry, SessionTreeEntryKind,

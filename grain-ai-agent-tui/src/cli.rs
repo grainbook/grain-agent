@@ -103,6 +103,29 @@ pub struct Args {
     /// Requires building with `--features scripts-boa`.
     #[arg(long)]
     pub scripts_dir: Option<PathBuf>,
+
+    /// Auto-escalation: when ≥ `--escalate-after` failure signals
+    /// (assistant errors + tool errors) accumulate in this session,
+    /// swap the active model to this id for the next turn. Pair with
+    /// a faster default model (`--model deepseek/deepseek-v4-flash
+    /// --escalate-to deepseek/deepseek-v4-pro`) to keep latency / cost
+    /// low while still recovering from hard turns automatically.
+    /// Unset → escalation hook is not registered.
+    #[arg(long)]
+    pub escalate_to: Option<String>,
+
+    /// Failure-signal count that triggers `--escalate-to`. Default 3.
+    /// Ignored when `--escalate-to` is unset.
+    #[arg(long, default_value_t = 3)]
+    pub escalate_after: u32,
+
+    /// USD → CNY conversion rate for the cost chip. When set, the
+    /// footer renders `¥X.XX` instead of `$X.XX`. Auto-detected from
+    /// `$LANG` (any `zh_*` locale) with a default rate of `7.20`
+    /// when this flag isn't passed; pass an explicit value here to
+    /// override or to opt-in on non-zh locales.
+    #[arg(long)]
+    pub cny_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

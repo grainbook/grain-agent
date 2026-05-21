@@ -10,7 +10,10 @@ use std::io::{self, Stdout};
 use std::time::Duration;
 
 use crossterm::{
-    event::{Event as CtEvent, KeyEventKind, poll, read},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, Event as CtEvent, KeyEventKind, MouseEventKind,
+        poll, read,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -142,17 +145,22 @@ fn resolve_themes(themes_dir: &std::path::Path, requested: &str) -> (Vec<Theme>,
 fn init_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    // Mouse capture is intentionally OFF. We don't consume any mouse
-    // events ourselves, and leaving it disabled lets the terminal's
-    // native text-selection (drag to highlight, ⌘C/Ctrl-Shift-C to
-    // copy) work directly — no Option/Shift bypass needed.
-    execute!(stdout, EnterAlternateScreen)?;
+    // Mouse capture is ON so the scroll wheel produces real events.
+    // Tradeoff: terminals capture left-click drag too, so native
+    // text selection requires holding Option/Alt (most macOS terms)
+    // or Shift (most Linux terms) to bypass capture. See
+    // docs/headless-tui.md for the user-facing note.
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     Terminal::new(CrosstermBackend::new(stdout))
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -169,8 +177,14 @@ async fn event_loop(
     providers: Vec<ProviderProfile>,
     initial_provider_idx: Option<usize>,
 ) -> Result<(), TuiError> {
+    // Resolve CNY rate once at startup: explicit `--cny-rate` wins,
+    // otherwise auto-detect from `$LANG`. Pure: see
+    // `app::resolve_cny_rate` for the truth table.
+    let lang_env = std::env::var("LANG").ok();
+    let cny_rate = crate::app::resolve_cny_rate(args.cny_rate, lang_env.as_deref());
     let mut state = AppState::new(
         handles.model_id.clone(),
+        handles.model_cost.clone(),
         handles.workspace_display.clone(),
         Capabilities {
             allow_write: handles.allow_write,
@@ -183,6 +197,7 @@ async fn event_loop(
         initial_theme_idx,
         providers,
         initial_provider_idx,
+        cny_rate,
     );
 
     // Crossterm reads on a blocking thread; forward into a tokio channel
@@ -228,6 +243,10 @@ async fn event_loop(
 /// forward them through the mpsc channel. Exits when the receiver is
 /// dropped (channel send fails).
 fn forward_terminal_events(tx: mpsc::UnboundedSender<TuiEvent>) {
+    // Step size for scroll-wheel events. Tuned for "scroll feels
+    // natural on a notch wheel" — 3 rows per click matches most
+    // editor / terminal conventions.
+    const WHEEL_STEP: u16 = 3;
     loop {
         // Long poll keeps CPU low; tokio side gets ticks anyway.
         match poll(Duration::from_millis(250)) {
@@ -239,6 +258,23 @@ fn forward_terminal_events(tx: mpsc::UnboundedSender<TuiEvent>) {
                 }
                 Ok(CtEvent::Resize(w, h)) => {
                     if tx.send(TuiEvent::Resize(w, h)).is_err() {
+                        return;
+                    }
+                }
+                Ok(CtEvent::Mouse(m)) => {
+                    // Only act on scroll. Click / drag / move are
+                    // ignored — text selection works through the
+                    // terminal's Option/Shift-bypass override.
+                    let evt = match m.kind {
+                        MouseEventKind::ScrollUp => Some(TuiEvent::ScrollUp { amount: WHEEL_STEP }),
+                        MouseEventKind::ScrollDown => {
+                            Some(TuiEvent::ScrollDown { amount: WHEEL_STEP })
+                        }
+                        _ => None,
+                    };
+                    if let Some(e) = evt
+                        && tx.send(e).is_err()
+                    {
                         return;
                     }
                 }

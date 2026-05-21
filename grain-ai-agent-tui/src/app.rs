@@ -5,9 +5,12 @@
 //! Keeping the state machine pure lets us unit-test render-relevant
 //! behavior without touching a real terminal or LLM.
 
+use std::cell::Cell;
+use std::time::Instant;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use grain_agent_core::{
-    AgentEvent, AgentMessage, AssistantMessageEvent, Message, UserContent,
+    AgentEvent, AgentMessage, AssistantMessageEvent, Cost, Message, UserContent,
 };
 
 use crate::event::TuiEvent;
@@ -86,6 +89,15 @@ pub enum Command {
     Quit,
 }
 
+/// Snapshot of transcript-rendering measurements written by the UI
+/// at the end of each frame so subsequent key handlers can reason
+/// about wrapped row counts they can't compute themselves.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RenderMetrics {
+    pub total_rows: usize,
+    pub visible_rows: usize,
+}
+
 /// One entry in the slash-command palette. The renderer matches on
 /// `trigger` (always including the leading `/`) and prints
 /// `description` to the right.
@@ -144,10 +156,65 @@ pub struct AppState {
     pub cursor: usize,
     pub focus: Focus,
     pub overlay: Option<Overlay>,
+    /// Scroll position when `!follow_bottom`. Counted as "rendered
+    /// rows from the top of the wrapped transcript" so new content
+    /// arriving doesn't shift the user's frozen view.
     pub scroll_offset: usize,
+    /// `true` = anchor the transcript view to the bottom (tail mode,
+    /// the default). `false` = freeze at `scroll_offset` so prior
+    /// content stays put while new messages arrive offscreen below.
+    /// PgUp flips to frozen, End / PgDn at bottom flip back to tail.
+    pub follow_bottom: bool,
+    /// Rendered-row counts the UI writes back each frame so on_key
+    /// handlers can convert "scroll up from current bottom" into an
+    /// absolute `scroll_offset`. `Cell` keeps it interior-mutable
+    /// without breaking the `&AppState` render contract.
+    pub render_metrics: Cell<RenderMetrics>,
     pub streaming: bool,
+    /// Wall-clock start of the current agent run. Reset on
+    /// `AgentStart`; cleared on `AgentEnd`. The footer renders an
+    /// elapsed counter against this whenever it's set.
+    pub streaming_started_at: Option<Instant>,
+    /// Cumulative LLM token usage for the current run. Reset on
+    /// `AgentStart`; updated from each finalized assistant message's
+    /// `usage` field. Shown next to the elapsed counter in the
+    /// footer ("↑ 4.2k · ↓ 32.8k tokens").
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    /// Cumulative cached-prompt tokens for the current run — the
+    /// `cache_read` subset of `tokens_in`. Drives the `cache N%` chip
+    /// in the footer and the cost calculation (cached tokens are billed
+    /// at the cache-read rate, not the full input rate).
+    pub tokens_cache_read: u64,
+    /// Consecutive recent turns with per-turn hit rate ≥ `CACHE_HIGH_RATE`.
+    /// Once this counter passes `CACHE_HIGH_STREAK_THRESHOLD`, we assume
+    /// the session has a stable prefix cache and any subsequent
+    /// large drop is suspicious (probably caused by a mid-session
+    /// prefix mutation).
+    pub cache_high_streak: u8,
+    /// Sticky red-flag — set when a session that had a healthy hit-rate
+    /// baseline suddenly drops below `CACHE_LOW_RATE` on the latest
+    /// turn. Cleared on `AgentStart`. Drives the chip's color in
+    /// `draw_footer`.
+    pub cache_dropped: bool,
+    /// **Session-cumulative** usage across every assistant turn since
+    /// the app started. Unlike `tokens_in / tokens_out / tokens_cache_read`
+    /// (which reset on each `AgentStart`), this rolls up across
+    /// multiple `prompt` cycles so the footer can surface a `Σ $X.XX`
+    /// chip even when the agent is idle.
+    pub session_usage: grain_agent_core::Usage,
+    /// USD → CNY conversion rate. `None` ⇒ render costs in USD.
+    /// `Some(rate)` ⇒ render `¥X.XX` instead, multiplied by `rate`.
+    /// Set from `--cny-rate` or auto-detected from `$LANG` at startup.
+    pub cny_rate: Option<f64>,
     pub pending_tool_calls: usize,
     pub model_id: String,
+    /// Per-million-token pricing for the active model. Driven from the
+    /// embedded `models.dev` snapshot at startup, refreshed on
+    /// `TuiEvent::ProviderApplied` so a runtime provider switch keeps
+    /// the cost chip accurate. `Cost::default()` (all zeros) when
+    /// pricing is unknown — the footer suppresses the chip then.
+    pub model_cost: Cost,
     pub workspace_display: String,
     pub capabilities: Capabilities,
     pub show_thinking: bool,
@@ -191,10 +258,77 @@ pub struct AppState {
 /// unbounded.
 pub const MAX_HISTORY: usize = 200;
 
+/// Default USD → CNY rate when `--cny-rate` is unset but a `zh_*`
+/// locale is detected. Picked as a stable round number; users in
+/// rate-sensitive workflows should pass `--cny-rate` explicitly.
+pub const DEFAULT_CNY_RATE: f64 = 7.20;
+
+/// Resolve the CNY rate from CLI override + locale env var. Pure —
+/// takes the env value as an argument so tests don't need to mutate
+/// process state.
+pub fn resolve_cny_rate(cli_override: Option<f64>, lang_env: Option<&str>) -> Option<f64> {
+    if let Some(rate) = cli_override
+        && rate > 0.0
+    {
+        return Some(rate);
+    }
+    lang_env
+        .filter(|l| l.to_ascii_lowercase().starts_with("zh"))
+        .map(|_| DEFAULT_CNY_RATE)
+}
+
+/// Per-turn hit rate at-or-above which a turn counts toward the
+/// "healthy baseline" streak. Picked empirically — most long coding
+/// sessions with stable prefixes sit above 90%, so 80% is a soft cut.
+pub const CACHE_HIGH_RATE: f64 = 0.80;
+
+/// Per-turn hit rate below which (after a healthy baseline) we flag
+/// a "cache drop". A 30+ percentage-point drop relative to the
+/// baseline is almost always a prefix-mutation bug.
+pub const CACHE_LOW_RATE: f64 = 0.50;
+
+/// Number of consecutive healthy turns required before drop detection
+/// arms. Without this minimum, the first turn (mostly miss) would
+/// trip the alarm.
+pub const CACHE_HIGH_STREAK_THRESHOLD: u8 = 3;
+
+/// Pure helper for [`AppState::on_agent_event`] cache-drop tracking.
+/// Returns `(new_streak, new_dropped)`.
+///
+/// Logic:
+/// - Turns with `input == 0` (no LLM call this message — rare) leave
+///   the state untouched.
+/// - Turns at or above `CACHE_HIGH_RATE` saturating-increment the
+///   streak.
+/// - Turns below `CACHE_LOW_RATE` reset the streak; if the prior
+///   streak had armed the alarm (`prev_streak >= threshold`), the
+///   `dropped` flag stays set forever (or until `AgentStart`).
+/// - Anything in between (50% – 80%) is "neutral" — leaves both alone.
+pub fn update_cache_drop_state(
+    prev_streak: u8,
+    prev_dropped: bool,
+    per_turn_input: u64,
+    per_turn_cache_read: u64,
+) -> (u8, bool) {
+    if per_turn_input == 0 {
+        return (prev_streak, prev_dropped);
+    }
+    let rate = per_turn_cache_read as f64 / per_turn_input as f64;
+    if rate >= CACHE_HIGH_RATE {
+        (prev_streak.saturating_add(1), prev_dropped)
+    } else if rate < CACHE_LOW_RATE {
+        let armed = prev_streak >= CACHE_HIGH_STREAK_THRESHOLD;
+        (0, prev_dropped || armed)
+    } else {
+        (prev_streak, prev_dropped)
+    }
+}
+
 impl AppState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         model_id: String,
+        model_cost: Cost,
         workspace_display: String,
         capabilities: Capabilities,
         show_thinking: bool,
@@ -202,6 +336,7 @@ impl AppState {
         initial_theme_idx: usize,
         providers: Vec<ProviderProfile>,
         initial_provider_idx: Option<usize>,
+        cny_rate: Option<f64>,
     ) -> Self {
         assert!(!themes.is_empty(), "AppState needs at least one theme");
         let current_theme_idx = initial_theme_idx.min(themes.len() - 1);
@@ -212,9 +347,20 @@ impl AppState {
             focus: Focus::Input,
             overlay: None,
             scroll_offset: 0,
+            follow_bottom: true,
+            render_metrics: Cell::new(RenderMetrics::default()),
             streaming: false,
+            streaming_started_at: None,
+            tokens_in: 0,
+            tokens_out: 0,
+            tokens_cache_read: 0,
+            cache_high_streak: 0,
+            cache_dropped: false,
+            session_usage: grain_agent_core::Usage::default(),
+            cny_rate,
             pending_tool_calls: 0,
             model_id,
+            model_cost,
             workspace_display,
             capabilities,
             show_thinking,
@@ -241,6 +387,32 @@ impl AppState {
     /// reference if the user switches mid-stream.
     pub fn theme(&self) -> &Theme {
         &self.themes[self.current_theme_idx]
+    }
+
+    /// Shared scroll-up step. Used by PgUp and mouse-wheel-up. Same
+    /// semantics: tail-follow → freeze at current bottom, then step
+    /// back `amount` rows. Already-frozen → just step back.
+    pub fn scroll_up(&mut self, amount: usize) {
+        if self.follow_bottom {
+            let m = self.render_metrics.get();
+            self.scroll_offset = m.total_rows.saturating_sub(m.visible_rows);
+            self.follow_bottom = false;
+        }
+        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+    }
+
+    /// Shared scroll-down step. Used by PgDn and mouse-wheel-down. If
+    /// already tailing, no-op. Catching up to the live bottom
+    /// re-engages tail follow so subsequent new content auto-scrolls.
+    pub fn scroll_down(&mut self, amount: usize) {
+        if !self.follow_bottom {
+            self.scroll_offset = self.scroll_offset.saturating_add(amount);
+            let m = self.render_metrics.get();
+            let bottom = m.total_rows.saturating_sub(m.visible_rows);
+            if self.scroll_offset >= bottom {
+                self.follow_bottom = true;
+            }
+        }
     }
 
     /// The slash palette is visible while the input has focus, no
@@ -379,7 +551,15 @@ impl AppState {
                 self.push(TranscriptKind::Error, msg);
                 Vec::new()
             }
-            TuiEvent::ProviderApplied { profile, model } => {
+            TuiEvent::ScrollUp { amount } => {
+                self.scroll_up(amount as usize);
+                Vec::new()
+            }
+            TuiEvent::ScrollDown { amount } => {
+                self.scroll_down(amount as usize);
+                Vec::new()
+            }
+            TuiEvent::ProviderApplied { profile, model, cost } => {
                 // Mark this profile as the active one so the picker's
                 // ✓ moves immediately. Match by name so applies that
                 // happened out-of-band (e.g. CLI) still align.
@@ -388,6 +568,7 @@ impl AppState {
                     .iter()
                     .position(|p| p.name == profile);
                 self.model_id = model.clone();
+                self.model_cost = cost;
                 self.push(
                     TranscriptKind::Info,
                     format!("(provider: {profile} · {model})"),
@@ -487,11 +668,22 @@ impl AppState {
             // Transcript scroll keys work regardless of focus so the
             // user never needs to leave input focus to look back.
             KeyCode::PageUp => {
-                self.scroll_offset = self.scroll_offset.saturating_add(10);
+                self.scroll_up(10);
                 Vec::new()
             }
             KeyCode::PageDown => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(10);
+                self.scroll_down(10);
+                Vec::new()
+            }
+            KeyCode::End => {
+                // Jump to live tail.
+                self.follow_bottom = true;
+                Vec::new()
+            }
+            KeyCode::Home => {
+                // Jump to the very top, freezing there.
+                self.follow_bottom = false;
+                self.scroll_offset = 0;
                 Vec::new()
             }
             _ => match self.focus {
@@ -840,6 +1032,16 @@ impl AppState {
         match ev {
             AgentEvent::AgentStart => {
                 self.streaming = true;
+                self.streaming_started_at = Some(Instant::now());
+                // Fresh prompt → fresh counters. We accumulate only
+                // across the current run, not across the session,
+                // matching Claude Code's "Marinating … (Xs · ↓ tokens)"
+                // semantics.
+                self.tokens_in = 0;
+                self.tokens_out = 0;
+                self.tokens_cache_read = 0;
+                self.cache_high_streak = 0;
+                self.cache_dropped = false;
             }
             AgentEvent::TurnStart => {}
             AgentEvent::MessageStart { .. } => {}
@@ -856,7 +1058,38 @@ impl AppState {
                 _ => {}
             },
             AgentEvent::MessageEnd { message } => {
-                if let AgentMessage::Standard(Message::Assistant(_)) = &message {
+                if let AgentMessage::Standard(Message::Assistant(am)) = &message {
+                    self.tokens_in = self.tokens_in.saturating_add(am.usage.input);
+                    self.tokens_out = self.tokens_out.saturating_add(am.usage.output);
+                    self.tokens_cache_read =
+                        self.tokens_cache_read.saturating_add(am.usage.cache_read);
+                    // Session-cumulative — never resets, so footer
+                    // can show `Σ $0.43` even when idle.
+                    self.session_usage.input =
+                        self.session_usage.input.saturating_add(am.usage.input);
+                    self.session_usage.output =
+                        self.session_usage.output.saturating_add(am.usage.output);
+                    self.session_usage.cache_read = self
+                        .session_usage
+                        .cache_read
+                        .saturating_add(am.usage.cache_read);
+                    self.session_usage.cache_write = self
+                        .session_usage
+                        .cache_write
+                        .saturating_add(am.usage.cache_write);
+                    // Cache-drop detection runs on the *per-turn* hit
+                    // rate (not the cumulative one). The cumulative
+                    // rate moves slowly and would mask the abrupt
+                    // shift caused by a prefix mutation; per-turn
+                    // exposes it on the very next message.
+                    let (streak, dropped) = update_cache_drop_state(
+                        self.cache_high_streak,
+                        self.cache_dropped,
+                        am.usage.input,
+                        am.usage.cache_read,
+                    );
+                    self.cache_high_streak = streak;
+                    self.cache_dropped = dropped;
                     self.ensure_trailing_newline(TranscriptKind::AssistantText);
                     self.ensure_trailing_newline(TranscriptKind::ThinkingText);
                 }
@@ -915,6 +1148,7 @@ impl AppState {
                     format!("[done] {turns} assistant turn(s)"),
                 );
                 self.streaming = false;
+                self.streaming_started_at = None;
                 self.pending_tool_calls = 0;
             }
         }
@@ -979,6 +1213,7 @@ mod tests {
     fn fresh() -> AppState {
         AppState::new(
             "deepseek/deepseek-chat".into(),
+            Cost::default(),
             "/tmp/proj".into(),
             Capabilities::default(),
             false,
@@ -986,18 +1221,21 @@ mod tests {
             0,
             Vec::new(),
             None,
+            None,
         )
     }
 
     fn fresh_with_providers(providers: Vec<ProviderProfile>) -> AppState {
         AppState::new(
             "deepseek/deepseek-chat".into(),
+            Cost::default(),
             "/tmp/proj".into(),
             Capabilities::default(),
             false,
             crate::theme::builtin_themes(),
             0,
             providers,
+            None,
             None,
         )
     }
@@ -1371,9 +1609,20 @@ mod tests {
         s.on_event(TuiEvent::ProviderApplied {
             profile: "personal".into(),
             model: "anthropic/claude-sonnet-4-5".into(),
+            cost: Cost {
+                input: 3.0,
+                output: 15.0,
+                cache_read: 0.3,
+                cache_write: 3.75,
+                total: 0.0,
+            },
         });
         assert_eq!(s.current_provider_idx, Some(1));
         assert_eq!(s.model_id, "anthropic/claude-sonnet-4-5");
+        // Pricing carried by the event must reach `model_cost` so the
+        // footer chip reflects the new model on the next frame.
+        assert_eq!(s.model_cost.input, 3.0);
+        assert_eq!(s.model_cost.cache_read, 0.3);
     }
 
     #[test]
@@ -1445,20 +1694,60 @@ mod tests {
     }
 
     #[test]
-    fn page_up_and_page_down_scroll_transcript_from_input_focus() {
+    fn page_up_freezes_view_then_end_reengages_tail_follow() {
         let mut s = fresh();
-        // Stuff the transcript so scrolling is meaningful.
-        for i in 0..30 {
-            s.push(TranscriptKind::Info, format!("line {i}"));
-        }
-        assert_eq!(s.scroll_offset, 0);
+        // Simulate a render with 50 wrapped rows in a 20-row pane.
+        s.render_metrics.set(RenderMetrics {
+            total_rows: 50,
+            visible_rows: 20,
+        });
+        assert!(s.follow_bottom, "default is tail follow");
+
+        s.on_event(TuiEvent::Key(press(KeyCode::PageUp)));
+        assert!(!s.follow_bottom, "PgUp freezes the view");
+        // The anchor jumped to the live bottom (30) and stepped 10 back.
+        assert_eq!(s.scroll_offset, 20);
+
         s.on_event(TuiEvent::Key(press(KeyCode::PageUp)));
         assert_eq!(s.scroll_offset, 10);
+
+        // PgDn walks forward 10.
         s.on_event(TuiEvent::Key(press(KeyCode::PageDown)));
-        assert_eq!(s.scroll_offset, 0);
-        // PageDown saturates at zero, doesn't underflow.
+        assert_eq!(s.scroll_offset, 20);
+
+        // PgDn that catches up to live bottom re-engages tail follow.
         s.on_event(TuiEvent::Key(press(KeyCode::PageDown)));
+        assert!(s.follow_bottom, "catching up to bottom re-engages follow");
+
+        // End from anywhere returns to tail.
+        s.on_event(TuiEvent::Key(press(KeyCode::Home)));
+        assert!(!s.follow_bottom);
         assert_eq!(s.scroll_offset, 0);
+        s.on_event(TuiEvent::Key(press(KeyCode::End)));
+        assert!(s.follow_bottom);
+    }
+
+    #[test]
+    fn frozen_view_does_not_drift_when_new_content_arrives() {
+        // The bug this guards against: when scrolled up reading
+        // history, new assistant chunks shouldn't push the user's
+        // viewport.
+        let mut s = fresh();
+        s.render_metrics.set(RenderMetrics {
+            total_rows: 100,
+            visible_rows: 20,
+        });
+        s.on_event(TuiEvent::Key(press(KeyCode::PageUp)));
+        let frozen = s.scroll_offset;
+        // New content arrives — total_rows grows.
+        s.render_metrics.set(RenderMetrics {
+            total_rows: 130,
+            visible_rows: 20,
+        });
+        // No key event — scroll_offset is unchanged. Ui renders
+        // from this same anchor regardless of where the new bottom is.
+        assert_eq!(s.scroll_offset, frozen);
+        assert!(!s.follow_bottom);
     }
 
     #[test]
@@ -1688,5 +1977,119 @@ mod tests {
         s.on_event(TuiEvent::Agent(AgentEvent::AgentEnd { messages: vec![] }));
         assert!(!s.streaming);
         assert_eq!(s.pending_tool_calls, 0);
+    }
+
+    // ---- cache drop detection -----------------------------------
+
+    #[test]
+    fn update_cache_drop_zero_input_is_inert() {
+        let (s, d) = update_cache_drop_state(2, false, 0, 0);
+        assert_eq!(s, 2);
+        assert!(!d);
+    }
+
+    #[test]
+    fn update_cache_drop_high_rate_increments_streak() {
+        let (s, d) = update_cache_drop_state(2, false, 1000, 900);
+        assert_eq!(s, 3);
+        assert!(!d);
+    }
+
+    #[test]
+    fn update_cache_drop_neutral_rate_leaves_state_alone() {
+        // 70% — between high and low → nothing changes.
+        let (s, d) = update_cache_drop_state(4, false, 1000, 700);
+        assert_eq!(s, 4);
+        assert!(!d);
+    }
+
+    #[test]
+    fn update_cache_drop_low_rate_without_baseline_just_resets_streak() {
+        // No prior healthy streak → low rate just resets streak,
+        // doesn't trip the alarm.
+        let (s, d) = update_cache_drop_state(1, false, 1000, 100);
+        assert_eq!(s, 0);
+        assert!(!d);
+    }
+
+    #[test]
+    fn update_cache_drop_low_rate_after_baseline_arms_alarm() {
+        // Healthy streak ≥ threshold → next low-rate turn sticks
+        // `dropped = true` forever (this session).
+        let (s, d) = update_cache_drop_state(3, false, 1000, 100);
+        assert_eq!(s, 0);
+        assert!(d);
+    }
+
+    #[test]
+    fn update_cache_drop_sticky_once_set() {
+        // High rate after the alarm fires does *not* unset it —
+        // only `AgentStart` clears the flag.
+        let (s, d) = update_cache_drop_state(0, true, 1000, 999);
+        assert_eq!(s, 1);
+        assert!(d, "dropped flag must stick once tripped");
+    }
+
+    #[test]
+    fn agent_start_clears_cache_drop_state() {
+        let mut s = fresh();
+        s.cache_high_streak = 5;
+        s.cache_dropped = true;
+        s.on_event(TuiEvent::Agent(AgentEvent::AgentStart));
+        assert_eq!(s.cache_high_streak, 0);
+        assert!(!s.cache_dropped);
+    }
+
+    // ---- session cumulative usage --------------------------------
+
+    // ---- CNY rate resolution ------------------------------------
+
+    #[test]
+    fn resolve_cny_rate_explicit_cli_wins() {
+        assert_eq!(resolve_cny_rate(Some(6.85), None), Some(6.85));
+        // CLI also wins over a zh locale.
+        assert_eq!(resolve_cny_rate(Some(6.85), Some("zh_CN.UTF-8")), Some(6.85));
+    }
+
+    #[test]
+    fn resolve_cny_rate_auto_from_zh_locale() {
+        assert_eq!(resolve_cny_rate(None, Some("zh_CN.UTF-8")), Some(DEFAULT_CNY_RATE));
+        assert_eq!(resolve_cny_rate(None, Some("zh_TW")), Some(DEFAULT_CNY_RATE));
+        assert_eq!(resolve_cny_rate(None, Some("ZH_HK")), Some(DEFAULT_CNY_RATE));
+    }
+
+    #[test]
+    fn resolve_cny_rate_none_for_non_zh_locale() {
+        assert_eq!(resolve_cny_rate(None, Some("en_US.UTF-8")), None);
+        assert_eq!(resolve_cny_rate(None, Some("ja_JP.UTF-8")), None);
+        assert_eq!(resolve_cny_rate(None, None), None);
+    }
+
+    #[test]
+    fn resolve_cny_rate_rejects_non_positive_cli_override() {
+        // Zero / negative explicit override falls through to locale
+        // detection rather than being honored (defensive — `--cny-rate 0`
+        // is almost certainly a typo).
+        assert_eq!(resolve_cny_rate(Some(0.0), Some("zh_CN")), Some(DEFAULT_CNY_RATE));
+        assert_eq!(resolve_cny_rate(Some(-1.0), None), None);
+    }
+
+    #[test]
+    fn agent_start_does_not_reset_session_usage() {
+        // Session usage tracks across prompts; per-run counters reset.
+        let mut s = fresh();
+        s.session_usage.input = 5_000;
+        s.session_usage.output = 1_200;
+        s.tokens_in = 5_000;
+        s.tokens_out = 1_200;
+
+        s.on_event(TuiEvent::Agent(AgentEvent::AgentStart));
+
+        // Per-run counters reset to 0.
+        assert_eq!(s.tokens_in, 0);
+        assert_eq!(s.tokens_out, 0);
+        // Session-cumulative counters survive.
+        assert_eq!(s.session_usage.input, 5_000);
+        assert_eq!(s.session_usage.output, 1_200);
     }
 }
