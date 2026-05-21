@@ -27,10 +27,16 @@ pub struct ImageContent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ThinkingContent {
     pub thinking: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+    /// Provider-specific raw reasoning payload preserved so the next turn can
+    /// replay it verbatim (e.g. OpenAI o-series `reasoning_content`,
+    /// DeepSeek-R1 `reasoning_content`). Anthropic uses [`Self::signature`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
