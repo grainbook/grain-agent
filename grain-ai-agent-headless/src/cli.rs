@@ -77,6 +77,12 @@ pub struct Args {
     /// it's created on first append.
     #[arg(long)]
     pub session: Option<PathBuf>,
+
+    /// Register the `semantic_search` tool. Requires the `rig` cargo
+    /// feature to be enabled at build time and `OPENAI_API_KEY` at
+    /// runtime. Off by default.
+    #[arg(long, default_value_t = false)]
+    pub allow_semantic_search: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -153,8 +159,27 @@ pub async fn run(args: Args) -> Result<(), CliError> {
         tools.extend(coding_write_tools(workspace.clone()));
     }
     if args.allow_bash {
-        tools.extend(coding_bash_tools(workspace));
+        tools.extend(coding_bash_tools(workspace.clone()));
     }
+    if args.allow_semantic_search {
+        #[cfg(feature = "rig")]
+        {
+            let semantic = crate::semantic::SemanticSearchTool::from_env(
+                workspace.clone(),
+                crate::semantic::SemanticIndexConfig::default(),
+            )?;
+            tools.push(Arc::new(semantic));
+        }
+        #[cfg(not(feature = "rig"))]
+        {
+            return Err(
+                "--allow-semantic-search requires the `rig` cargo feature; \
+                 rebuild with `cargo build --features rig`"
+                    .into(),
+            );
+        }
+    }
+    let _ = workspace; // keep alive when no further tool branches consume it
     opts.tools = tools;
     opts.messages = prior_messages;
     opts.transform_context = Some(guard);

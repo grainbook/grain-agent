@@ -28,6 +28,8 @@ ignore = "0.4"
 regex = "1"
 globset = "0.4"
 clap = { version = "4", features = ["derive"] }
+rig-core = { version = "0.37", features = ["derive"] }
+anyhow = "1"
 grain-agent-core = { path = "grain-agent-core" }
 grain-agent-harness = { path = "grain-agent-harness" }
 grain-llm-models = { path = "grain-llm-models" }

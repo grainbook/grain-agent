@@ -34,6 +34,9 @@ pub mod session;
 pub mod tools;
 pub mod workspace;
 
+#[cfg(feature = "rig")]
+pub mod semantic;
+
 pub use cli::{Args, EventPrinter, OpenAiCompatChoice, run};
 pub use prompt::{
     DEFAULT_CODING_AGENT_SYSTEM_PROMPT, FULL_CODING_AGENT_SYSTEM_PROMPT,
@@ -48,3 +51,6 @@ pub use tools::{
     BashTool, EditTool, GlobTool, GrepTool, ListTool, ReadTool, WriteTool,
 };
 pub use workspace::{Workspace, WorkspaceError};
+
+#[cfg(feature = "rig")]
+pub use semantic::{SemanticIndexConfig, SemanticInitError, SemanticSearchTool};
