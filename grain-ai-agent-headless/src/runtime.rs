@@ -9,16 +9,19 @@ use std::sync::Arc;
 
 use grain_agent_core::AgentTool;
 
-use crate::tools::{BashTool, EditTool, GlobTool, GrepTool, ListTool, ReadTool, WriteTool};
+use crate::tools::{
+    BashTool, EditTool, GlobTool, GrepTool, ListTool, ReadTool, SourceInfoTool, WriteTool,
+};
 use crate::workspace::Workspace;
 
-/// Read-only filesystem tools: Read / List / Glob / Grep.
+/// Read-only filesystem tools: Read / List / Glob / Grep / SourceInfo.
 pub fn coding_read_tools(workspace: Arc<Workspace>) -> Vec<Arc<dyn AgentTool>> {
     vec![
         Arc::new(ReadTool::new(workspace.clone())),
         Arc::new(ListTool::new(workspace.clone())),
         Arc::new(GlobTool::new(workspace.clone())),
-        Arc::new(GrepTool::new(workspace)),
+        Arc::new(GrepTool::new(workspace.clone())),
+        Arc::new(SourceInfoTool::new(workspace)),
     ]
 }
 

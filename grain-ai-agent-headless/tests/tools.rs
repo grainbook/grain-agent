@@ -291,11 +291,11 @@ async fn grep_invalid_regex_yields_validation_error() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn coding_read_tools_returns_all_four_tools() {
+async fn coding_read_tools_returns_all_five_tools() {
     let (_dir, ws) = workspace_with_files(&[("a.txt", "")]);
     let tools = grain_ai_agent_headless::coding_read_tools(ws);
     let names: Vec<&str> = tools.iter().map(|t| t.definition().name.as_str()).collect();
-    assert_eq!(names, vec!["read", "list", "glob", "grep"]);
+    assert_eq!(names, vec!["read", "list", "glob", "grep", "source_info"]);
 }
 
 #[tokio::test]
@@ -303,7 +303,10 @@ async fn coding_all_tools_includes_write_and_edit() {
     let (_dir, ws) = workspace_with_files(&[("a.txt", "")]);
     let tools = grain_ai_agent_headless::coding_all_tools(ws);
     let names: Vec<&str> = tools.iter().map(|t| t.definition().name.as_str()).collect();
-    assert_eq!(names, vec!["read", "list", "glob", "grep", "write", "edit"]);
+    assert_eq!(
+        names,
+        vec!["read", "list", "glob", "grep", "source_info", "write", "edit"]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -669,6 +672,15 @@ async fn coding_full_tools_includes_bash() {
     let names: Vec<&str> = tools.iter().map(|t| t.definition().name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["read", "list", "glob", "grep", "write", "edit", "bash"]
+        vec![
+            "read",
+            "list",
+            "glob",
+            "grep",
+            "source_info",
+            "write",
+            "edit",
+            "bash"
+        ]
     );
 }

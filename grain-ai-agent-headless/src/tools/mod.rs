@@ -10,6 +10,7 @@ pub mod glob;
 pub mod grep;
 pub mod list;
 pub mod read;
+pub mod source_info;
 pub mod write;
 
 pub use bash::BashTool;
@@ -18,4 +19,5 @@ pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use list::ListTool;
 pub use read::ReadTool;
+pub use source_info::SourceInfoTool;
 pub use write::WriteTool;

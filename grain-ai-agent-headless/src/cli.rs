@@ -18,9 +18,12 @@ use grain_agent_harness::context_guard::{ContextGuard, ContextGuardPolicy};
 use grain_llm_genai::{GenaiStream, OpenAiCompatPreset};
 use grain_llm_models::Registry;
 
+use crate::diagnostics::{render_doctor_report, render_source_info_block};
 use crate::prompt::coding_agent_system_prompt;
 use crate::runtime::{coding_bash_tools, coding_read_tools, coding_write_tools};
 use crate::session::{SessionWriter, load_messages};
+use crate::skills::{find_skills, resolve_skills_dir};
+use crate::slash::{HELP_TEXT, SlashCommand, parse as parse_slash};
 use crate::workspace::Workspace;
 
 /// `grain-headless` — single-prompt coding agent over the local workspace.
@@ -83,6 +86,18 @@ pub struct Args {
     /// runtime. Off by default.
     #[arg(long, default_value_t = false)]
     pub allow_semantic_search: bool,
+
+    /// Directory to scan for `<name>/SKILL.md` skill files. Defaults to
+    /// `<workspace>/.claude/skills`. Discovered skills are appended to the
+    /// system prompt automatically. Pass an empty / non-existent path to
+    /// disable disk-based skills.
+    #[arg(long)]
+    pub skills_dir: Option<PathBuf>,
+
+    /// Print a workspace + provider diagnostic and exit. Doesn't call any
+    /// LLM endpoints; safe to run before configuring keys.
+    #[arg(long, default_value_t = false)]
+    pub doctor: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -107,6 +122,14 @@ pub async fn run(args: Args) -> Result<(), CliError> {
     // --- Workspace + registry ---------------------------------------------
     let workspace = Arc::new(Workspace::new(&args.workspace)?);
     let registry = Arc::new(Registry::from_embedded_snapshot());
+
+    // --- Doctor short-circuit ---------------------------------------------
+    // Runs no LLM calls; safe even when no keys are set.
+    if args.doctor {
+        let report = render_doctor_report(&workspace, &registry);
+        print!("{report}");
+        return Ok(());
+    }
 
     let model = registry.to_core_model(&args.model).ok_or_else(|| {
         format!(
@@ -143,10 +166,15 @@ pub async fn run(args: Args) -> Result<(), CliError> {
     } else {
         Some(resolve_prompt(&args)?)
     };
-    let system_prompt = resolve_system_prompt(&args)?;
+    let mut system_prompt = resolve_system_prompt(&args)?;
+    let skills_block = resolve_skills_block(&args, workspace.root());
+    if !skills_block.is_empty() {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&skills_block);
+    }
 
     // --- Context guard -----------------------------------------------------
-    let guard = ContextGuard::new(registry, args.model.clone())
+    let guard = ContextGuard::new(registry.clone(), args.model.clone())
         .with_policy(ContextGuardPolicy::DropOldest)
         .with_headroom_tokens(args.headroom_tokens)
         .into_transform_fn();
@@ -230,14 +258,29 @@ pub async fn run(args: Args) -> Result<(), CliError> {
     }
 
     if args.interactive {
-        run_interactive_loop(&agent).await?;
+        let ctx = InteractiveContext {
+            workspace: workspace.clone(),
+            registry: registry.clone(),
+            skills_dir: resolve_skills_dir(workspace.root(), args.skills_dir.as_deref()),
+        };
+        run_interactive_loop(&agent, &ctx).await?;
     }
 
     Ok(())
 }
 
+/// Inputs the interactive loop's slash-command dispatch needs (separate from
+/// `Args` to keep the run-time helpers reusable from tests).
+struct InteractiveContext {
+    workspace: Arc<Workspace>,
+    registry: Arc<Registry>,
+    skills_dir: PathBuf,
+}
+
 /// Read-prompt-respond loop. Reads lines from stdin until EOF or `/exit`.
-async fn run_interactive_loop(agent: &Agent) -> Result<(), CliError> {
+/// Slash commands are intercepted by the parser; anything else is forwarded
+/// to the agent as a new prompt.
+async fn run_interactive_loop(agent: &Agent, ctx: &InteractiveContext) -> Result<(), CliError> {
     let stdin = io::stdin();
     let mut line = String::new();
     loop {
@@ -254,8 +297,48 @@ async fn run_interactive_loop(agent: &Agent) -> Result<(), CliError> {
         if trimmed.is_empty() {
             continue;
         }
-        if trimmed == "/exit" || trimmed == "/quit" {
-            break;
+        if let Some(cmd) = parse_slash(trimmed) {
+            match cmd {
+                SlashCommand::Exit => break,
+                SlashCommand::Help => {
+                    print!("{HELP_TEXT}");
+                }
+                SlashCommand::Clear => {
+                    agent.reset().await;
+                    eprintln!("(transcript cleared)");
+                }
+                SlashCommand::Skills => match find_skills(&ctx.skills_dir) {
+                    Ok(skills) if skills.is_empty() => {
+                        eprintln!("(no skills found in {})", ctx.skills_dir.display());
+                    }
+                    Ok(skills) => {
+                        for s in &skills {
+                            let disabled = if s.disable_model_invocation {
+                                " [disabled]"
+                            } else {
+                                ""
+                            };
+                            println!("- {}{disabled}  — {}", s.name, s.description);
+                        }
+                    }
+                    Err(e) => eprintln!("[error] {e}"),
+                },
+                SlashCommand::Doctor => {
+                    print!("{}", render_doctor_report(&ctx.workspace, &ctx.registry));
+                }
+                SlashCommand::Source => {
+                    print!("{}", render_source_info_block(ctx.workspace.root(), 0));
+                }
+                SlashCommand::Compact => {
+                    eprintln!(
+                        "(compaction not yet implemented — see grain-agent-harness::compaction TODO)"
+                    );
+                }
+                SlashCommand::Unknown(raw) => {
+                    eprintln!("(unknown command {raw}; try /help)");
+                }
+            }
+            continue;
         }
         if let Err(e) = agent.prompt_text(trimmed).await {
             eprintln!("[error] {e}");
@@ -289,6 +372,21 @@ fn resolve_system_prompt(args: &Args) -> Result<String, CliError> {
         return Ok(s);
     }
     Ok(coding_agent_system_prompt(args.allow_write, args.allow_bash).to_string())
+}
+
+/// Discover skills and render the `<available_skills>` block to append to
+/// the system prompt. Errors during discovery degrade to an empty block —
+/// missing or malformed skill files shouldn't break the agent.
+fn resolve_skills_block(args: &Args, workspace_root: &std::path::Path) -> String {
+    let dir = resolve_skills_dir(workspace_root, args.skills_dir.as_deref());
+    let skills = match find_skills(&dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[warn] skills discovery in {}: {e}", dir.display());
+            return String::new();
+        }
+    };
+    grain_agent_harness::format_skills_for_system_prompt(&skills)
 }
 
 // ---------------------------------------------------------------------------
