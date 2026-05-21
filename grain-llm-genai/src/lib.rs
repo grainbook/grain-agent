@@ -4,20 +4,19 @@
 //! [`genai`] crate's multi-provider chat API. Project layout:
 //!
 //! - [`mapping::outbound`] — translate [`grain_agent_core::LlmContext`] into a
-//!   [`genai::chat::ChatRequest`].
-//! - **`mapping::inbound`** *(PR 3b)* — translate [`genai::chat::ChatStreamEvent`]
-//!   into [`grain_agent_core::AssistantMessageEvent`], including thinking /
-//!   reasoning block round-tripping via
-//!   [`grain_agent_core::ThinkingContent::provider_metadata`].
-//! - **`config` / `builder`** *(PR 3c)* — env-var API key resolver, OpenAI-compatible
+//!   [`genai::chat::ChatRequest`]; includes thinking / reasoning replay
+//!   (PR 3b: `with_reasoning_content` + `thought_signatures` on first tool call).
+//! - [`mapping::inbound`] — turn [`genai::chat::ChatStreamEvent`] into
+//!   [`grain_agent_core::AssistantMessageEvent`] via the [`InboundState`]
+//!   state machine.
+//! - [`stream`] — `GenaiStream`, a [`grain_agent_core::LlmStream`] impl.
+//! - **`config` / `builder`** *(PR 3c)* — env-var API key resolver, OpenAI-compat
 //!   provider presets, [`grain_llm_models::Registry`] wiring.
-//!
-//! PR 3a deliberately ships only the outbound mapping function and its smoke
-//! tests so the translation surface can be reviewed in isolation before any
-//! network-touching code is written.
 
 pub mod mapping;
+pub mod stream;
 
-pub use mapping::outbound::{
-    baseline_chat_options, to_chat_request,
-};
+pub use mapping::inbound::InboundState;
+pub use mapping::outbound::{baseline_chat_options, to_chat_request};
+pub use mapping::usage::map_usage;
+pub use stream::GenaiStream;

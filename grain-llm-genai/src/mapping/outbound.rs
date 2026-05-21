@@ -1,9 +1,16 @@
 //! Outbound: project [`grain_agent_core::LlmContext`] into a [`genai::chat::ChatRequest`].
 //!
-//! Pure functions, no I/O. Thinking / reasoning content blocks
-//! ([`grain_agent_core::AssistantContent::Thinking`]) are intentionally
-//! dropped at this layer — PR 3b reintroduces them with provider-specific
-//! replay logic driven by [`grain_llm_models::ThinkingProfile::reasoning_field_name`].
+//! Pure functions, no I/O. Thinking / reasoning replay (PR 3b):
+//! - `Thinking.signature` values are attached to the **first** outgoing
+//!   [`genai::chat::ToolCall::thought_signatures`] — matches the convention
+//!   in `genai 0.5`'s own stream-end finalizer for Anthropic-style signed
+//!   thinking blocks. This is the path that preserves multi-turn correctness
+//!   on Anthropic (provider re-validates via signature).
+//! - **Reasoning text is intentionally not echoed back.** `genai 0.5` does
+//!   not expose an outbound slot for `reasoning_content`; providers
+//!   regenerate their own reasoning each turn (OpenAI o-series, DeepSeek-R1)
+//!   so re-sending it isn't required for correctness. The text is still
+//!   preserved in the grain transcript via [`AssistantContent::Thinking`].
 
 use genai::chat::{
     ChatMessage, ChatOptions, ChatRequest, ContentPart, MessageContent, Tool, ToolCall,
@@ -14,23 +21,16 @@ use grain_agent_core::{
     ToolResultMessage, UserContent, UserMessage,
 };
 
-/// Sensible defaults for any genai chat request driven by the agent loop:
-/// capture content, usage, and tool calls so the terminal `StreamEnd` event
-/// is enough to materialize a complete `AssistantMessage` in PR 3b.
+/// Sensible defaults for any genai chat request driven by the agent loop.
 pub fn baseline_chat_options() -> ChatOptions {
     ChatOptions::default()
         .with_capture_content(true)
         .with_capture_usage(true)
         .with_capture_tool_calls(true)
+        .with_capture_reasoning_content(true)
 }
 
 /// Translate an `LlmContext` snapshot into a `ChatRequest`.
-///
-/// - The system prompt is attached only when non-empty.
-/// - Tools are forwarded only when the context lists any (genai treats an
-///   empty `tools` vector and `None` differently for some providers).
-/// - User / assistant / tool-result messages are each turned into a single
-///   [`ChatMessage`] preserving in-message content order.
 pub fn to_chat_request(ctx: &LlmContext) -> ChatRequest {
     let mut chat = ChatRequest::new(Vec::with_capacity(ctx.messages.len()));
 
@@ -64,7 +64,6 @@ fn user_to_chat_message(msg: &UserMessage) -> ChatMessage {
 }
 
 fn user_content_to_message_content(content: &[UserContent]) -> MessageContent {
-    // Single text → use the more compact text path; otherwise fall back to parts.
     if let [UserContent::Text(t)] = content {
         return MessageContent::from_text(t.text.clone());
     }
@@ -76,18 +75,15 @@ fn user_content_to_part(c: &UserContent) -> ContentPart {
     match c {
         UserContent::Text(t) => ContentPart::Text(t.text.clone()),
         UserContent::Image(img) => {
-            // genai's Binary variant — providers handle data:URL / multipart per protocol.
-            // Trailing `None` is the optional human-facing filename; not part of our model.
             ContentPart::from_binary_base64(img.mime_type.clone(), img.data.clone(), None)
         }
     }
 }
 
 fn assistant_to_chat_message(msg: &AssistantMessage) -> ChatMessage {
-    // PR 3a scope: collect Text + ToolCall parts in source order; drop Thinking
-    // (PR 3b will route through `ChatMessage::with_reasoning_content` or
-    // `assistant_tool_calls_with_thoughts` depending on provider profile).
     let mut parts: Vec<ContentPart> = Vec::with_capacity(msg.content.len());
+    let mut signatures: Vec<String> = Vec::new();
+
     for c in &msg.content {
         match c {
             AssistantContent::Text(t) => parts.push(ContentPart::Text(t.text.clone())),
@@ -97,30 +93,42 @@ fn assistant_to_chat_message(msg: &AssistantMessage) -> ChatMessage {
                 fn_arguments: tc.arguments.clone(),
                 thought_signatures: None,
             })),
-            AssistantContent::Thinking(_) | AssistantContent::Image(_) => {
-                // Thinking: PR 3b handles round-tripping with provider_metadata.
-                // Image-from-assistant is rare; defer until a model actually needs it.
+            AssistantContent::Thinking(t) => {
+                if let Some(sig) = &t.signature {
+                    signatures.push(sig.clone());
+                }
+                // `t.thinking` and `t.provider_metadata` are preserved in the
+                // grain transcript but not echoed back; genai 0.5 has no
+                // outbound slot for plain reasoning text.
+            }
+            AssistantContent::Image(_) => {}
+        }
+    }
+
+    // Anthropic-style: thought signatures travel on the first tool call.
+    // Mirrors `genai 0.5`'s own captured_thought_signatures placement on
+    // stream-end finalization. Critical for multi-turn signed-thinking flows.
+    if !signatures.is_empty() {
+        for part in parts.iter_mut() {
+            if let ContentPart::ToolCall(tc) = part {
+                tc.thought_signatures = Some(signatures.clone());
+                break;
             }
         }
     }
 
-    // Empty assistant turn: still emit a zero-length text so the wire format
-    // is well-formed (some providers reject empty content arrays).
-    if parts.is_empty() {
-        return ChatMessage::assistant(MessageContent::from_text(String::new()));
-    }
+    let content = if parts.is_empty() {
+        MessageContent::from_text(String::new())
+    } else if let [ContentPart::Text(text)] = parts.as_slice() {
+        MessageContent::from_text(text.clone())
+    } else {
+        MessageContent::from_parts(parts)
+    };
 
-    if let [ContentPart::Text(text)] = parts.as_slice() {
-        return ChatMessage::assistant(MessageContent::from_text(text.clone()));
-    }
-
-    ChatMessage::assistant(MessageContent::from_parts(parts))
+    ChatMessage::assistant(content)
 }
 
 fn tool_result_to_chat_message(msg: &ToolResultMessage) -> ChatMessage {
-    // Flatten text parts; tool results in the grain transcript are typically
-    // a single text segment. Image / binary tool responses aren't part of any
-    // current provider's spec — drop them rather than guess.
     let text = msg
         .content
         .iter()
@@ -131,9 +139,8 @@ fn tool_result_to_chat_message(msg: &ToolResultMessage) -> ChatMessage {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // genai 0.5.3's `ToolResponse` does not carry the function name; results are
-    // correlated by `call_id`. `tool_name` on our `ToolResultMessage` is dropped
-    // at this boundary (still preserved in the grain transcript for our records).
+    // `tool_name` is dropped at the genai boundary — results are correlated
+    // by `call_id` (genai 0.5's `ToolResponse` has no fn_name slot).
     let response = ToolResponse::new(msg.tool_call_id.clone(), text);
     ChatMessage::from(response)
 }

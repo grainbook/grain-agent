@@ -134,20 +134,22 @@ fn assistant_with_tool_calls_emits_tool_call_part() {
 }
 
 #[test]
-fn thinking_blocks_are_dropped_in_pr3a() {
+fn thinking_text_is_not_echoed_back_to_provider() {
     use grain_agent_core::ThinkingContent;
+    // genai 0.5 has no outbound reasoning_content slot; reasoning text stays
+    // in the grain transcript but does not appear on the wire.
     let msg = Message::Assistant(AssistantMessage {
         content: vec![
             AssistantContent::Thinking(ThinkingContent {
                 thinking: "internal reasoning".into(),
-                signature: Some("sig".into()),
+                signature: None,
                 provider_metadata: None,
             }),
             AssistantContent::Text(TextContent { text: "final answer".into() }),
         ],
-        api: "anthropic".into(),
-        provider: "anthropic".into(),
-        model: "claude".into(),
+        api: "openai".into(),
+        provider: "openai".into(),
+        model: "o3-mini".into(),
         usage: Usage::default(),
         stop_reason: StopReason::Stop,
         error_message: None,
@@ -156,8 +158,57 @@ fn thinking_blocks_are_dropped_in_pr3a() {
     let chat = to_chat_request(&ctx(vec![msg], vec![], ""));
     let body = serde_json::to_value(&chat.messages[0].content).unwrap();
     let body_s = body.to_string();
-    assert!(!body_s.contains("internal reasoning"), "PR 3a drops thinking content");
-    assert!(body_s.contains("final answer"), "text survives thinking removal");
+    assert!(!body_s.contains("internal reasoning"), "no outbound slot for reasoning text");
+    assert!(body_s.contains("final answer"));
+}
+
+#[test]
+fn thinking_signature_attaches_to_first_tool_call() {
+    use grain_agent_core::ThinkingContent;
+    let msg = Message::Assistant(AssistantMessage {
+        content: vec![
+            AssistantContent::Thinking(ThinkingContent {
+                thinking: "anthropic chain".into(),
+                signature: Some("sig-abc".into()),
+                provider_metadata: None,
+            }),
+            AssistantContent::ToolCall(ToolCall {
+                id: "call-1".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "value": "hi" }),
+            }),
+            AssistantContent::ToolCall(ToolCall {
+                id: "call-2".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "value": "ho" }),
+            }),
+        ],
+        api: "anthropic".into(),
+        provider: "anthropic".into(),
+        model: "claude".into(),
+        usage: Usage::default(),
+        stop_reason: StopReason::ToolUse,
+        error_message: None,
+        timestamp: 0,
+    });
+    let chat = to_chat_request(&ctx(vec![msg], vec![], ""));
+    let body = serde_json::to_value(&chat.messages[0].content).unwrap();
+    let arr = body.as_array().expect("parts");
+    // First tool call carries the signature; second does not.
+    let to_calls: Vec<&serde_json::Value> = arr
+        .iter()
+        .filter_map(|v| v.get("ToolCall"))
+        .collect();
+    assert_eq!(to_calls.len(), 2);
+    assert_eq!(
+        to_calls[0].get("thought_signatures"),
+        Some(&serde_json::json!(["sig-abc"]))
+    );
+    assert!(
+        to_calls[1].get("thought_signatures").is_none()
+            || to_calls[1].get("thought_signatures") == Some(&serde_json::Value::Null),
+        "second tool call has no signatures",
+    );
 }
 
 #[test]

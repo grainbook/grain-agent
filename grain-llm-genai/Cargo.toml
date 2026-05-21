@@ -6,12 +6,19 @@ license.workspace = true
 description = "genai-backed LlmStream implementation for grain-agent. Bridges grain-agent-core's transport-agnostic agent loop to the genai crate's multi-provider chat API. PR 3a: outbound mapping only — impl LlmStream, inbound mapping, and env/quirk config land in subsequent PRs."
 
 [dependencies]
+async-trait = { workspace = true }
+async-stream = { workspace = true }
+futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
 genai = { workspace = true }
 grain-agent-core = { workspace = true }
 grain-llm-models = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros"] }
+futures = { workspace = true }
