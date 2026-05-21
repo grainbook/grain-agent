@@ -164,10 +164,13 @@ pub struct PromptTemplate {
 
 impl std::fmt::Debug for PromptTemplate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `render` is a closure — deliberately omitted. `finish_non_exhaustive`
+        // marks the struct as not fully printed so readers know there's
+        // more behind the curtain.
         f.debug_struct("PromptTemplate")
             .field("name", &self.name)
             .field("description", &self.description)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -454,7 +457,7 @@ impl AgentHarness {
         // filtered subset that goes into the Agent.
         let active_set: Option<HashSet<String>> =
             active_tool_names.map(|v| v.into_iter().collect());
-        let filtered_tools = filter_tools(&tools, &active_set);
+        let filtered_tools = filter_tools(&tools, active_set.as_ref());
 
         let stream_fn_for_compact = stream_fn.clone();
         let mut agent_opts = AgentOptions::new(model, stream_fn);
@@ -659,7 +662,7 @@ impl AgentHarness {
                 }
             }
             g.active_tool_names = Some(names.iter().cloned().collect());
-            new_filtered = filter_tools(&g.all_tools, &g.active_tool_names);
+            new_filtered = filter_tools(&g.all_tools, g.active_tool_names.as_ref());
             new_names = names.to_vec();
         }
         self.agent.set_tools(new_filtered).await;
@@ -875,7 +878,7 @@ impl AgentHarness {
 
 fn filter_tools(
     all: &[Arc<dyn AgentTool>],
-    active: &Option<HashSet<String>>,
+    active: Option<&HashSet<String>>,
 ) -> Vec<Arc<dyn AgentTool>> {
     match active {
         None => all.to_vec(),

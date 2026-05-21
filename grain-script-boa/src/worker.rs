@@ -241,7 +241,7 @@ fn install_grain_global(
             state_clone
                 .borrow_mut()
                 .fns
-                .insert(name.clone(), run_obj.clone());
+                .insert(name.clone(), run_obj);
             state_clone.borrow_mut().metas.insert(
                 name.clone(),
                 ToolMeta {
@@ -286,7 +286,7 @@ fn install_grain_global(
             cb_state
                 .borrow_mut()
                 .callbacks
-                .insert(name, fn_obj.clone());
+                .insert(name, fn_obj);
             Ok(JsValue::undefined())
         })
     };
@@ -396,8 +396,8 @@ fn install_grain_global(
     // commands — fine inside a command handler (user is already
     // waiting) but a deadlock risk inside an event listener (the
     // agent's progress depends on the listener returning).
-    let modal_state = state.clone();
-    let modal_rx_for_fn = modal_rx.clone();
+    let modal_state = state;
+    let modal_rx_for_fn = modal_rx;
     let notify_tx_modal = notify_tx;
     let modal_request = unsafe {
         NativeFunction::from_closure(move |_this, args, ictx| {
