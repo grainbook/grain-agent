@@ -312,7 +312,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &Pa
         spans.push(Span::raw("  "));
     }
     spans.push(Span::styled(
-        "Tab focus  F1 help  F2 doctor  F3 skills  / commands  Ctrl-C abort  Esc quit",
+        "↑↓ history  Tab complete  F1 help  F2 doctor  F3 skills  / commands  Ctrl-C abort  Esc clear/quit",
         Style::default().fg(palette.muted),
     ));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -331,7 +331,7 @@ fn draw_overlay(
     // shows everything we render today.
     let (target_w, target_h) = match overlay {
         Overlay::Help => (62, 22),
-        Overlay::Doctor(_) => (76, 22),
+        Overlay::Doctor { .. } => (84, 26),
         Overlay::Skills(_) => (66, 18),
         Overlay::ThemePicker { .. } => (60, 20),
     };
@@ -352,7 +352,9 @@ fn draw_overlay(
 
     let (title, body): (&str, OverlayBody) = match overlay {
         Overlay::Help => ("help", OverlayBody::Text(HELP_TEXT.to_string())),
-        Overlay::Doctor(text) => ("doctor", OverlayBody::Text(text.clone())),
+        Overlay::Doctor { report, query, scroll } => {
+            return draw_doctor(frame, inner, report, query, *scroll, palette);
+        }
         Overlay::Skills(skills) => ("skills", OverlayBody::Skills(skills)),
         Overlay::ThemePicker { focused } => {
             return draw_theme_picker(frame, inner, *focused, state, palette);
@@ -436,6 +438,132 @@ fn draw_overlay(
 enum OverlayBody<'a> {
     Text(String),
     Skills(&'a [(String, String, bool)]),
+}
+
+fn draw_doctor(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    report: &str,
+    query: &str,
+    scroll: usize,
+    palette: &Palette,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // title
+            Constraint::Length(1), // pad
+            Constraint::Length(1), // search input
+            Constraint::Length(1), // pad
+            Constraint::Min(1),    // body
+            Constraint::Length(1), // hint
+        ])
+        .split(popup);
+
+    let title_line = Line::from(vec![
+        Span::styled(
+            "doctor",
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("({} lines)", report.lines().count()),
+            Style::default().fg(palette.muted),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(title_line), chunks[0]);
+
+    // Search bar with caret. Empty query shows a placeholder.
+    let search_line = if query.is_empty() {
+        Line::from(vec![
+            Span::styled("⌕ ", Style::default().fg(palette.accent)),
+            Span::styled(
+                "type to filter (e.g. ANTHROPIC, deepseek, branch) …",
+                Style::default().fg(palette.muted),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("⌕ ", Style::default().fg(palette.accent)),
+            Span::styled(query.to_string(), Style::default().fg(palette.fg)),
+            Span::styled("▌", Style::default().fg(palette.accent)),
+        ])
+    };
+    frame.render_widget(Paragraph::new(search_line), chunks[2]);
+
+    // Filter the report. Empty query → keep every line. Otherwise
+    // case-insensitive substring match, except section headers
+    // (lines starting with `===`) are always retained so the user
+    // doesn't lose orientation while filtering.
+    let needle = query.to_ascii_lowercase();
+    let filtered: Vec<&str> = if needle.is_empty() {
+        report.lines().collect()
+    } else {
+        report
+            .lines()
+            .filter(|line| {
+                line.trim().starts_with("===")
+                    || line.to_ascii_lowercase().contains(&needle)
+            })
+            .collect()
+    };
+
+    let body_area = chunks[4];
+    let visible = body_area.height as usize;
+    let total = filtered.len();
+    let max_scroll = total.saturating_sub(visible);
+    let start = scroll.min(max_scroll);
+    let end = (start + visible).min(total);
+    let slice = &filtered[start..end];
+
+    let lines: Vec<Line> = slice
+        .iter()
+        .map(|line| {
+            // Headers (=== … ===) get accent color so the filtered
+            // view still reads like a structured report.
+            let style = if line.trim().starts_with("===") {
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else if needle.is_empty() {
+                Style::default().fg(palette.fg)
+            } else if line.to_ascii_lowercase().contains(&needle) {
+                Style::default()
+                    .fg(palette.fg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.fg)
+            };
+            Line::from(Span::styled((*line).to_string(), style))
+        })
+        .collect();
+
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+        body_area,
+    );
+
+    let hint = if total == 0 {
+        format!("(no lines match \"{query}\") · Esc to close")
+    } else if max_scroll > 0 {
+        format!(
+            "showing {}-{} of {} · ↑↓/PgUp/PgDn scroll · Esc close",
+            start + 1,
+            end,
+            total
+        )
+    } else {
+        "↑↓ scroll · Esc close".to_string()
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            hint,
+            Style::default().fg(palette.muted),
+        ))),
+        chunks[5],
+    );
 }
 
 fn draw_theme_picker(
@@ -528,16 +656,14 @@ fn theme_picker_row(
 }
 
 const HELP_TEXT: &str = "\
-  Enter           submit prompt
-  Esc             close overlay; else quit
-  Tab             switch focus (input ↔ transcript)
-  Ctrl-C          abort current turn (while streaming)
-  F1              this help
-  F2              doctor report
-  F3              skills list
+  Enter           submit prompt (or accept slash palette pick)
+  Esc             close overlay; else clear input; else quit
+  Tab             complete the selected slash command (palette open)
+  Ctrl-C          abort current turn while streaming; quit when idle
+  F1 / F2 / F3    help · doctor · skills
   ←/→/Home/End    move cursor in input
-  ↑/↓/PgUp/PgDn   scroll transcript (when focused)
-                  · in palette / theme picker: navigate / apply
+  ↑/↓             history (no palette) · navigate (palette / picker)
+  PgUp / PgDn     scroll transcript
 
 slash commands
 

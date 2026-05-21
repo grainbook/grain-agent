@@ -28,8 +28,16 @@ pub enum Focus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Overlay {
     Help,
-    /// Rendered text from `grain_ai_agent_headless::render_doctor_report`.
-    Doctor(String),
+    /// Doctor report from `grain_ai_agent_headless::render_doctor_report`,
+    /// plus per-overlay search state: live filter `query` (matched
+    /// case-insensitively against each line) and `scroll` offset for
+    /// when the (possibly filtered) report is taller than the body
+    /// pane.
+    Doctor {
+        report: String,
+        query: String,
+        scroll: usize,
+    },
     /// Loaded skill names + descriptions + disabled flag.
     Skills(Vec<(String, String, bool)>),
     /// Theme picker — `focused` is the index into [`AppState::themes`].
@@ -323,7 +331,24 @@ impl AppState {
                 Vec::new()
             }
             TuiEvent::OverlayDoctor(text) => {
-                self.overlay = Some(Overlay::Doctor(text));
+                // If the user already opened a doctor placeholder
+                // (via F2 or /doctor), keep their typed query and
+                // scroll position and just swap the report contents.
+                if let Some(Overlay::Doctor { query, scroll, .. }) = &self.overlay {
+                    let query = query.clone();
+                    let scroll = *scroll;
+                    self.overlay = Some(Overlay::Doctor {
+                        report: text,
+                        query,
+                        scroll,
+                    });
+                } else {
+                    self.overlay = Some(Overlay::Doctor {
+                        report: text,
+                        query: String::new(),
+                        scroll: 0,
+                    });
+                }
                 Vec::new()
             }
             TuiEvent::OverlaySkills(skills) => {
@@ -380,13 +405,24 @@ impl AppState {
         if matches!(self.overlay, Some(Overlay::ThemePicker { .. })) {
             return self.on_key_theme_picker(key);
         }
+        // Doctor overlay owns its own input: typed chars edit a search
+        // query that filters the report; arrows/PgUp/PgDn scroll the
+        // (possibly filtered) body. F1/F2/F3 / Esc / Ctrl-C above this
+        // line still work to switch out or quit.
+        if matches!(self.overlay, Some(Overlay::Doctor { .. })) {
+            return self.on_key_doctor(key);
+        }
         match key.code {
             KeyCode::F(1) => {
                 self.overlay = Some(Overlay::Help);
                 Vec::new()
             }
             KeyCode::F(2) => {
-                self.overlay = Some(Overlay::Doctor("Running diagnostics…".into()));
+                self.overlay = Some(Overlay::Doctor {
+                    report: "Running diagnostics…".into(),
+                    query: String::new(),
+                    scroll: 0,
+                });
                 vec![Command::ReturnDoctor]
             }
             KeyCode::F(3) => {
@@ -394,10 +430,30 @@ impl AppState {
                 vec![Command::ReturnSkills]
             }
             KeyCode::Tab => {
-                self.focus = match self.focus {
-                    Focus::Input => Focus::Transcript,
-                    Focus::Transcript => Focus::Input,
-                };
+                // While the slash palette is open, Tab completes the
+                // current input to the focused suggestion's trigger
+                // (without submitting, so the user can keep editing).
+                // Otherwise Tab is a no-op — explicitly NOT a focus
+                // toggle: stranding focus on the transcript silently
+                // dropped every typed Char and looked like the input
+                // had frozen out.
+                if self.palette_visible() {
+                    let matches = self.palette_matches();
+                    if let Some(item) = matches.get(self.palette_focused) {
+                        self.input = item.trigger.to_string();
+                        self.cursor = self.input.len();
+                    }
+                }
+                Vec::new()
+            }
+            // Transcript scroll keys work regardless of focus so the
+            // user never needs to leave input focus to look back.
+            KeyCode::PageUp => {
+                self.scroll_offset = self.scroll_offset.saturating_add(10);
+                Vec::new()
+            }
+            KeyCode::PageDown => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(10);
                 Vec::new()
             }
             _ => match self.focus {
@@ -520,6 +576,46 @@ impl AppState {
         }
     }
 
+    fn on_key_doctor(&mut self, key: KeyEvent) -> Vec<Command> {
+        let Some(Overlay::Doctor { query, scroll, .. }) = &mut self.overlay else {
+            return Vec::new();
+        };
+        match key.code {
+            // Search-input editing.
+            KeyCode::Char(c) => {
+                query.push(c);
+                *scroll = 0;
+            }
+            KeyCode::Backspace => {
+                query.pop();
+                *scroll = 0;
+            }
+            // Vertical scroll. `scroll` counts lines hidden from the
+            // TOP of the body, so Down reveals later lines.
+            KeyCode::Down => {
+                *scroll = scroll.saturating_add(1);
+            }
+            KeyCode::Up => {
+                *scroll = scroll.saturating_sub(1);
+            }
+            KeyCode::PageDown => {
+                *scroll = scroll.saturating_add(10);
+            }
+            KeyCode::PageUp => {
+                *scroll = scroll.saturating_sub(10);
+            }
+            KeyCode::Home => {
+                *scroll = 0;
+            }
+            KeyCode::End => {
+                // Renderer clamps to actual max; use a big sentinel.
+                *scroll = usize::MAX;
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
     fn on_key_theme_picker(&mut self, key: KeyEvent) -> Vec<Command> {
         let Some(Overlay::ThemePicker { focused }) = &mut self.overlay else {
             return Vec::new();
@@ -593,7 +689,11 @@ impl AppState {
                 vec![Command::Reset]
             }
             "doctor" => {
-                self.overlay = Some(Overlay::Doctor("Running diagnostics…".into()));
+                self.overlay = Some(Overlay::Doctor {
+                    report: "Running diagnostics…".into(),
+                    query: String::new(),
+                    scroll: 0,
+                });
                 vec![Command::ReturnDoctor]
             }
             "skills" => {
@@ -968,6 +1068,86 @@ mod tests {
         assert_eq!(s.input, "echo hi!");
     }
 
+    fn open_doctor(s: &mut AppState, report: &str) {
+        s.overlay = Some(Overlay::Doctor {
+            report: report.to_string(),
+            query: String::new(),
+            scroll: 0,
+        });
+    }
+
+    #[test]
+    fn doctor_typing_appends_to_query_and_resets_scroll() {
+        let mut s = fresh();
+        open_doctor(&mut s, "irrelevant");
+        // Pre-scroll so we can assert reset.
+        if let Some(Overlay::Doctor { scroll, .. }) = &mut s.overlay {
+            *scroll = 5;
+        }
+        for c in "API".chars() {
+            s.on_event(TuiEvent::Key(press(KeyCode::Char(c))));
+        }
+        let Some(Overlay::Doctor { query, scroll, .. }) = &s.overlay else {
+            panic!("doctor still open");
+        };
+        assert_eq!(query, "API");
+        assert_eq!(*scroll, 0, "typing must reset scroll to top");
+    }
+
+    #[test]
+    fn doctor_backspace_pops_query() {
+        let mut s = fresh();
+        open_doctor(&mut s, "x");
+        for c in "abc".chars() {
+            s.on_event(TuiEvent::Key(press(KeyCode::Char(c))));
+        }
+        s.on_event(TuiEvent::Key(press(KeyCode::Backspace)));
+        let Some(Overlay::Doctor { query, .. }) = &s.overlay else {
+            panic!();
+        };
+        assert_eq!(query, "ab");
+    }
+
+    #[test]
+    fn doctor_up_down_scrolls_body() {
+        let mut s = fresh();
+        open_doctor(&mut s, "many\nlines\nhere\n");
+        s.on_event(TuiEvent::Key(press(KeyCode::Down)));
+        s.on_event(TuiEvent::Key(press(KeyCode::Down)));
+        s.on_event(TuiEvent::Key(press(KeyCode::PageDown)));
+        let Some(Overlay::Doctor { scroll, .. }) = s.overlay else {
+            panic!();
+        };
+        assert_eq!(scroll, 12, "2 + 10 down steps");
+    }
+
+    #[test]
+    fn doctor_esc_closes_without_quitting() {
+        let mut s = fresh();
+        open_doctor(&mut s, "anything");
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Esc)));
+        assert!(cmds.is_empty());
+        assert!(s.overlay.is_none());
+        assert!(!s.should_quit);
+    }
+
+    #[test]
+    fn doctor_overlay_doctor_event_preserves_user_query() {
+        let mut s = fresh();
+        open_doctor(&mut s, "placeholder");
+        for c in "key".chars() {
+            s.on_event(TuiEvent::Key(press(KeyCode::Char(c))));
+        }
+        // Simulate the worker delivering the real report — should
+        // swap `report` but keep the user's typed query intact.
+        s.on_event(TuiEvent::OverlayDoctor("=== report ===\nfoo".into()));
+        let Some(Overlay::Doctor { report, query, .. }) = &s.overlay else {
+            panic!();
+        };
+        assert!(report.contains("=== report ==="));
+        assert_eq!(query, "key");
+    }
+
     #[test]
     fn down_with_no_recall_is_a_noop() {
         let mut s = fresh();
@@ -998,13 +1178,59 @@ mod tests {
     }
 
     #[test]
-    fn tab_toggles_focus() {
+    fn tab_without_palette_does_not_toggle_focus() {
+        // Regression guard for the "input goes gray and stops
+        // responding" bug: Tab used to flip focus to Transcript,
+        // after which typed chars were dropped. Now Tab is inert
+        // unless the palette is open (in which case it completes
+        // the selected command).
         let mut s = fresh();
         assert_eq!(s.focus, Focus::Input);
         s.on_event(TuiEvent::Key(press(KeyCode::Tab)));
-        assert_eq!(s.focus, Focus::Transcript);
-        s.on_event(TuiEvent::Key(press(KeyCode::Tab)));
-        assert_eq!(s.focus, Focus::Input);
+        assert_eq!(s.focus, Focus::Input, "Tab must NOT strand focus");
+        // Typing still works after Tab.
+        s.on_event(TuiEvent::Key(press(KeyCode::Char('a'))));
+        assert_eq!(s.input, "a");
+    }
+
+    #[test]
+    fn tab_completes_palette_selection_without_submitting() {
+        let mut s = fresh();
+        // Type "/the" → only /theme matches → focused is 0.
+        for c in "/the".chars() {
+            s.on_event(TuiEvent::Key(press(KeyCode::Char(c))));
+        }
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Tab)));
+        assert!(cmds.is_empty(), "Tab must not submit");
+        assert_eq!(s.input, "/theme");
+        assert_eq!(s.cursor, "/theme".len());
+        // The palette is still open and the input still starts with /,
+        // so a follow-up Enter will dispatch normally.
+        assert!(s.palette_visible());
+        // No transcript change — Tab is purely a complete, not a submit.
+        assert!(
+            !s.transcript
+                .iter()
+                .any(|l| l.kind == TranscriptKind::UserPrompt),
+            "Tab must not log a user prompt"
+        );
+    }
+
+    #[test]
+    fn page_up_and_page_down_scroll_transcript_from_input_focus() {
+        let mut s = fresh();
+        // Stuff the transcript so scrolling is meaningful.
+        for i in 0..30 {
+            s.push(TranscriptKind::Info, format!("line {i}"));
+        }
+        assert_eq!(s.scroll_offset, 0);
+        s.on_event(TuiEvent::Key(press(KeyCode::PageUp)));
+        assert_eq!(s.scroll_offset, 10);
+        s.on_event(TuiEvent::Key(press(KeyCode::PageDown)));
+        assert_eq!(s.scroll_offset, 0);
+        // PageDown saturates at zero, doesn't underflow.
+        s.on_event(TuiEvent::Key(press(KeyCode::PageDown)));
+        assert_eq!(s.scroll_offset, 0);
     }
 
     #[test]
