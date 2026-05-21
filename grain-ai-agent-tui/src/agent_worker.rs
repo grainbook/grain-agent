@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 use crate::app::Command;
 use crate::cli::Args;
 use crate::event::TuiEvent;
+use grain_llm_genai::{ProviderKind, ProviderProfile};
 
 /// Configuration crystallized out of [`Args`]. Pulled into its own
 /// struct so the spawn function isn't argument-soup.
@@ -43,6 +44,13 @@ pub struct WorkerConfig {
     pub skills_dir: Option<PathBuf>,
     pub session: Option<PathBuf>,
     pub telemetry_file: Option<PathBuf>,
+    /// Profiles loaded from `providers.toml`. Used both to register
+    /// per-profile OpenAI-compat endpoints at startup and to honor
+    /// `Command::ApplyProvider(...)` at runtime.
+    pub profiles: Vec<ProviderProfile>,
+    /// Index into [`Self::profiles`] for the profile to apply at
+    /// startup. `None` means use [`Self::model`] verbatim.
+    pub initial_profile_idx: Option<usize>,
 }
 
 impl From<&Args> for WorkerConfig {
@@ -60,6 +68,10 @@ impl From<&Args> for WorkerConfig {
             skills_dir: a.skills_dir.clone(),
             session: a.session.clone(),
             telemetry_file: a.telemetry_file.clone(),
+            // Profiles/initial_profile_idx are loaded in `run::run_tui`
+            // (it has the workspace path on hand). Defaulted here.
+            profiles: Vec::new(),
+            initial_profile_idx: None,
         }
     }
 }
@@ -84,6 +96,10 @@ pub enum WorkerInitError {
     Workspace(String),
     #[error("model '{0}' not found in embedded models.dev snapshot")]
     UnknownModel(String),
+    #[error("provider profile '{0}': model '{1}' not in registry")]
+    ProfileUnknownModel(String, String),
+    #[error("provider profile '{0}': OAuth login is not yet implemented")]
+    OauthNotWired(String),
     #[error("read system prompt {path}: {source}")]
     SystemPrompt {
         path: PathBuf,
@@ -122,9 +138,32 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         Workspace::new(&cfg.workspace_root).map_err(|e| WorkerInitError::Workspace(e.to_string()))?,
     );
     let registry = Arc::new(Registry::from_embedded_snapshot());
-    let model = registry
-        .to_core_model(&cfg.model)
-        .ok_or_else(|| WorkerInitError::UnknownModel(cfg.model.clone()))?;
+
+    // Resolve the model that the agent boots with. If a startup profile
+    // was named, its `model` (with provider rewritten to the profile
+    // name for OpenAI-compat routing) wins; otherwise fall back to the
+    // CLI `--model` flag.
+    let (model, active_model_id, active_profile_name) =
+        if let Some(idx) = cfg.initial_profile_idx
+            && let Some(profile) = cfg.profiles.get(idx)
+        {
+            if !profile.auth.is_usable() {
+                return Err(WorkerInitError::OauthNotWired(profile.name.clone()));
+            }
+            let m = registry.to_core_model(&profile.model).ok_or_else(|| {
+                WorkerInitError::ProfileUnknownModel(
+                    profile.name.clone(),
+                    profile.model.clone(),
+                )
+            })?;
+            let m = override_model_provider(m, profile);
+            (m, profile.model.clone(), Some(profile.name.clone()))
+        } else {
+            let m = registry
+                .to_core_model(&cfg.model)
+                .ok_or_else(|| WorkerInitError::UnknownModel(cfg.model.clone()))?;
+            (m, cfg.model.clone(), None)
+        };
 
     // --- System prompt + skills block -------------------------------------
     let mut system_prompt = match &cfg.system_prompt_file {
@@ -153,9 +192,14 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     };
 
     // --- Stream ------------------------------------------------------------
+    // Profile endpoint/env routing is now a first-class `grain-llm-genai`
+    // capability (`with_provider_profiles`) — runtime
+    // `Command::ApplyProvider` only has to swap the active model since
+    // the stream already knows how to reach every profile's endpoint.
     let stream = Arc::new(
         GenaiStream::builder()
             .with_openai_compat_preset(cfg.openai_compat)
+            .with_provider_profiles(&cfg.profiles)
             .with_registry(registry.clone())
             .build(),
     );
@@ -176,7 +220,10 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     }
 
     // --- Context guard -----------------------------------------------------
-    let guard = ContextGuard::new(registry.clone(), cfg.model.clone())
+    // Use the resolved active model id (which may have come from a
+    // profile) so the token budget matches the model the agent will
+    // actually call.
+    let guard = ContextGuard::new(registry.clone(), active_model_id.clone())
         .with_policy(ContextGuardPolicy::DropOldest)
         .with_headroom_tokens(cfg.headroom_tokens)
         .into_transform_fn();
@@ -194,7 +241,7 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     let (evt_tx, evt_rx) = mpsc::unbounded_channel::<TuiEvent>();
 
     let handles = WorkerHandles {
-        model_id: cfg.model.clone(),
+        model_id: active_model_id.clone(),
         workspace_display: workspace.root().display().to_string(),
         allow_write: cfg.allow_write,
         allow_bash: cfg.allow_bash,
@@ -206,6 +253,7 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // These have to happen on the worker task because `subscribe` is async.
     let telemetry_path = cfg.telemetry_file.clone();
     let session_path = cfg.session.clone();
+    let profiles = cfg.profiles.clone();
     let agent_for_task = agent.clone();
     let workspace_for_task = workspace.clone();
     let registry_for_task = registry.clone();
@@ -270,11 +318,21 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             }
         }
 
+        // If we booted with a profile, tell the UI so the status line
+        // and `✓` marker land correctly on first frame.
+        if let Some(name) = active_profile_name.clone() {
+            let _ = evt_tx_for_task.send(TuiEvent::ProviderApplied {
+                profile: name,
+                model: active_model_id.clone(),
+            });
+        }
+
         run_command_loop(
             agent_for_task,
             workspace_for_task,
             registry_for_task,
             skills_dir_for_task,
+            profiles,
             cmd_rx,
             evt_tx_for_task,
         )
@@ -289,11 +347,13 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_command_loop(
     agent: Arc<Agent>,
     workspace: Arc<Workspace>,
     registry: Arc<Registry>,
     skills_dir: PathBuf,
+    profiles: Vec<ProviderProfile>,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     evt_tx: mpsc::UnboundedSender<TuiEvent>,
 ) {
@@ -335,6 +395,37 @@ async fn run_command_loop(
                     )));
                 }
             },
+            Command::ApplyProvider(idx) => {
+                let Some(profile) = profiles.get(idx) else {
+                    let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                        "ApplyProvider: index {idx} out of range"
+                    )));
+                    continue;
+                };
+                if !profile.auth.is_usable() {
+                    let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                        "provider '{}' uses OAuth; login flow not yet wired",
+                        profile.name
+                    )));
+                    continue;
+                }
+                match registry.to_core_model(&profile.model) {
+                    None => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "provider '{}': model '{}' not in registry",
+                            profile.name, profile.model
+                        )));
+                    }
+                    Some(model) => {
+                        let model = override_model_provider(model, profile);
+                        agent.set_model(model).await;
+                        let _ = evt_tx.send(TuiEvent::ProviderApplied {
+                            profile: profile.name.clone(),
+                            model: profile.model.clone(),
+                        });
+                    }
+                }
+            }
             Command::Quit => {
                 // Make sure any in-flight turn gets cancelled before the
                 // task exits, so we don't strand a streaming HTTP req.
@@ -343,4 +434,18 @@ async fn run_command_loop(
             }
         }
     }
+}
+
+/// For OpenAI-compat profiles, replace `Model.provider` with the
+/// profile name so genai routes through the per-profile endpoint
+/// registered by `with_provider_profiles`. Native-kind profiles pass
+/// through unchanged.
+fn override_model_provider(
+    mut model: grain_agent_core::Model,
+    profile: &ProviderProfile,
+) -> grain_agent_core::Model {
+    if matches!(profile.kind, ProviderKind::OpenAiCompat) {
+        model.provider = profile.name.clone();
+    }
+    model
 }

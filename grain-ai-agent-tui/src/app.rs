@@ -11,6 +11,7 @@ use grain_agent_core::{
 };
 
 use crate::event::TuiEvent;
+use grain_llm_genai::ProviderProfile;
 use crate::theme::Theme;
 
 /// Top-level UI focus. Drives which pane receives key events.
@@ -43,6 +44,9 @@ pub enum Overlay {
     /// Theme picker — `focused` is the index into [`AppState::themes`].
     /// Up/Down navigate, Enter applies, Esc cancels.
     ThemePicker { focused: usize },
+    /// Provider profile picker — `focused` is the index into
+    /// [`AppState::providers`]. Same key model as ThemePicker.
+    ProviderPicker { focused: usize },
 }
 
 /// One row in the transcript. Kept as plain strings so the renderer can
@@ -75,6 +79,10 @@ pub enum Command {
     ReturnDoctor,
     /// Re-load skills from disk and reply via [`TuiEvent::OverlaySkills`].
     ReturnSkills,
+    /// Switch the active provider profile. Worker rebuilds routing
+    /// and calls `Agent::set_model(...)` then replies with
+    /// [`TuiEvent::ProviderApplied`].
+    ApplyProvider(usize),
     Quit,
 }
 
@@ -149,6 +157,13 @@ pub struct AppState {
     pub themes: Vec<Theme>,
     /// Index of the currently applied theme within [`Self::themes`].
     pub current_theme_idx: usize,
+    /// Provider profiles loaded from disk (workspace + user fallback).
+    /// May be empty when no `providers.toml` exists.
+    pub providers: Vec<ProviderProfile>,
+    /// Active profile index (when one was resolved at startup), else
+    /// `None` — meaning the CLI `--model` flag governs and the picker
+    /// shows no `✓` marker.
+    pub current_provider_idx: Option<usize>,
     /// Highlighted row inside the slash-command palette. Reset to 0
     /// whenever the filter (the input text) changes, so a fresh typed
     /// character always lands on the top match.
@@ -177,6 +192,7 @@ pub struct AppState {
 pub const MAX_HISTORY: usize = 200;
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         model_id: String,
         workspace_display: String,
@@ -184,6 +200,8 @@ impl AppState {
         show_thinking: bool,
         themes: Vec<Theme>,
         initial_theme_idx: usize,
+        providers: Vec<ProviderProfile>,
+        initial_provider_idx: Option<usize>,
     ) -> Self {
         assert!(!themes.is_empty(), "AppState needs at least one theme");
         let current_theme_idx = initial_theme_idx.min(themes.len() - 1);
@@ -203,6 +221,8 @@ impl AppState {
             last_error: None,
             themes,
             current_theme_idx,
+            providers,
+            current_provider_idx: initial_provider_idx,
             palette_focused: 0,
             history: Vec::new(),
             history_cursor: None,
@@ -359,6 +379,21 @@ impl AppState {
                 self.push(TranscriptKind::Error, msg);
                 Vec::new()
             }
+            TuiEvent::ProviderApplied { profile, model } => {
+                // Mark this profile as the active one so the picker's
+                // ✓ moves immediately. Match by name so applies that
+                // happened out-of-band (e.g. CLI) still align.
+                self.current_provider_idx = self
+                    .providers
+                    .iter()
+                    .position(|p| p.name == profile);
+                self.model_id = model.clone();
+                self.push(
+                    TranscriptKind::Info,
+                    format!("(provider: {profile} · {model})"),
+                );
+                Vec::new()
+            }
         }
     }
 
@@ -404,6 +439,9 @@ impl AppState {
         // transcript handlers below.
         if matches!(self.overlay, Some(Overlay::ThemePicker { .. })) {
             return self.on_key_theme_picker(key);
+        }
+        if matches!(self.overlay, Some(Overlay::ProviderPicker { .. })) {
+            return self.on_key_provider_picker(key);
         }
         // Doctor overlay owns its own input: typed chars edit a search
         // query that filters the report; arrows/PgUp/PgDn scroll the
@@ -576,6 +614,68 @@ impl AppState {
         }
     }
 
+    fn on_key_provider_picker(&mut self, key: KeyEvent) -> Vec<Command> {
+        let Some(Overlay::ProviderPicker { focused }) = &mut self.overlay else {
+            return Vec::new();
+        };
+        let last = self.providers.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Up => {
+                *focused = focused.saturating_sub(1);
+                Vec::new()
+            }
+            KeyCode::Down => {
+                if !self.providers.is_empty() {
+                    *focused = (*focused + 1).min(last);
+                }
+                Vec::new()
+            }
+            KeyCode::PageUp => {
+                *focused = focused.saturating_sub(5);
+                Vec::new()
+            }
+            KeyCode::PageDown => {
+                *focused = (*focused + 5).min(last);
+                Vec::new()
+            }
+            KeyCode::Home => {
+                *focused = 0;
+                Vec::new()
+            }
+            KeyCode::End => {
+                *focused = last;
+                Vec::new()
+            }
+            KeyCode::Enter => {
+                if self.providers.is_empty() {
+                    self.overlay = None;
+                    return Vec::new();
+                }
+                let chosen = *focused;
+                // Phase 1: API-key profiles apply via the worker;
+                // OAuth profiles surface a clear "not wired" line so
+                // the user knows what's happening.
+                let profile = &self.providers[chosen];
+                if !profile.auth.is_usable() {
+                    self.overlay = None;
+                    let name = profile.name.clone();
+                    self.push(
+                        TranscriptKind::Info,
+                        format!(
+                            "(provider '{name}' uses OAuth; login flow not yet wired — \
+                             this lands in a follow-up patch. Pick an api_key profile \
+                             for now.)"
+                        ),
+                    );
+                    return Vec::new();
+                }
+                self.overlay = None;
+                vec![Command::ApplyProvider(chosen)]
+            }
+            _ => Vec::new(),
+        }
+    }
+
     fn on_key_doctor(&mut self, key: KeyEvent) -> Vec<Command> {
         let Some(Overlay::Doctor { query, scroll, .. }) = &mut self.overlay else {
             return Vec::new();
@@ -706,6 +806,20 @@ impl AppState {
                 self.overlay = Some(Overlay::ThemePicker {
                     focused: self.current_theme_idx,
                 });
+                Vec::new()
+            }
+            "provider" | "providers" => {
+                if self.providers.is_empty() {
+                    self.push(
+                        TranscriptKind::Info,
+                        "(no provider profiles configured; create \
+                         <workspace>/.grain/providers.toml — see docs)"
+                            .into(),
+                    );
+                    return Vec::new();
+                }
+                let focused = self.current_provider_idx.unwrap_or(0);
+                self.overlay = Some(Overlay::ProviderPicker { focused });
                 Vec::new()
             }
             "exit" | "quit" | "q" => {
@@ -870,7 +984,44 @@ mod tests {
             false,
             crate::theme::builtin_themes(),
             0,
+            Vec::new(),
+            None,
         )
+    }
+
+    fn fresh_with_providers(providers: Vec<ProviderProfile>) -> AppState {
+        AppState::new(
+            "deepseek/deepseek-chat".into(),
+            "/tmp/proj".into(),
+            Capabilities::default(),
+            false,
+            crate::theme::builtin_themes(),
+            0,
+            providers,
+            None,
+        )
+    }
+
+    fn api_key_profile(name: &str, model: &str) -> ProviderProfile {
+        ProviderProfile {
+            name: name.into(),
+            kind: grain_llm_genai::ProviderKind::Anthropic,
+            base_url: None,
+            model: model.into(),
+            auth: grain_llm_genai::ProviderAuth::ApiKey {
+                env: "ANTHROPIC_API_KEY".into(),
+            },
+        }
+    }
+
+    fn oauth_profile(name: &str) -> ProviderProfile {
+        ProviderProfile {
+            name: name.into(),
+            kind: grain_llm_genai::ProviderKind::Anthropic,
+            base_url: None,
+            model: "anthropic/claude-sonnet-4-5".into(),
+            auth: grain_llm_genai::ProviderAuth::AnthropicOauth,
+        }
     }
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -1146,6 +1297,83 @@ mod tests {
         };
         assert!(report.contains("=== report ==="));
         assert_eq!(query, "key");
+    }
+
+    #[test]
+    fn slash_provider_with_no_profiles_logs_hint() {
+        let mut s = fresh();
+        for c in "/provider".chars() {
+            s.on_event(TuiEvent::Key(press(KeyCode::Char(c))));
+        }
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert!(cmds.is_empty());
+        assert!(s.overlay.is_none(), "no overlay when no profiles");
+        assert!(
+            s.transcript
+                .iter()
+                .any(|l| l.text.contains("providers.toml")),
+            "user gets a setup hint"
+        );
+    }
+
+    #[test]
+    fn slash_provider_opens_picker_when_profiles_loaded() {
+        let providers = vec![
+            api_key_profile("work", "openai/gpt-4o"),
+            api_key_profile("personal", "anthropic/claude-sonnet-4-5"),
+        ];
+        let mut s = fresh_with_providers(providers);
+        for c in "/provider".chars() {
+            s.on_event(TuiEvent::Key(press(KeyCode::Char(c))));
+        }
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert!(cmds.is_empty(), "opening the picker shouldn't dispatch");
+        assert!(matches!(s.overlay, Some(Overlay::ProviderPicker { .. })));
+    }
+
+    #[test]
+    fn provider_picker_enter_on_api_key_dispatches_apply() {
+        let providers = vec![
+            api_key_profile("work", "openai/gpt-4o"),
+            api_key_profile("personal", "anthropic/claude-sonnet-4-5"),
+        ];
+        let mut s = fresh_with_providers(providers);
+        s.overlay = Some(Overlay::ProviderPicker { focused: 1 });
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert_eq!(cmds, vec![Command::ApplyProvider(1)]);
+        assert!(s.overlay.is_none(), "picker closes on apply");
+    }
+
+    #[test]
+    fn provider_picker_enter_on_oauth_surfaces_phase_2_hint() {
+        let providers = vec![oauth_profile("claude-pro")];
+        let mut s = fresh_with_providers(providers);
+        s.overlay = Some(Overlay::ProviderPicker { focused: 0 });
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert!(cmds.is_empty(), "OAuth must not dispatch ApplyProvider");
+        assert!(s.overlay.is_none(), "picker still closes");
+        assert!(
+            s.transcript
+                .iter()
+                .any(|l| l.text.contains("OAuth")
+                    && l.text.contains("login flow not yet wired")),
+            "user is told why nothing happened"
+        );
+    }
+
+    #[test]
+    fn provider_applied_event_updates_active_marker_and_model() {
+        let providers = vec![
+            api_key_profile("work", "openai/gpt-4o"),
+            api_key_profile("personal", "anthropic/claude-sonnet-4-5"),
+        ];
+        let mut s = fresh_with_providers(providers);
+        s.on_event(TuiEvent::ProviderApplied {
+            profile: "personal".into(),
+            model: "anthropic/claude-sonnet-4-5".into(),
+        });
+        assert_eq!(s.current_provider_idx, Some(1));
+        assert_eq!(s.model_id, "anthropic/claude-sonnet-4-5");
     }
 
     #[test]

@@ -16,7 +16,10 @@ use grain_agent_core::{
 use serde::Serialize;
 use std::io::BufRead;
 use grain_agent_harness::context_guard::{ContextGuard, ContextGuardPolicy};
-use grain_llm_genai::{GenaiStream, OpenAiCompatPreset};
+use grain_llm_genai::{
+    GenaiStream, OpenAiCompatPreset, ProviderKind, ProviderProfile, load_profiles,
+    resolve_providers_file,
+};
 use grain_llm_models::Registry;
 
 use crate::config::{ArgDefaults, ConfigFile};
@@ -117,6 +120,18 @@ pub struct Args {
     /// network. Off when unset.
     #[arg(long)]
     pub telemetry_file: Option<PathBuf>,
+
+    /// Initial provider profile name (looked up in profiles loaded
+    /// from `--providers-file` / `<workspace>/.grain/providers.toml` /
+    /// `~/.config/grain/providers.toml`). When set, the profile's
+    /// model + auth env var replace the defaults derived from `--model`.
+    #[arg(long)]
+    pub provider: Option<String>,
+
+    /// Override the providers.toml search path. Absolute file path
+    /// takes precedence over workspace + user locations.
+    #[arg(long)]
+    pub providers_file: Option<PathBuf>,
 }
 
 impl Args {
@@ -210,17 +225,67 @@ pub async fn run(args: Args) -> Result<(), CliError> {
         return Ok(());
     }
 
-    let model = registry.to_core_model(&args.model).ok_or_else(|| {
+    // --- Provider profiles (optional) -------------------------------------
+    // Profiles add OpenAI-compat endpoints + env-var overrides to the
+    // genai builder. When `--provider <name>` is set, the named
+    // profile's model + auth replace what `--model` / env-vars would
+    // otherwise pick.
+    let providers_path =
+        resolve_providers_file(args.providers_file.as_deref(), workspace.root());
+    let (profiles, profile_warnings) = match providers_path {
+        Some(p) => load_profiles(&p),
+        None => (Vec::new(), Vec::new()),
+    };
+    for w in profile_warnings {
+        eprintln!("[warn] {w}");
+    }
+    let active_profile: Option<&ProviderProfile> = match &args.provider {
+        None => None,
+        Some(name) => match profiles.iter().find(|p| &p.name == name) {
+            Some(p) => Some(p),
+            None => {
+                return Err(format!(
+                    "provider '{name}' not in providers.toml ({} loaded)",
+                    profiles.len()
+                )
+                .into());
+            }
+        },
+    };
+    if let Some(p) = active_profile
+        && !p.auth.is_usable()
+    {
+        return Err(format!(
+            "provider '{}' uses OAuth; login flow is not yet wired — Phase 2",
+            p.name
+        )
+        .into());
+    }
+
+    // Resolve the model id we'll actually drive: profile overrides
+    // `--model` when active.
+    let resolved_model_id = active_profile
+        .map(|p| p.model.clone())
+        .unwrap_or_else(|| args.model.clone());
+    let mut model = registry.to_core_model(&resolved_model_id).ok_or_else(|| {
         format!(
-            "unknown model id '{}': not in the embedded models.dev snapshot",
-            args.model
+            "unknown model id '{resolved_model_id}': not in the embedded models.dev snapshot"
         )
     })?;
+    if let Some(p) = active_profile
+        && matches!(p.kind, ProviderKind::OpenAiCompat)
+    {
+        // For OpenAI-compat profiles the genai router dispatches on
+        // `Model.provider`; rewrite to the profile name so the
+        // (name, base_url, env_var) endpoint we register below matches.
+        model.provider = p.name.clone();
+    }
 
     // --- Stream ------------------------------------------------------------
     let stream = Arc::new(
         GenaiStream::builder()
             .with_openai_compat_preset(args.openai_compat.into())
+            .with_provider_profiles(&profiles)
             .with_registry(registry.clone())
             .build(),
     );

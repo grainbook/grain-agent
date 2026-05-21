@@ -16,6 +16,7 @@ use grain_llm_models::Registry;
 
 use crate::config::{EnvKeyResolver, OpenAiCompatEndpoint, OpenAiCompatPreset, ProviderRouter};
 use crate::mapping::outbound::baseline_chat_options;
+use crate::provider::{ProviderAuth, ProviderKind, ProviderProfile};
 use crate::stream::GenaiStream;
 
 /// Fluent builder for [`GenaiStream`].
@@ -91,6 +92,57 @@ impl GenaiStreamBuilder {
     /// don't depend on the registry today.
     pub fn with_registry(mut self, registry: Arc<Registry>) -> Self {
         self.registry = Some(registry);
+        self
+    }
+
+    /// Wire a set of [`ProviderProfile`]s into the routing tables.
+    ///
+    /// For `kind = openai-compat` profiles with API-key auth, the
+    /// `(name, base_url, env_var)` triple is registered as an
+    /// [`OpenAiCompatEndpoint`] — models addressed as
+    /// `<profile_name>/<model>` will route through that endpoint with
+    /// that env var. Multiple profiles per vendor (e.g. work +
+    /// personal OpenAI keys) work this way: declare each as a
+    /// distinct compat profile with its own name.
+    ///
+    /// For `kind = anthropic | openai | gemini` profiles with a
+    /// non-default env var, the env resolver gets an override so the
+    /// native adapter uses the profile's key. Note: when multiple
+    /// profiles share a native kind, the *last* one wins — use
+    /// `openai-compat` profiles if you need multiple-account semantics
+    /// against the same vendor.
+    ///
+    /// OAuth profiles ([`ProviderAuth::AnthropicOauth`]) are accepted
+    /// but skipped here — Phase 2 of provider work will plug them in
+    /// via a refresh-aware auth path. Callers can list them in their
+    /// UIs today; trying to actually use one returns a clear error.
+    pub fn with_provider_profiles(mut self, profiles: &[ProviderProfile]) -> Self {
+        for p in profiles {
+            let env = match &p.auth {
+                ProviderAuth::ApiKey { env } => env.clone(),
+                ProviderAuth::AnthropicOauth => continue,
+            };
+            match p.kind {
+                ProviderKind::OpenAiCompat => {
+                    if let Some(base_url) = p.base_url.clone() {
+                        self.openai_compat.push(OpenAiCompatEndpoint::new(
+                            p.name.clone(),
+                            base_url,
+                            env,
+                        ));
+                    }
+                }
+                ProviderKind::Anthropic => {
+                    self.env_resolver = self.env_resolver.with_override("anthropic", env);
+                }
+                ProviderKind::OpenAi => {
+                    self.env_resolver = self.env_resolver.with_override("openai", env);
+                }
+                ProviderKind::Gemini => {
+                    self.env_resolver = self.env_resolver.with_override("gemini", env);
+                }
+            }
+        }
         self
     }
 

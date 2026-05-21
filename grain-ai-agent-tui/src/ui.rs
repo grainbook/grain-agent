@@ -21,6 +21,7 @@ use ratatui::{
 use crate::app::{
     AppState, Focus, Overlay, SLASH_CATALOG, TranscriptKind, TranscriptLine,
 };
+use grain_llm_genai::{ProviderKind, ProviderProfile};
 use crate::theme::{Palette, Theme, ThemeSource};
 
 /// Cap on visible palette rows. Beyond this we slide a window of rows
@@ -334,6 +335,7 @@ fn draw_overlay(
         Overlay::Doctor { .. } => (84, 26),
         Overlay::Skills(_) => (66, 18),
         Overlay::ThemePicker { .. } => (60, 20),
+        Overlay::ProviderPicker { .. } => (72, 18),
     };
     let popup = centered_rect_fixed(target_w, target_h, area);
     // Clear so the transcript underneath doesn't bleed through; then
@@ -358,6 +360,9 @@ fn draw_overlay(
         Overlay::Skills(skills) => ("skills", OverlayBody::Skills(skills)),
         Overlay::ThemePicker { focused } => {
             return draw_theme_picker(frame, inner, *focused, state, palette);
+        }
+        Overlay::ProviderPicker { focused } => {
+            return draw_provider_picker(frame, inner, *focused, state, palette);
         }
     };
 
@@ -564,6 +569,149 @@ fn draw_doctor(
         ))),
         chunks[5],
     );
+}
+
+fn draw_provider_picker(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    focused: usize,
+    state: &AppState,
+    palette: &Palette,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // title
+            Constraint::Length(1), // pad
+            Constraint::Min(1),    // list
+            Constraint::Length(1), // hint
+        ])
+        .split(popup);
+
+    let title_line = Line::from(vec![
+        Span::styled(
+            "provider",
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("({} profiles)", state.providers.len()),
+            Style::default().fg(palette.muted),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(title_line), chunks[0]);
+
+    let body_area = chunks[2];
+    if state.providers.is_empty() {
+        let line = Line::from(Span::styled(
+            "(no profiles — create <workspace>/.grain/providers.toml)",
+            Style::default().fg(palette.muted),
+        ));
+        frame.render_widget(Paragraph::new(line), body_area);
+    } else {
+        let lines: Vec<Line> = state
+            .providers
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                provider_picker_row(
+                    i,
+                    p,
+                    focused,
+                    state.current_provider_idx,
+                    palette,
+                )
+            })
+            .collect();
+        let visible = body_area.height as usize;
+        let total = lines.len();
+        let start = if total > visible {
+            focused.saturating_sub(visible / 2).min(total - visible)
+        } else {
+            0
+        };
+        let end = (start + visible).min(total);
+        let slice: Vec<Line> = lines[start..end].to_vec();
+        frame.render_widget(
+            Paragraph::new(Text::from(slice)).wrap(Wrap { trim: false }),
+            body_area,
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "↑↓ navigate · Enter apply · Esc cancel",
+            Style::default().fg(palette.muted),
+        ))),
+        chunks[3],
+    );
+}
+
+fn provider_picker_row(
+    i: usize,
+    profile: &ProviderProfile,
+    focused: usize,
+    current: Option<usize>,
+    palette: &Palette,
+) -> Line<'static> {
+    let cursor = if i == focused { "▶ " } else { "  " };
+    let mark = if Some(i) == current { "✓ " } else { "  " };
+    let kind_label = match profile.kind {
+        ProviderKind::Anthropic => "anthropic",
+        ProviderKind::OpenAi => "openai",
+        ProviderKind::Gemini => "gemini",
+        ProviderKind::OpenAiCompat => "compat",
+    };
+    let usable = profile.auth.is_usable();
+    let status_tag = if usable {
+        match &profile.auth {
+            grain_llm_genai::ProviderAuth::ApiKey { env } => {
+                if std::env::var(env)
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .is_some()
+                {
+                    "[ready]".to_string()
+                } else {
+                    "[no key]".to_string()
+                }
+            }
+            _ => "[ready]".to_string(),
+        }
+    } else {
+        "[needs login]".to_string()
+    };
+    let status_color = if !usable {
+        palette.muted
+    } else if status_tag == "[no key]" {
+        palette.warning
+    } else {
+        palette.success
+    };
+    let row_style = if i == focused {
+        Style::default()
+            .fg(palette.accent)
+            .add_modifier(Modifier::BOLD)
+    } else if usable {
+        Style::default().fg(palette.fg)
+    } else {
+        Style::default().fg(palette.muted)
+    };
+    Line::from(vec![
+        Span::styled(format!("{cursor}{mark}"), row_style),
+        Span::styled(profile.name.clone(), row_style),
+        Span::raw("  "),
+        Span::styled(
+            format!("[{kind_label}]"),
+            Style::default().fg(palette.secondary),
+        ),
+        Span::raw("  "),
+        Span::styled(profile.model.clone(), Style::default().fg(palette.muted)),
+        Span::raw("  "),
+        Span::styled(status_tag, Style::default().fg(status_color)),
+    ])
 }
 
 fn draw_theme_picker(

@@ -16,6 +16,7 @@
 pub mod builder;
 pub mod config;
 pub mod mapping;
+pub mod provider;
 pub mod stream;
 
 pub use builder::GenaiStreamBuilder;
@@ -25,4 +26,7 @@ pub use config::{
 pub use mapping::inbound::InboundState;
 pub use mapping::outbound::{baseline_chat_options, to_chat_request};
 pub use mapping::usage::map_usage;
+pub use provider::{
+    ProviderAuth, ProviderKind, ProviderProfile, load_profiles, resolve_providers_file,
+};
 pub use stream::GenaiStream;

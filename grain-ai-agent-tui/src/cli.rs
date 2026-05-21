@@ -84,6 +84,18 @@ pub struct Args {
     /// fine — only built-ins are loaded then.
     #[arg(long)]
     pub themes_dir: Option<PathBuf>,
+
+    /// Initial provider profile name. Looked up in profiles loaded
+    /// from `--providers-file` / `<workspace>/.grain/providers.toml` /
+    /// `~/.config/grain/providers.toml`. When unset, the picker opens
+    /// without an active profile and the CLI `--model` flag governs.
+    #[arg(long)]
+    pub provider: Option<String>,
+
+    /// Override the providers.toml search path. Pass an absolute file
+    /// path; takes precedence over workspace + user locations.
+    #[arg(long)]
+    pub providers_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

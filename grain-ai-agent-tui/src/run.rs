@@ -24,6 +24,7 @@ use crate::agent_worker::{Worker, WorkerConfig, WorkerInitError, spawn};
 use crate::app::{AppState, Capabilities};
 use crate::cli::Args;
 use crate::event::TuiEvent;
+use grain_llm_genai::{ProviderProfile, load_profiles, resolve_providers_file};
 use crate::theme::{Theme, builtin_themes, load_user_themes};
 use crate::ui;
 
@@ -38,7 +39,19 @@ pub enum TuiError {
 /// Entry point: takes parsed [`Args`], owns the terminal for the
 /// duration of the session, and returns once the user quits.
 pub async fn run_tui(args: Args) -> Result<(), TuiError> {
-    let cfg = WorkerConfig::from(&args);
+    // Resolve provider profiles before spawning the worker — the worker
+    // needs them to register OpenAI-compat endpoints up front and to
+    // honor `--provider <name>` at boot.
+    let (profiles, initial_profile_idx) = resolve_profiles(
+        args.providers_file.as_deref(),
+        &args.workspace,
+        args.provider.as_deref(),
+    );
+
+    let mut cfg = WorkerConfig::from(&args);
+    cfg.profiles = profiles.clone();
+    cfg.initial_profile_idx = initial_profile_idx;
+
     let Worker {
         cmd_tx,
         mut evt_rx,
@@ -63,10 +76,45 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
         &cmd_tx,
         themes,
         initial_idx,
+        profiles,
+        initial_profile_idx,
     )
     .await;
     restore_terminal(&mut terminal)?;
     result
+}
+
+/// Load profiles from the configured providers.toml (CLI override,
+/// then workspace, then user) and resolve `--provider <name>` to an
+/// index. Disk-load warnings go to stderr.
+fn resolve_profiles(
+    cli_override: Option<&std::path::Path>,
+    workspace_root: &std::path::Path,
+    requested: Option<&str>,
+) -> (Vec<ProviderProfile>, Option<usize>) {
+    let path = resolve_providers_file(cli_override, workspace_root);
+    let (profiles, warnings) = match path {
+        Some(p) => load_profiles(&p),
+        None => (Vec::new(), Vec::new()),
+    };
+    for w in warnings {
+        eprintln!("[warn] {w}");
+    }
+    let initial_idx = match requested {
+        None => None,
+        Some(name) => match profiles.iter().position(|p| p.name == name) {
+            Some(i) => Some(i),
+            None => {
+                eprintln!(
+                    "[warn] provider '{name}' not found in providers.toml \
+                     ({} profiles loaded)",
+                    profiles.len()
+                );
+                None
+            }
+        },
+    };
+    (profiles, initial_idx)
 }
 
 /// Merge built-ins with user themes and pick the starting index by
@@ -120,6 +168,8 @@ async fn event_loop(
     cmd_tx: &mpsc::UnboundedSender<crate::app::Command>,
     themes: Vec<Theme>,
     initial_theme_idx: usize,
+    providers: Vec<ProviderProfile>,
+    initial_provider_idx: Option<usize>,
 ) -> Result<(), TuiError> {
     let mut state = AppState::new(
         handles.model_id.clone(),
@@ -133,6 +183,8 @@ async fn event_loop(
         args.show_thinking,
         themes,
         initial_theme_idx,
+        providers,
+        initial_provider_idx,
     );
 
     // Crossterm reads on a blocking thread; forward into a tokio channel

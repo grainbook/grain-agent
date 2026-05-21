@@ -14,6 +14,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+toml = { workspace = true }
 genai = { workspace = true }
 grain-agent-core = { workspace = true }
 grain-llm-models = { workspace = true }
@@ -22,3 +23,4 @@ grain-llm-models = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
 futures = { workspace = true }
+tempfile = "3"

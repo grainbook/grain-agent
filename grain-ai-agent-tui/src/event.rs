@@ -37,4 +37,8 @@ pub enum TuiEvent {
     /// Worker hit a fatal-ish error (e.g. agent ended with `error_message`,
     /// or a slash command sub-call failed). Already user-facing.
     AgentWorkerError(String),
+    /// Worker successfully switched to a new provider profile. Carries
+    /// the profile name + resolved model id so the UI can log a status
+    /// line ("(provider: openai-work · openai/gpt-4o)").
+    ProviderApplied { profile: String, model: String },
 }

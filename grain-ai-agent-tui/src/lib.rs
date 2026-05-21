@@ -28,5 +28,11 @@ pub mod ui;
 pub use app::{AppState, Focus, Overlay, TranscriptKind, TranscriptLine};
 pub use cli::Args;
 pub use event::TuiEvent;
+// Provider profile types live in `grain-llm-genai` — the natural home,
+// since that's where the genai service-target resolver they plug into
+// also lives. Re-exported here for convenience to TUI callers.
+pub use grain_llm_genai::{
+    ProviderAuth, ProviderKind, ProviderProfile, load_profiles, resolve_providers_file,
+};
 pub use run::{TuiError, run_tui};
 pub use theme::{Palette, Theme, ThemeSource, builtin_themes, load_user_themes};
