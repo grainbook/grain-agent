@@ -537,6 +537,7 @@ dependencies = [
  "async-trait",
  "futures",
  "grain-agent-core",
+ "grain-llm-models",
  "serde",
  "serde_json",
  "thiserror",
