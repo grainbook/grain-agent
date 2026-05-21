@@ -37,6 +37,7 @@ Rust port of [`@earendil-works/pi-agent-core`](https://github.com/earendil-works
 
 | Module | Doc | What it is |
 |--------|-----|------------|
+| `agent_harness` | [agent-harness.md](./agent-harness.md) | Top-level orchestrator: bundles Agent + Session + tools + queues + reconfig + UI hooks into one façade |
 | `messages` | [harness-messages.md](./harness-messages.md) | Custom messages (branch / compaction / custom) + harness `convert_to_llm` |
 | `session` | [harness-session.md](./harness-session.md) | Session tree, storage trait, in-memory impl, branching + fork |
 | `session_jsonl` | [session-jsonl.md](./session-jsonl.md) | JSONL directory-on-disk session persistence |

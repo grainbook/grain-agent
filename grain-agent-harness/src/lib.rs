@@ -19,6 +19,7 @@
 //! - top-level `AgentHarness` constructor
 //! - JSONL session storage
 
+pub mod agent_harness;
 pub mod compaction;
 pub mod context_guard;
 pub mod messages;
@@ -26,6 +27,12 @@ pub mod session;
 pub mod session_jsonl;
 pub mod system_prompt;
 pub mod truncate;
+
+pub use agent_harness::{
+    AgentHarness, AgentHarnessEvent, AgentHarnessOptions, DynamicSystemPromptFn, HarnessError,
+    HarnessEventListener, HarnessUnsubscribe, PromptTemplate, Resources, SystemPrompt,
+    SystemPromptCtx,
+};
 
 pub use compaction::{
     CompactionError, CompactionPolicy, DEFAULT_COMPACTION_PROMPT, DEFAULT_KEEP_RECENT,

@@ -248,6 +248,12 @@ pub enum ForkPosition {
 // Session
 // ---------------------------------------------------------------------------
 
+/// A `Session` is a thin handle around a shared
+/// `Arc<dyn SessionStorage>`. Cloning is intentionally cheap — every
+/// clone points at the same underlying storage, so subscribers and
+/// the orchestrator (e.g. [`crate::agent_harness::AgentHarness`])
+/// share state without contention.
+#[derive(Clone)]
 pub struct Session {
     storage: Arc<dyn SessionStorage>,
 }

@@ -37,6 +37,7 @@
 
 | 模块 | 文档 | 简介 |
 |------|------|------|
+| `agent_harness` | [agent-harness.md](./agent-harness.md) | 顶层编排器：把 Agent + Session + tools + queues + 运行时重配 + UI 钩子收成一个 façade |
 | `messages` | [harness-messages.md](./harness-messages.md) | 自定义消息（branch / compaction / custom）与 `convert_to_llm` |
 | `session` | [harness-session.md](./harness-session.md) | 会话树、存储 trait、内存实现、分支与 fork |
 | `session_jsonl` | [session-jsonl.md](./session-jsonl.md) | JSONL 目录形式的会话磁盘持久化 |
