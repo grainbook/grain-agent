@@ -1064,6 +1064,14 @@ async fn finalize_executed_owned(
     }
 }
 
+/// The batch terminates the loop only when **every** finalized tool call sets
+/// `result.terminate == Some(true)`. A single tool saying "I'm done" is not
+/// enough to halt the loop — the loop will continue with the remaining
+/// tool-result messages so other tools can finish their work.
+///
+/// Per-tool intent is still visible to callers via `ToolExecutionEnd.result.terminate`;
+/// UI / logging layers can flag single-tool termination requests without
+/// changing loop semantics.
 fn should_terminate(finalized: &[FinalizedCall]) -> bool {
     !finalized.is_empty()
         && finalized

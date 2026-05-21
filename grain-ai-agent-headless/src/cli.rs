@@ -377,6 +377,17 @@ impl EventPrinter {
                     preview
                 )
                 .ok();
+                // A single tool requesting batch-level termination isn't enough
+                // to halt the loop — `should_terminate` requires consensus from
+                // every finalized call. Surface the intent here so it isn't
+                // silently ignored from the user's perspective.
+                if result.terminate == Some(true) {
+                    writeln!(
+                        out,
+                        "  (↳ {tool_name} requested batch termination; needs all tools in this batch to agree)"
+                    )
+                    .ok();
+                }
             }
             AgentEvent::ToolExecutionUpdate { .. } => {}
             AgentEvent::TurnEnd { message, .. } => {
