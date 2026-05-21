@@ -42,13 +42,17 @@ fn embedded_registry_lookups_known_models() {
 #[test]
 fn openai_compatible_providers_preserve_origin_id() {
     let registry = Registry::from_embedded_snapshot();
-    let zhipu = registry.lookup("zhipu/glm-4-plus").expect("zhipu/glm-4-plus present");
-    match &zhipu.provider {
-        ProviderId::OpenAiCompatible { id } => assert_eq!(id, "zhipu"),
+    // models.dev classifies Moonshot AI's first-party endpoint as
+    // OpenAI-compatible; we pick any kimi model present in the snapshot.
+    let kimi = registry
+        .lookup("moonshotai/kimi-k2-thinking")
+        .expect("moonshotai/kimi-k2-thinking present in models.dev");
+    match &kimi.provider {
+        ProviderId::OpenAiCompatible { id } => assert_eq!(id, "moonshotai"),
         other => panic!("expected OpenAiCompatible, got {other:?}"),
     }
     // OpenAI-compatible providers still speak the OpenAI wire protocol.
-    assert_eq!(zhipu.api, ApiKind::OpenAi);
+    assert_eq!(kimi.api, ApiKind::OpenAi);
 }
 
 #[test]
@@ -62,7 +66,13 @@ fn to_core_model_carries_canonical_fields() {
     assert_eq!(core.provider, "anthropic");
     assert!(core.reasoning);
     assert_eq!(core.context_window, 200_000);
-    assert_eq!(core.cost, Cost::default()); // starter snapshot leaves pricing unset
+    // Pricing comes from models.dev; just sanity-check that input cost is
+    // non-zero (regression guard for a future refresh that loses pricing).
+    assert!(
+        core.cost.input > 0.0,
+        "expected non-zero input pricing in refreshed snapshot, got {:?}",
+        core.cost
+    );
 }
 
 #[test]
