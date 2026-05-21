@@ -79,6 +79,14 @@ The agent runs read-only by default and prints a streaming event log to stdout.
 
 Full schema (multi-account per vendor, OAuth subscriptions, custom hosts): [providers.md](./providers.md).
 
+### JS scripting (`--features scripts-boa`)
+
+| Flag | Notes |
+|------|-------|
+| `--scripts-dir <DIR>` | Override the discovery path. Default: `<workspace>/.grain/scripts/` |
+
+Requires building with `--features scripts-boa`; without it the flag still parses but each script load emits a `[warn]` and is ignored. Full surface: [scripting.md](./scripting.md). For pi.dev-style extensions (`export default (pi) => {...}`), see [pi-compat.md](./pi-compat.md).
+
 ## Slash commands (interactive only)
 
 | Command | Effect |

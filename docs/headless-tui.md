@@ -135,6 +135,7 @@ Boot with a specific profile via `--provider <name>` and override the file path 
 | `--themes-dir <DIR>` | `<workspace>/.grain/themes` | User theme TOMLs |
 | `--provider <NAME>` | none | Initial provider profile ([providers.md](./providers.md)) |
 | `--providers-file <FILE>` | (search workspace + user) | Override providers.toml path |
+| `--scripts-dir <DIR>` | `<workspace>/.grain/scripts` | JS scripting via [scripting.md](./scripting.md) — needs `--features scripts-boa` |
 
 ---
 

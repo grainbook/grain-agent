@@ -96,6 +96,13 @@ pub struct Args {
     /// path; takes precedence over workspace + user locations.
     #[arg(long)]
     pub providers_file: Option<PathBuf>,
+
+    /// Directory of `*.js` script files that register additional
+    /// tools via `grain.register_tool({...})`. Defaults to
+    /// `<workspace>/.grain/scripts/` when the directory exists.
+    /// Requires building with `--features scripts-boa`.
+    #[arg(long)]
+    pub scripts_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

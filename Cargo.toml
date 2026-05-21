@@ -7,6 +7,8 @@ members = [
     "grain-llm-genai",
     "grain-ai-agent-headless",
     "grain-ai-agent-tui",
+    "grain-script-boa",
+    "grain-pi-compat",
 ]
 
 [workspace.package]
@@ -41,6 +43,9 @@ grain-llm-models = { path = "grain-llm-models" }
 grain-llm-genai = { path = "grain-llm-genai" }
 grain-ai-agent-headless = { path = "grain-ai-agent-headless" }
 grain-ai-agent-tui = { path = "grain-ai-agent-tui" }
+grain-script-boa = { path = "grain-script-boa" }
+grain-pi-compat = { path = "grain-pi-compat" }
 ratatui = "0.29"
 crossterm = "0.28"
 unicode-width = "0.2"
+boa_engine = "0.21"

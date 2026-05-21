@@ -67,6 +67,13 @@ Rust port of [`@earendil-works/pi-agent-core`](https://github.com/earendil-works
 |---------|-----|------------|
 | `grain-tui` binary | [headless-tui.md](./headless-tui.md) | ratatui terminal UI on top of headless — themes, slash autocomplete, prompt history, provider picker |
 
+### Extensions
+
+| Crate | Doc | What it is |
+|-------|-----|------------|
+| `grain-script-boa` | [scripting.md](./scripting.md) | Boa-powered JS scripting layer — drop `.js` into `<workspace>/.grain/scripts/` to register agent tools at runtime |
+| `grain-pi-compat` | [pi-compat.md](./pi-compat.md) | [pi.dev-style extensions](https://pi.dev/docs/latest/extensions) running on grain — supports `registerTool` / `registerCommand` / `registerShortcut` / `on` / `ui.notify` / `ui.confirm` / `ui.input` / `ui.select` |
+
 ### Cross-cutting
 
 | Topic | Doc | What it is |

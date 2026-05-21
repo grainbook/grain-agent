@@ -22,6 +22,15 @@ grain-llm-genai = { workspace = true }
 grain-ai-agent-headless = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
+grain-script-boa = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enable JavaScript scripting through `grain-script-boa`. With this on
+# the TUI accepts `--scripts-dir <PATH>` and auto-discovers
+# `<workspace>/.grain/scripts/`. Off by default — Boa adds ~5MB to the
+# compile.
+scripts-boa = ["dep:grain-script-boa"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -8,6 +8,11 @@ description = "Headless coding-agent toolkit built on grain-agent-core + grain-a
 [features]
 default = []
 rig = ["dep:rig", "dep:anyhow"]
+# Wires the Boa-backed JS scripting layer in: registers `BoaExtension`
+# when the user passes `--scripts-dir <DIR>` or drops scripts into
+# `<workspace>/.grain/scripts/`. Off by default — the Boa runtime is
+# ~5MB compile cost users without scripts shouldn't pay.
+scripts-boa = ["dep:grain-script-boa"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -27,6 +32,7 @@ dirs = { workspace = true }
 url = { workspace = true }
 rig = { version = "0.37", default-features = false, features = ["derive"], optional = true, package = "rig-core" }
 anyhow = { workspace = true, optional = true }
+grain-script-boa = { workspace = true, optional = true }
 grain-agent-core = { workspace = true }
 grain-agent-harness = { workspace = true }
 grain-llm-models = { workspace = true }

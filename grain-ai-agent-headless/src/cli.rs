@@ -132,6 +132,15 @@ pub struct Args {
     /// takes precedence over workspace + user locations.
     #[arg(long)]
     pub providers_file: Option<PathBuf>,
+
+    /// Directory of JavaScript files (`*.js`) that register
+    /// additional tools via `grain.register_tool({...})`. Defaults to
+    /// `<workspace>/.grain/scripts/` when the directory exists.
+    /// Requires the `scripts-boa` cargo feature; without it, this
+    /// flag is accepted but every script load surfaces a build-time
+    /// warning instead.
+    #[arg(long)]
+    pub scripts_dir: Option<PathBuf>,
 }
 
 impl Args {
@@ -354,6 +363,44 @@ pub async fn run(args: Args) -> Result<(), CliError> {
             );
         }
     }
+    // --- JS scripted tools (optional) -------------------------------------
+    // Resolves CLI flag → `<workspace>/.grain/scripts/` default. With
+    // the `scripts-boa` feature, loads every `*.js`, surfaces any
+    // tools the scripts registered, and keeps the extension alive for
+    // the agent's lifetime (the worker thread shuts down on drop).
+    let scripts_path = args.scripts_dir.clone().unwrap_or_else(|| {
+        workspace.root().join(".grain").join("scripts")
+    });
+    #[cfg(feature = "scripts-boa")]
+    let _scripts_keepalive = {
+        match grain_script_boa::BoaExtension::from_scripts_dir(&scripts_path) {
+            Ok(ext) => {
+                let scripted = ext.tools();
+                if !scripted.is_empty() {
+                    eprintln!(
+                        "[info] loaded {} JS tool(s) from {}",
+                        scripted.len(),
+                        scripts_path.display()
+                    );
+                }
+                tools.extend(scripted);
+                Some(ext)
+            }
+            Err(e) => {
+                eprintln!("[warn] boa scripts: {e}");
+                None
+            }
+        }
+    };
+    #[cfg(not(feature = "scripts-boa"))]
+    if args.scripts_dir.is_some() || scripts_path.exists() {
+        eprintln!(
+            "[warn] --scripts-dir / .grain/scripts/ present at {} but binary was \
+             built without --features scripts-boa; ignoring",
+            scripts_path.display()
+        );
+    }
+
     let _ = workspace; // keep alive when no further tool branches consume it
     opts.tools = tools;
     opts.messages = prior_messages;

@@ -79,6 +79,14 @@ grain-headless -C ./my-project --prompt "main.rs 写了什么？"
 
 完整 schema（同厂商多账号、OAuth 订阅、自定义 host）：[providers.md](./providers.md)。
 
+### JS 脚本扩展（`--features scripts-boa`）
+
+| Flag | 说明 |
+|------|------|
+| `--scripts-dir <DIR>` | 覆盖发现路径。默认：`<workspace>/.grain/scripts/` |
+
+需要 build 时开 `--features scripts-boa`；不开 feature 时 flag 也能解析但每个脚本会被 `[warn]` 跳过。完整 API：[scripting.md](./scripting.md)。pi.dev 风格扩展（`export default (pi) => {...}`）见 [pi-compat.md](./pi-compat.md)。
+
 ## Slash 命令（只在 `--interactive` 下）
 
 | 命令 | 作用 |

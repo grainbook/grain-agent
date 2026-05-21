@@ -133,6 +133,7 @@ surface = "#1a0033"
 | `--themes-dir <DIR>` | `<workspace>/.grain/themes` | 自定义主题目录 |
 | `--provider <NAME>` | 无 | 启动 provider profile |
 | `--providers-file <FILE>` | 自动查找 | 覆盖 providers.toml 路径 |
+| `--scripts-dir <DIR>` | `<workspace>/.grain/scripts` | JS 脚本扩展 [scripting.md](./scripting.md) —— 需要 `--features scripts-boa` |
 
 ---
 

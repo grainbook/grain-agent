@@ -1,0 +1,22 @@
+[package]
+name = "grain-pi-compat"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Compatibility shim that lets pi-style extensions (https://pi.dev/docs/latest/extensions) run on top of grain-script-boa. Translates pi's `pi.registerTool` / `export default (pi) => {...}` factory shape into the underlying grain JS runtime. Phase 1: tools only (no events / TS / UI hooks)."
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+dirs = { workspace = true }
+tempfile = "3"
+grain-agent-core = { workspace = true }
+grain-script-boa = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = "3"
+tokio-util = { workspace = true }

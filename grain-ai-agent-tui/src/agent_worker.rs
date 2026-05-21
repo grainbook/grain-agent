@@ -51,6 +51,10 @@ pub struct WorkerConfig {
     /// Index into [`Self::profiles`] for the profile to apply at
     /// startup. `None` means use [`Self::model`] verbatim.
     pub initial_profile_idx: Option<usize>,
+    /// Directory of JS scripts to load via `grain-script-boa`.
+    /// Honored only when the crate is built with the
+    /// `scripts-boa` feature.
+    pub scripts_dir: Option<PathBuf>,
 }
 
 impl From<&Args> for WorkerConfig {
@@ -72,6 +76,7 @@ impl From<&Args> for WorkerConfig {
             // (it has the workspace path on hand). Defaulted here.
             profiles: Vec::new(),
             initial_profile_idx: None,
+            scripts_dir: a.scripts_dir.clone(),
         }
     }
 }
@@ -219,6 +224,46 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         return Err(WorkerInitError::SemanticUnsupported);
     }
 
+    // --- JS scripted tools (optional, behind `scripts-boa` feature) ------
+    // Default path: `<workspace>/.grain/scripts/`. Missing directory
+    // is fine — `BoaExtension::from_scripts_dir` returns an empty
+    // extension. We hold the extension in the closure that gets
+    // moved into the worker task; dropping it stops the worker
+    // thread cleanly when the agent shuts down.
+    let scripts_path = cfg
+        .scripts_dir
+        .clone()
+        .unwrap_or_else(|| workspace.root().join(".grain").join("scripts"));
+    #[cfg(feature = "scripts-boa")]
+    let scripts_extension = match grain_script_boa::BoaExtension::from_scripts_dir(&scripts_path) {
+        Ok(ext) => {
+            let scripted = ext.tools();
+            if !scripted.is_empty() {
+                eprintln!(
+                    "[info] loaded {} JS tool(s) from {}",
+                    scripted.len(),
+                    scripts_path.display()
+                );
+            }
+            tools.extend(scripted);
+            Some(ext)
+        }
+        Err(e) => {
+            eprintln!("[warn] boa scripts: {e}");
+            None
+        }
+    };
+    #[cfg(not(feature = "scripts-boa"))]
+    {
+        if cfg.scripts_dir.is_some() || scripts_path.exists() {
+            eprintln!(
+                "[warn] --scripts-dir / .grain/scripts/ present at {} but binary was \
+                 built without --features scripts-boa; ignoring",
+                scripts_path.display()
+            );
+        }
+    }
+
     // --- Context guard -----------------------------------------------------
     // Use the resolved active model id (which may have come from a
     // profile) so the token budget matches the model the agent will
@@ -259,8 +304,17 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     let registry_for_task = registry.clone();
     let skills_dir_for_task = skills_dir.clone();
     let evt_tx_for_task = evt_tx.clone();
+    // Captured by the worker task closure so the Boa worker stays
+    // alive for the whole agent lifetime; dropping at task end sends
+    // Shutdown to that worker thread.
+    #[cfg(feature = "scripts-boa")]
+    let _scripts_keepalive = scripts_extension;
 
     let join = tokio::spawn(async move {
+        // Pin the Boa extension into the task scope so its worker
+        // thread lives until the agent task exits.
+        #[cfg(feature = "scripts-boa")]
+        let _boa_keepalive = _scripts_keepalive;
         // Fan AgentEvents into TuiEvents.
         let fan_tx = evt_tx_for_task.clone();
         agent_for_task

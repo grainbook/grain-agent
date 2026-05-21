@@ -67,6 +67,13 @@
 |-----|------|------|
 | `grain-tui` 二进制 | [headless-tui.md](./headless-tui.md) | 基于 ratatui 的终端 UI — 主题、slash 补齐、prompt 历史、provider 选择器 |
 
+### 扩展
+
+| Crate | 文档 | 简介 |
+|-------|------|------|
+| `grain-script-boa` | [scripting.md](./scripting.md) | 基于 Boa 的 JS 脚本层 —— `<workspace>/.grain/scripts/` 丢 `.js` 即可运行时注册 agent 工具 |
+| `grain-pi-compat` | [pi-compat.md](./pi-compat.md) | [pi.dev 风格扩展](https://pi.dev/docs/latest/extensions)的兼容层 —— 支持 `registerTool` / `registerCommand` / `registerShortcut` / `on` / `ui.notify` / `ui.confirm` / `ui.input` / `ui.select` |
+
 ### 跨模块
 
 | 主题 | 文档 | 简介 |
