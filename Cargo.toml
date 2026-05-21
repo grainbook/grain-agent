@@ -15,5 +15,6 @@ thiserror = "2"
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 tokio-util = { version = "0.7" }
 uuid = { version = "1", features = ["v7"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 grain-agent-core = { path = "grain-agent-core" }
 grain-llm-models = { path = "grain-llm-models" }
