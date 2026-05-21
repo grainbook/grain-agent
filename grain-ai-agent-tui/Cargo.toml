@@ -1,0 +1,31 @@
+[package]
+name = "grain-ai-agent-tui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "ratatui-based terminal UI on top of grain-ai-agent-headless. Same coding-agent capabilities as `grain-headless` (read / write / bash / web / semantic-search tools, session persistence, skills, slash commands) but with a multi-pane terminal interface."
+
+[dependencies]
+clap = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "io-std", "rt-multi-thread", "macros", "sync"] }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+grain-agent-core = { workspace = true }
+grain-agent-harness = { workspace = true }
+grain-llm-models = { workspace = true }
+grain-llm-genai = { workspace = true }
+grain-ai-agent-headless = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = "3"
+
+[[bin]]
+name = "grain-tui"
+path = "src/bin/grain_tui.rs"

@@ -6,6 +6,7 @@ members = [
     "grain-llm-models",
     "grain-llm-genai",
     "grain-ai-agent-headless",
+    "grain-ai-agent-tui",
 ]
 
 [workspace.package]
@@ -39,3 +40,6 @@ grain-agent-harness = { path = "grain-agent-harness" }
 grain-llm-models = { path = "grain-llm-models" }
 grain-llm-genai = { path = "grain-llm-genai" }
 grain-ai-agent-headless = { path = "grain-ai-agent-headless" }
+grain-ai-agent-tui = { path = "grain-ai-agent-tui" }
+ratatui = "0.29"
+crossterm = "0.28"
