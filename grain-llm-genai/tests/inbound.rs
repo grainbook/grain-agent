@@ -206,6 +206,8 @@ fn captured_usage_populates_final_message() {
         captured_usage: Some(usage),
         captured_content: None,
         captured_reasoning_content: None,
+        captured_response_id: None,
+        captured_stop_reason: None,
     });
 
     let (events, _) = run([ChatStreamEvent::Start, chunk("hi"), end]);

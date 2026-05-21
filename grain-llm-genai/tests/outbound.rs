@@ -246,7 +246,7 @@ fn tools_translate_to_genai_tool_definitions() {
     let tools = chat.tools.expect("tools attached");
     assert_eq!(tools.len(), 1);
     let t = &tools[0];
-    assert_eq!(t.name, "echo");
+    assert_eq!(t.name.as_str(), "echo");
     assert_eq!(t.description.as_deref(), Some("Echo back the value"));
     let schema = t.schema.as_ref().expect("schema attached");
     assert_eq!(

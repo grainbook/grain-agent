@@ -22,7 +22,7 @@ tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 tokio-util = { version = "0.7" }
 uuid = { version = "1", features = ["v7"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
-genai = "0.5"
+genai = "0.6.0-beta.20"
 async-stream = "0.3"
 ignore = "0.4"
 regex = "1"
