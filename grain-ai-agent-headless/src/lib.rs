@@ -41,7 +41,9 @@ pub mod workspace;
 #[cfg(feature = "rig")]
 pub mod semantic;
 
-pub use cli::{Args, EventPrinter, OpenAiCompatChoice, run};
+pub use cli::{
+    Args, EventPrinter, EventSink, JsonEventPrinter, OpenAiCompatChoice, OutputFormat, run,
+};
 pub use config::{ArgDefaults, ConfigError, ConfigFile};
 pub use prompt::{
     DEFAULT_CODING_AGENT_SYSTEM_PROMPT, FULL_CODING_AGENT_SYSTEM_PROMPT,

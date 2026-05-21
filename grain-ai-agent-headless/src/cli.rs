@@ -13,6 +13,7 @@ use clap::{Parser, ValueEnum};
 use grain_agent_core::{
     Agent, AgentEvent, AgentMessage, AgentOptions, AssistantMessageEvent, Message,
 };
+use serde::Serialize;
 use std::io::BufRead;
 use grain_agent_harness::context_guard::{ContextGuard, ContextGuardPolicy};
 use grain_llm_genai::{GenaiStream, OpenAiCompatPreset};
@@ -104,6 +105,12 @@ pub struct Args {
     /// agent can then reach arbitrary HTTP(S) endpoints.
     #[arg(long, default_value_t = false)]
     pub allow_web: bool,
+
+    /// Event output format. `text` (default) prints a human-friendly
+    /// stream; `json` emits one `AgentEvent` JSON-serialized per line
+    /// for programmatic consumers (`jq`, scripts, …).
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub output: OutputFormat,
 }
 
 impl Args {
@@ -131,6 +138,16 @@ impl From<OpenAiCompatChoice> for OpenAiCompatPreset {
             OpenAiCompatChoice::Common => OpenAiCompatPreset::Common,
         }
     }
+}
+
+/// Output format for streamed agent events. `Text` is the default
+/// human-friendly stdout stream; `Json` emits one
+/// `AgentEvent`-serialized line per event so callers can pipe into `jq`
+/// or another consumer.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum OutputFormat {
+    Text,
+    Json,
 }
 
 pub type CliError = Box<dyn std::error::Error + Send + Sync>;
@@ -263,7 +280,10 @@ pub async fn run(args: Args) -> Result<(), CliError> {
     }
 
     // --- Subscribe printer ------------------------------------------------
-    let printer = Arc::new(EventPrinter::new(args.show_thinking));
+    let printer: Arc<dyn EventSink + Send + Sync> = match args.output {
+        OutputFormat::Text => Arc::new(EventPrinter::new(args.show_thinking)),
+        OutputFormat::Json => Arc::new(JsonEventPrinter::new()),
+    };
     let printer_clone = printer.clone();
     agent
         .subscribe(Arc::new(move |event, _signal| {
@@ -423,6 +443,12 @@ fn resolve_skills_block(args: &Args, workspace_root: &std::path::Path) -> String
 // Event printer
 // ---------------------------------------------------------------------------
 
+/// Common interface for the text / json printers. Lets `run()` swap
+/// implementations behind one `Arc<dyn EventSink>`.
+pub trait EventSink {
+    fn print(&self, event: &AgentEvent);
+}
+
 /// Tiny stdout printer with internal lock so streamed text deltas don't
 /// interleave with tool-call markers.
 pub struct EventPrinter {
@@ -440,7 +466,7 @@ impl EventPrinter {
 
     /// Render one event to stdout. Returns immediately on lock contention
     /// errors (poisoning is harmless — the writer is just `println!`).
-    pub fn print(&self, event: &AgentEvent) {
+    pub fn print_inner(&self, event: &AgentEvent) {
         let _g = self.lock.lock();
         let mut out = io::stdout().lock();
         match event {
@@ -534,6 +560,53 @@ impl EventPrinter {
     }
 }
 
+impl EventSink for EventPrinter {
+    fn print(&self, event: &AgentEvent) {
+        self.print_inner(event);
+    }
+}
+
+/// JSON-lines printer for programmatic consumers. Each event is emitted
+/// as a single line: `{"event":"<tag>", ...}` derived from
+/// `AgentEvent`'s serde representation.
+#[derive(Default)]
+pub struct JsonEventPrinter {
+    lock: Mutex<()>,
+}
+
+impl JsonEventPrinter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Serialize)]
+struct JsonEventWrapper<'a> {
+    grain_event_version: u32,
+    #[serde(flatten)]
+    event: &'a AgentEvent,
+}
+
+impl EventSink for JsonEventPrinter {
+    fn print(&self, event: &AgentEvent) {
+        let _g = self.lock.lock();
+        let wrapper = JsonEventWrapper {
+            grain_event_version: 1,
+            event,
+        };
+        match serde_json::to_string(&wrapper) {
+            Ok(s) => {
+                let mut out = io::stdout().lock();
+                let _ = writeln!(out, "{s}");
+                let _ = out.flush();
+            }
+            Err(e) => {
+                eprintln!("[warn] json event serialize failed: {e}");
+            }
+        }
+    }
+}
+
 fn preview_json(v: &serde_json::Value, max_chars: usize) -> String {
     let s = serde_json::to_string(v).unwrap_or_default();
     truncate(&s, max_chars)
@@ -610,6 +683,33 @@ mod tests {
         let v = serde_json::json!({ "k": "v".repeat(500) });
         let p = preview_json(&v, 50);
         assert!(p.chars().count() <= 50 + 30); // 30 chars slop for "[+N chars]" suffix
+    }
+
+    #[test]
+    fn output_format_defaults_to_text() {
+        let args = Args::try_parse_from(["grain-headless"]).expect("defaults parse");
+        assert!(matches!(args.output, OutputFormat::Text));
+    }
+
+    #[test]
+    fn output_format_accepts_json() {
+        let args = Args::try_parse_from(["grain-headless", "--output", "json"])
+            .expect("parse with --output json");
+        assert!(matches!(args.output, OutputFormat::Json));
+    }
+
+    #[test]
+    fn json_event_wrapper_serializes_with_version() {
+        let event = AgentEvent::AgentStart;
+        let wrapper = JsonEventWrapper {
+            grain_event_version: 1,
+            event: &event,
+        };
+        let s = serde_json::to_string(&wrapper).unwrap();
+        assert!(s.contains("\"grain_event_version\":1"));
+        // AgentEvent tags with `#[serde(tag = "type")]` so the variant
+        // name appears as a `type` field.
+        assert!(s.contains("\"type\":\"agent_start\""), "got {s}");
     }
 
     #[test]
