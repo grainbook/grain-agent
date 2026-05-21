@@ -23,7 +23,9 @@ The async tests use `#[tokio::test]`; `tokio` is declared with `features = ["ful
 ## Crate layout and boundary
 
 - `grain-agent-core` — provider-agnostic agent runtime. **Must not depend on any concrete LLM SDK.** New provider integrations belong in a separate crate that implements `LlmStream`.
-- `grain-agent-harness` — engineering plumbing on top of core: session tree + storage, harness-aware `convert_to_llm`, system-prompt skill block, output truncation. Depends on `grain-agent-core`.
+- `grain-agent-harness` — engineering plumbing on top of core: session tree + storage, harness-aware `convert_to_llm`, system-prompt skill block, output truncation, `context_guard`. Depends on `grain-agent-core` and `grain-llm-models`.
+- `grain-llm-models` — standardized model registry (descriptor / `Registry` / vendored models.dev snapshot). Pure data — no LLM SDK dependency. Optional `fetch` feature pulls live data from `models.dev/api.json`; the `refresh-models` bin writes a deterministic snapshot back to `data/models-dev.json`.
+- `grain-llm-genai` — `LlmStream` implementation backed by `genai 0.5`. Builder configures env-key resolver, OpenAI-compat preset (kimi / siliconflow), provider router (grain id → genai namespace). Depends on `grain-agent-core` and `grain-llm-models`.
 
 The harness `lib.rs` lists what is deliberately **not** ported yet (compaction, on-disk skills loading, execution environment, top-level `AgentHarness`, JSONL session storage). Before adding new harness surface, check that file — those modules are the next-slice work and may already have a planned shape on the TS side.
 

@@ -1,9 +1,13 @@
 # grain-agent 使用文档
 
-本仓库是 [`@earendil-works/pi-agent-core`](https://github.com/earendil-works/pi) 的 Rust 移植，由两个 crate 组成：
+> English version: [../README.md](../README.md). 此目录是中文本地化版本，已有的核心 / harness 模块文档保持完整；`grain-llm-models` / `grain-llm-genai` / `context_guard` 的中文版尚未翻译，请参考英文版。
+
+本仓库是 [`@earendil-works/pi-agent-core`](https://github.com/earendil-works/pi) 的 Rust 移植，由四个 workspace crate 组成：
 
 - **`grain-agent-core`** — 与具体 LLM SDK 解耦的 agent 运行时（消息、工具、事件、循环、`Agent` 封装）。
-- **`grain-agent-harness`** — 工程化外壳（会话树、自定义消息、system prompt 装配、截断）。
+- **`grain-agent-harness`** — 工程化外壳（会话树、自定义消息、system prompt 装配、截断、context guard）。
+- **`grain-llm-models`** — 标准化模型注册表（models.dev 数据，descriptor + capability + 价格）。详见 [../llm-models.md](../llm-models.md)（英文）。
+- **`grain-llm-genai`** — 基于 [`genai`](https://crates.io/crates/genai) 的 `LlmStream` 实现（builder、env-key resolver、OpenAI-compat preset）。详见 [../llm-genai.md](../llm-genai.md)（英文）。
 
 ## 入门
 
