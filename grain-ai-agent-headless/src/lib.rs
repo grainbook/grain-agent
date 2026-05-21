@@ -34,7 +34,9 @@ pub mod tools;
 pub mod workspace;
 
 pub use cli::{Args, EventPrinter, OpenAiCompatChoice, run};
-pub use prompt::DEFAULT_CODING_AGENT_SYSTEM_PROMPT;
-pub use runtime::coding_read_tools;
-pub use tools::{GlobTool, GrepTool, ListTool, ReadTool};
+pub use prompt::{
+    DEFAULT_CODING_AGENT_SYSTEM_PROMPT, WRITE_ENABLED_CODING_AGENT_SYSTEM_PROMPT,
+};
+pub use runtime::{coding_all_tools, coding_read_tools, coding_write_tools};
+pub use tools::{EditTool, GlobTool, GrepTool, ListTool, ReadTool, WriteTool};
 pub use workspace::{Workspace, WorkspaceError};

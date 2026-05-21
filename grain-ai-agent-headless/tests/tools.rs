@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use grain_agent_core::{AgentTool, AgentToolResult, UserContent};
-use grain_ai_agent_headless::{GlobTool, GrepTool, ListTool, ReadTool, Workspace};
+use grain_ai_agent_headless::{
+    EditTool, GlobTool, GrepTool, ListTool, ReadTool, Workspace, WriteTool,
+};
 use tokio_util::sync::CancellationToken;
 
 fn workspace_with_files(files: &[(&str, &str)]) -> (tempfile::TempDir, Arc<Workspace>) {
@@ -294,4 +296,230 @@ async fn coding_read_tools_returns_all_four_tools() {
     let tools = grain_ai_agent_headless::coding_read_tools(ws);
     let names: Vec<&str> = tools.iter().map(|t| t.definition().name.as_str()).collect();
     assert_eq!(names, vec!["read", "list", "glob", "grep"]);
+}
+
+#[tokio::test]
+async fn coding_all_tools_includes_write_and_edit() {
+    let (_dir, ws) = workspace_with_files(&[("a.txt", "")]);
+    let tools = grain_ai_agent_headless::coding_all_tools(ws);
+    let names: Vec<&str> = tools.iter().map(|t| t.definition().name.as_str()).collect();
+    assert_eq!(names, vec!["read", "list", "glob", "grep", "write", "edit"]);
+}
+
+// ---------------------------------------------------------------------------
+// Workspace write-path validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn workspace_resolve_for_write_allows_new_file() {
+    let (_dir, ws) = workspace_with_files(&[]);
+    let path = ws.resolve_for_write("new.txt").expect("resolves");
+    assert!(path.starts_with(ws.root()));
+    assert!(path.ends_with("new.txt"));
+}
+
+#[test]
+fn workspace_resolve_for_write_allows_new_file_in_existing_subdir() {
+    let (_dir, ws) = workspace_with_files(&[("sub/anchor.txt", "")]);
+    let path = ws.resolve_for_write("sub/new.txt").expect("resolves");
+    assert!(path.starts_with(ws.root()));
+}
+
+#[test]
+fn workspace_resolve_for_write_rejects_missing_parent() {
+    let (_dir, ws) = workspace_with_files(&[]);
+    let err = ws.resolve_for_write("nonexistent/sub/new.txt").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("io") || msg.contains("not found") || msg.contains("does not exist"));
+}
+
+#[test]
+fn workspace_resolve_for_write_rejects_outside_root() {
+    let (_dir, ws) = workspace_with_files(&[]);
+    let err = ws.resolve_for_write("/tmp/somewhere_else/foo.txt").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("escape") || msg.contains("io"));
+}
+
+// ---------------------------------------------------------------------------
+// Write
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn write_creates_new_file() {
+    let (dir, ws) = workspace_with_files(&[]);
+    let tool = WriteTool::new(ws);
+    let result = tool
+        .execute(
+            "c",
+            serde_json::json!({ "path": "new.txt", "content": "hello\nworld\n" }),
+            CancellationToken::new(),
+            no_update(),
+        )
+        .await
+        .expect("ok");
+    let text = text_of(&result);
+    assert!(text.contains("created"));
+    let written = std::fs::read_to_string(dir.path().join("new.txt")).expect("file exists");
+    assert_eq!(written, "hello\nworld\n");
+    assert_eq!(
+        result.details.get("created").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn write_overwrites_existing_file() {
+    let (dir, ws) = workspace_with_files(&[("a.txt", "old content")]);
+    let tool = WriteTool::new(ws);
+    let result = tool
+        .execute(
+            "c",
+            serde_json::json!({ "path": "a.txt", "content": "new content" }),
+            CancellationToken::new(),
+            no_update(),
+        )
+        .await
+        .expect("ok");
+    let text = text_of(&result);
+    assert!(text.contains("overwrote"));
+    let written = std::fs::read_to_string(dir.path().join("a.txt")).expect("file exists");
+    assert_eq!(written, "new content");
+}
+
+#[tokio::test]
+async fn write_rejects_path_with_missing_parent() {
+    let (_dir, ws) = workspace_with_files(&[]);
+    let tool = WriteTool::new(ws);
+    let err = tool
+        .execute(
+            "c",
+            serde_json::json!({ "path": "no_such_dir/file.txt", "content": "x" }),
+            CancellationToken::new(),
+            no_update(),
+        )
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("io") || msg.contains("not found") || msg.contains("escape"));
+}
+
+#[tokio::test]
+async fn write_rejects_path_outside_workspace() {
+    let (_dir, ws) = workspace_with_files(&[]);
+    let tool = WriteTool::new(ws);
+    let err = tool
+        .execute(
+            "c",
+            serde_json::json!({ "path": "/tmp/escape.txt", "content": "x" }),
+            CancellationToken::new(),
+            no_update(),
+        )
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("escape") || msg.contains("io"));
+}
+
+// ---------------------------------------------------------------------------
+// Edit
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn edit_performs_search_replace() {
+    let (dir, ws) = workspace_with_files(&[("src.rs", "fn foo() {}\n")]);
+    let tool = EditTool::new(ws);
+    let result = tool
+        .execute(
+            "c",
+            serde_json::json!({ "path": "src.rs", "old": "fn foo()", "new": "fn bar()" }),
+            CancellationToken::new(),
+            no_update(),
+        )
+        .await
+        .expect("ok");
+    let text = text_of(&result);
+    assert!(text.contains("edited"));
+    let written = std::fs::read_to_string(dir.path().join("src.rs")).expect("file exists");
+    assert_eq!(written, "fn bar() {}\n");
+    assert_eq!(
+        result.details.get("replacements").and_then(|v| v.as_u64()),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn edit_rejects_no_op() {
+    let (_dir, ws) = workspace_with_files(&[("a.txt", "x")]);
+    let tool = EditTool::new(ws);
+    let err = tool
+        .execute(
+            "c",
+            serde_json::json!({ "path": "a.txt", "old": "x", "new": "x" }),
+            CancellationToken::new(),
+            no_update(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        grain_agent_core::AgentToolError::Validation(_)
+    ));
+    assert!(err.to_string().contains("no-op"));
+}
+
+#[tokio::test]
+async fn edit_fails_when_old_missing() {
+    let (_dir, ws) = workspace_with_files(&[("a.txt", "nothing here")]);
+    let tool = EditTool::new(ws);
+    let err = tool
+        .execute(
+            "c",
+            serde_json::json!({ "path": "a.txt", "old": "absent", "new": "x" }),
+            CancellationToken::new(),
+            no_update(),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("expected 1 occurrence(s)"));
+}
+
+#[tokio::test]
+async fn edit_enforces_expected_occurrences() {
+    // File has 3 occurrences; passing expected_occurrences=1 should fail loudly.
+    let (_dir, ws) = workspace_with_files(&[("a.txt", "TODO foo\nTODO bar\nTODO baz\n")]);
+    let tool = EditTool::new(ws);
+    let err = tool
+        .execute(
+            "c",
+            serde_json::json!({ "path": "a.txt", "old": "TODO", "new": "DONE" }),
+            CancellationToken::new(),
+            no_update(),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("found 3"));
+}
+
+#[tokio::test]
+async fn edit_with_explicit_count_succeeds() {
+    let (dir, ws) = workspace_with_files(&[("a.txt", "X\nX\nX\n")]);
+    let tool = EditTool::new(ws);
+    let result = tool
+        .execute(
+            "c",
+            serde_json::json!({
+                "path": "a.txt", "old": "X", "new": "Y", "expected_occurrences": 3
+            }),
+            CancellationToken::new(),
+            no_update(),
+        )
+        .await
+        .expect("ok");
+    let written = std::fs::read_to_string(dir.path().join("a.txt")).expect("file exists");
+    assert_eq!(written, "Y\nY\nY\n");
+    assert_eq!(
+        result.details.get("replacements").and_then(|v| v.as_u64()),
+        Some(3)
+    );
 }

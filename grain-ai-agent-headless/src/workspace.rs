@@ -86,6 +86,35 @@ impl Workspace {
         Ok(canon)
     }
 
+    /// Resolve a path for writing: the file itself need not exist, but the
+    /// **parent directory** must exist and live inside the workspace.
+    ///
+    /// Returns the absolute target path (parent canonicalized + file name
+    /// appended). Refuses paths that would land on the workspace root.
+    pub fn resolve_for_write(&self, path: &str) -> Result<PathBuf, WorkspaceError> {
+        let raw = Path::new(path);
+        let abs = if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            self.root.join(raw)
+        };
+        let parent = abs
+            .parent()
+            .ok_or_else(|| WorkspaceError::Escape(path.to_string()))?;
+        let name = abs
+            .file_name()
+            .ok_or_else(|| WorkspaceError::Escape(path.to_string()))?;
+
+        let parent_canon = parent.canonicalize().map_err(|source| WorkspaceError::Io {
+            path: parent.display().to_string(),
+            source,
+        })?;
+        if !parent_canon.starts_with(&self.root) {
+            return Err(WorkspaceError::Escape(path.to_string()));
+        }
+        Ok(parent_canon.join(name))
+    }
+
     /// Render a workspace-relative display path for tool output. Falls back
     /// to the absolute path if the input isn't actually inside the root.
     pub fn display_relative(&self, path: &Path) -> String {

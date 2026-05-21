@@ -17,8 +17,10 @@ use grain_agent_harness::context_guard::{ContextGuard, ContextGuardPolicy};
 use grain_llm_genai::{GenaiStream, OpenAiCompatPreset};
 use grain_llm_models::Registry;
 
-use crate::prompt::DEFAULT_CODING_AGENT_SYSTEM_PROMPT;
-use crate::runtime::coding_read_tools;
+use crate::prompt::{
+    DEFAULT_CODING_AGENT_SYSTEM_PROMPT, WRITE_ENABLED_CODING_AGENT_SYSTEM_PROMPT,
+};
+use crate::runtime::{coding_all_tools, coding_read_tools};
 use crate::workspace::Workspace;
 
 /// `grain-headless` — single-prompt coding agent over the local workspace.
@@ -52,6 +54,11 @@ pub struct Args {
     /// Print thinking-block deltas while streaming (off by default to keep stdout clean).
     #[arg(long, default_value_t = false)]
     pub show_thinking: bool,
+
+    /// Register the write tools (`write` / `edit`). Off by default — the
+    /// agent can only inspect the workspace, not mutate it.
+    #[arg(long, default_value_t = false)]
+    pub allow_write: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -105,7 +112,11 @@ pub async fn run(args: Args) -> Result<(), CliError> {
     // --- Agent options + agent --------------------------------------------
     let mut opts = AgentOptions::new(model, stream);
     opts.system_prompt = system_prompt;
-    opts.tools = coding_read_tools(workspace);
+    opts.tools = if args.allow_write {
+        coding_all_tools(workspace)
+    } else {
+        coding_read_tools(workspace)
+    };
     opts.transform_context = Some(guard);
 
     let agent = Agent::new(opts);
@@ -152,7 +163,11 @@ fn resolve_system_prompt(args: &Args) -> Result<String, CliError> {
             .map_err(|e| format!("read system prompt {}: {e}", path.display()))?;
         return Ok(s);
     }
-    Ok(DEFAULT_CODING_AGENT_SYSTEM_PROMPT.to_string())
+    Ok(if args.allow_write {
+        WRITE_ENABLED_CODING_AGENT_SYSTEM_PROMPT.to_string()
+    } else {
+        DEFAULT_CODING_AGENT_SYSTEM_PROMPT.to_string()
+    })
 }
 
 // ---------------------------------------------------------------------------
