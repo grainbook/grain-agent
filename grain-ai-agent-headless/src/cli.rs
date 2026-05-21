@@ -13,12 +13,14 @@ use clap::{Parser, ValueEnum};
 use grain_agent_core::{
     Agent, AgentEvent, AgentMessage, AgentOptions, AssistantMessageEvent, Message,
 };
+use std::io::BufRead;
 use grain_agent_harness::context_guard::{ContextGuard, ContextGuardPolicy};
 use grain_llm_genai::{GenaiStream, OpenAiCompatPreset};
 use grain_llm_models::Registry;
 
 use crate::prompt::coding_agent_system_prompt;
 use crate::runtime::{coding_bash_tools, coding_read_tools, coding_write_tools};
+use crate::session::{SessionWriter, load_messages};
 use crate::workspace::Workspace;
 
 /// `grain-headless` — single-prompt coding agent over the local workspace.
@@ -62,6 +64,19 @@ pub struct Args {
     /// shell commands can do anything (and they will, given the chance).
     #[arg(long, default_value_t = false)]
     pub allow_bash: bool,
+
+    /// Enter an interactive read-prompt-respond loop after handling the
+    /// optional initial `--prompt`. Type `/exit`, `/quit`, or send EOF
+    /// (Ctrl-D) to leave.
+    #[arg(short, long, default_value_t = false)]
+    pub interactive: bool,
+
+    /// JSONL session file (one `AgentMessage` per line). If the file
+    /// exists, prior messages are loaded into the transcript on startup;
+    /// new messages are appended as they finalize. Missing file is OK —
+    /// it's created on first append.
+    #[arg(long)]
+    pub session: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -102,8 +117,26 @@ pub async fn run(args: Args) -> Result<(), CliError> {
             .build(),
     );
 
+    // --- Session restore --------------------------------------------------
+    let prior_messages = match &args.session {
+        Some(path) => load_messages(path)
+            .map_err(|e| -> CliError { format!("session load {}: {e}", path.display()).into() })?,
+        None => Vec::new(),
+    };
+
     // --- Prompt + system prompt -------------------------------------------
-    let prompt_text = resolve_prompt(&args)?;
+    // Skip stdin reads when interactive (we read from stdin in the loop
+    // ourselves) or when resuming a session with no explicit prompt.
+    let initial_prompt = if args.prompt.is_some() {
+        Some(resolve_prompt(&args)?)
+    } else if args.interactive {
+        None
+    } else if !prior_messages.is_empty() {
+        // Resume-only: continue from where we left off without injecting a new prompt.
+        None
+    } else {
+        Some(resolve_prompt(&args)?)
+    };
     let system_prompt = resolve_system_prompt(&args)?;
 
     // --- Context guard -----------------------------------------------------
@@ -123,9 +156,28 @@ pub async fn run(args: Args) -> Result<(), CliError> {
         tools.extend(coding_bash_tools(workspace));
     }
     opts.tools = tools;
+    opts.messages = prior_messages;
     opts.transform_context = Some(guard);
 
     let agent = Agent::new(opts);
+
+    // --- Session writer subscription --------------------------------------
+    if let Some(path) = &args.session {
+        let writer = Arc::new(SessionWriter::open(path)?);
+        let writer_clone = writer.clone();
+        agent
+            .subscribe(Arc::new(move |event, _signal| {
+                let w = writer_clone.clone();
+                Box::pin(async move {
+                    if let AgentEvent::MessageEnd { message } = event
+                        && let Err(e) = w.append(&message)
+                    {
+                        eprintln!("[warn] session append failed: {e}");
+                    }
+                })
+            }))
+            .await;
+    }
 
     // --- Subscribe printer ------------------------------------------------
     let printer = Arc::new(EventPrinter::new(args.show_thinking));
@@ -140,12 +192,54 @@ pub async fn run(args: Args) -> Result<(), CliError> {
         .await;
 
     // --- Run --------------------------------------------------------------
-    agent.prompt_text(prompt_text).await?;
+    if let Some(text) = initial_prompt {
+        agent.prompt_text(text).await?;
+        let state = agent.state().await;
+        if let Some(err) = state.error_message {
+            // In interactive mode we continue past errors; otherwise propagate.
+            if !args.interactive {
+                return Err(format!("agent ended with error: {err}").into());
+            }
+            eprintln!("[error] {err}");
+        }
+    }
 
-    // Surface any error from the synthetic terminal event.
-    let state = agent.state().await;
-    if let Some(err) = state.error_message {
-        return Err(format!("agent ended with error: {err}").into());
+    if args.interactive {
+        run_interactive_loop(&agent).await?;
+    }
+
+    Ok(())
+}
+
+/// Read-prompt-respond loop. Reads lines from stdin until EOF or `/exit`.
+async fn run_interactive_loop(agent: &Agent) -> Result<(), CliError> {
+    let stdin = io::stdin();
+    let mut line = String::new();
+    loop {
+        eprint!("\n> ");
+        io::stderr().flush().ok();
+        line.clear();
+        let n = stdin.lock().read_line(&mut line)?;
+        if n == 0 {
+            // EOF (Ctrl-D)
+            eprintln!();
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == "/exit" || trimmed == "/quit" {
+            break;
+        }
+        if let Err(e) = agent.prompt_text(trimmed).await {
+            eprintln!("[error] {e}");
+            continue;
+        }
+        let state = agent.state().await;
+        if let Some(err) = &state.error_message {
+            eprintln!("[error] {err}");
+        }
     }
     Ok(())
 }

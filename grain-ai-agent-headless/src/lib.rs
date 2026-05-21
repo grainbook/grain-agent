@@ -30,6 +30,7 @@
 pub mod cli;
 pub mod prompt;
 pub mod runtime;
+pub mod session;
 pub mod tools;
 pub mod workspace;
 
@@ -42,6 +43,7 @@ pub use runtime::{
     coding_all_tools, coding_bash_tools, coding_full_tools, coding_read_tools,
     coding_write_tools,
 };
+pub use session::{SessionError, SessionWriter, load_messages};
 pub use tools::{
     BashTool, EditTool, GlobTool, GrepTool, ListTool, ReadTool, WriteTool,
 };
