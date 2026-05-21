@@ -37,9 +37,12 @@ use grain_llm_models::Registry;
 let stream = GenaiStream::builder()
     .with_openai_compat_preset(OpenAiCompatPreset::Common)   // kimi + siliconflow
     .with_env_override("openai", "MY_OPENAI_KEY")            // 覆盖 env var 名
+    .with_provider_profiles(&profiles)                       // 多账号 / 自定义 host
     .with_registry(Arc::new(Registry::from_embedded_snapshot()))
     .build();
 ```
+
+`.with_provider_profiles(&[ProviderProfile])` 一次性注册一整套 TOML 驱动的厂商配置 —— 见 [providers.md](./providers.md)。内部转成已有的 `with_openai_compat(...)` + `with_env_override(...)` 调用，和 builder 其他方法自由组合。
 
 builder 配置 `genai::Client`，挂上 auth resolver（基于 env-var 的 key 查找）和 service-target resolver（OpenAI-compat endpoint 重写）。默认值合理：`EnvKeyResolver::default_mapping()` 覆盖所有 genai 原生 provider；`OpenAiCompatPreset::None`（空）；`ProviderRouter::default()` 将 `google` → `gemini`、`zhipu` → `bigmodel`、`moonshot` → `kimi`。
 

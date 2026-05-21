@@ -70,6 +70,15 @@ The agent runs read-only by default and prints a streaming event log to stdout.
 | `--output <text\|json>` | `text` is human; `json` is one event per line (pipe to `jq`) |
 | `--doctor` | Print workspace + provider + git diagnostic and exit 0; no LLM calls |
 
+### Provider profiles
+
+| Flag | Notes |
+|------|-------|
+| `--provider <name>` | Activate a named profile from `providers.toml`. Profile model + auth env replace defaults derived from `--model`. OAuth profiles fail fast (Phase 2) |
+| `--providers-file <path>` | Override the search path. Search order otherwise: `<workspace>/.grain/providers.toml` → `~/.config/grain/providers.toml` |
+
+Full schema (multi-account per vendor, OAuth subscriptions, custom hosts): [providers.md](./providers.md).
+
 ## Slash commands (interactive only)
 
 | Command | Effect |

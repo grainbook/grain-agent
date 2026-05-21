@@ -61,6 +61,18 @@ Rust port of [`@earendil-works/pi-agent-core`](https://github.com/earendil-works
 | Config file | [config.md](./config.md) | TOML config at `<workspace>/.grain/config.toml` + `~/.config/grain/config.toml` |
 | Telemetry | [telemetry.md](./telemetry.md) | Opt-in local JSONL event log (with sensitive-data warning) |
 
+### grain-ai-agent-tui
+
+| Surface | Doc | What it is |
+|---------|-----|------------|
+| `grain-tui` binary | [headless-tui.md](./headless-tui.md) | ratatui terminal UI on top of headless — themes, slash autocomplete, prompt history, provider picker |
+
+### Cross-cutting
+
+| Topic | Doc | What it is |
+|-------|-----|------------|
+| Provider profiles | [providers.md](./providers.md) | Multi-vendor / multi-account / OAuth-subscription configuration; consumed by both `grain-headless` and `grain-tui` |
+
 ### Project-wide
 
 | Topic | Doc |

@@ -70,6 +70,15 @@ grain-headless -C ./my-project --prompt "main.rs 写了什么？"
 | `--output <text\|json>` | text 给人看；json 每行一个事件，方便管道到 `jq` |
 | `--doctor` | 打印工作目录 + provider key + git 状态，**不调用 LLM**；退出 0 |
 
+### Provider profile
+
+| Flag | 说明 |
+|------|------|
+| `--provider <name>` | 激活 `providers.toml` 里的一个命名 profile；profile 的 model + 鉴权 env 覆盖 `--model`。OAuth profile fail-fast（Phase 2） |
+| `--providers-file <path>` | 自定义 providers.toml 路径。默认查找顺序：`<workspace>/.grain/providers.toml` → `~/.config/grain/providers.toml` |
+
+完整 schema（同厂商多账号、OAuth 订阅、自定义 host）：[providers.md](./providers.md)。
+
 ## Slash 命令（只在 `--interactive` 下）
 
 | 命令 | 作用 |

@@ -35,9 +35,12 @@ use grain_llm_models::Registry;
 let stream = GenaiStream::builder()
     .with_openai_compat_preset(OpenAiCompatPreset::Common)   // kimi + siliconflow
     .with_env_override("openai", "MY_OPENAI_KEY")            // override env var name
+    .with_provider_profiles(&profiles)                       // multi-account / custom hosts
     .with_registry(Arc::new(Registry::from_embedded_snapshot()))
     .build();
 ```
+
+`.with_provider_profiles(&[ProviderProfile])` registers a whole TOML-driven catalog of vendor configurations — see [providers.md](./providers.md). Internally it lowers to existing `with_openai_compat(...)` + `with_env_override(...)` calls, so it composes cleanly with everything else on the builder.
 
 The builder configures a `genai::Client` with both an auth resolver (env-var-based key lookup) and a service-target resolver (OpenAI-compat endpoint rewriting). Defaults are sane: `EnvKeyResolver::default_mapping()` covers all genai-native providers; `OpenAiCompatPreset::None` (empty); `ProviderRouter::default()` renames `google` → `gemini`, `zhipu` → `bigmodel`, `moonshot` → `kimi`.
 

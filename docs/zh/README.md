@@ -61,6 +61,18 @@
 | 配置文件 | [config.md](./config.md) | `<workspace>/.grain/config.toml` + `~/.config/grain/config.toml` TOML |
 | Telemetry | [telemetry.md](./telemetry.md) | 可选的本地 JSONL 事件日志（含敏感数据警告） |
 
+### grain-ai-agent-tui
+
+| 面 | 文档 | 简介 |
+|-----|------|------|
+| `grain-tui` 二进制 | [headless-tui.md](./headless-tui.md) | 基于 ratatui 的终端 UI — 主题、slash 补齐、prompt 历史、provider 选择器 |
+
+### 跨模块
+
+| 主题 | 文档 | 简介 |
+|------|------|------|
+| Provider profiles | [providers.md](./providers.md) | 多厂商 / 多账号 / OAuth 订阅配置；`grain-headless` 和 `grain-tui` 共享 |
+
 ### 全 workspace
 
 | 主题 | 文档 |
