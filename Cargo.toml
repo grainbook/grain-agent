@@ -27,6 +27,7 @@ async-stream = "0.3"
 ignore = "0.4"
 regex = "1"
 globset = "0.4"
+clap = { version = "4", features = ["derive"] }
 grain-agent-core = { path = "grain-agent-core" }
 grain-agent-harness = { path = "grain-agent-harness" }
 grain-llm-models = { path = "grain-llm-models" }

@@ -27,11 +27,13 @@
 //! - CLI driver (single-prompt / interactive) — separate PR.
 //! - rig-backed semantic search (`SemanticSearch` tool) — separate PR.
 
+pub mod cli;
 pub mod prompt;
 pub mod runtime;
 pub mod tools;
 pub mod workspace;
 
+pub use cli::{Args, EventPrinter, OpenAiCompatChoice, run};
 pub use prompt::DEFAULT_CODING_AGENT_SYSTEM_PROMPT;
 pub use runtime::coding_read_tools;
 pub use tools::{GlobTool, GrepTool, ListTool, ReadTool};

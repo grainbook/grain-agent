@@ -3,21 +3,29 @@ name = "grain-ai-agent-headless"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "Headless coding-agent toolkit built on grain-agent-core + grain-agent-harness + grain-llm-genai. Read-only file tools (Read / List / Glob / Grep) ship in v1; write tools / shell / CLI driver / rig-backed semantic search land in follow-up PRs."
+description = "Headless coding-agent toolkit built on grain-agent-core + grain-agent-harness + grain-llm-genai. v1 ships the four read-only filesystem tools and a single-prompt CLI driver (`grain-headless`); write tools / shell / interactive loop / rig-backed semantic search land in follow-up PRs."
 
 [dependencies]
 async-trait = { workspace = true }
+clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio = { workspace = true, features = ["fs", "io-util", "io-std", "rt-multi-thread", "macros"] }
 tokio-util = { workspace = true }
 ignore = { workspace = true }
 regex = { workspace = true }
 globset = { workspace = true }
+futures = { workspace = true }
 grain-agent-core = { workspace = true }
 grain-agent-harness = { workspace = true }
+grain-llm-models = { workspace = true }
+grain-llm-genai = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "fs", "io-util", "rt-multi-thread"] }
 tempfile = "3"
+
+[[bin]]
+name = "grain-headless"
+path = "src/bin/grain_headless.rs"
