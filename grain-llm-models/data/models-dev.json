@@ -1,0 +1,183 @@
+{
+  "version": 1,
+  "_note": "Starter snapshot. Capability flags and context windows reflect publicly documented model behaviour. Pricing is intentionally left at 0 — regenerate via `cargo run -p grain-llm-models --bin refresh-models` once that binary lands.",
+  "models": [
+    {
+      "id": "anthropic/claude-sonnet-4-5",
+      "name": "Claude Sonnet 4.5",
+      "provider": { "type": "anthropic" },
+      "api": "anthropic",
+      "contextWindow": 200000,
+      "maxOutputTokens": 8192,
+      "capabilities": {
+        "streaming": true,
+        "toolUse": true,
+        "vision": true,
+        "jsonMode": false,
+        "structuredOutput": true
+      },
+      "thinking": {
+        "supported": true,
+        "defaultLevel": "off",
+        "supportedLevels": ["off", "low", "medium", "high"],
+        "reasoningFieldName": "thinking"
+      }
+    },
+    {
+      "id": "anthropic/claude-opus-4-7",
+      "name": "Claude Opus 4.7",
+      "provider": { "type": "anthropic" },
+      "api": "anthropic",
+      "contextWindow": 1000000,
+      "maxOutputTokens": 8192,
+      "capabilities": {
+        "streaming": true,
+        "toolUse": true,
+        "vision": true,
+        "jsonMode": false,
+        "structuredOutput": true
+      },
+      "thinking": {
+        "supported": true,
+        "defaultLevel": "off",
+        "supportedLevels": ["off", "low", "medium", "high"],
+        "reasoningFieldName": "thinking"
+      }
+    },
+    {
+      "id": "anthropic/claude-haiku-4-5",
+      "name": "Claude Haiku 4.5",
+      "provider": { "type": "anthropic" },
+      "api": "anthropic",
+      "contextWindow": 200000,
+      "maxOutputTokens": 8192,
+      "capabilities": {
+        "streaming": true,
+        "toolUse": true,
+        "vision": true,
+        "jsonMode": false,
+        "structuredOutput": true
+      },
+      "thinking": {
+        "supported": true,
+        "defaultLevel": "off",
+        "supportedLevels": ["off", "low", "medium"],
+        "reasoningFieldName": "thinking"
+      }
+    },
+    {
+      "id": "openai/gpt-4o",
+      "name": "GPT-4o",
+      "provider": { "type": "open_ai" },
+      "api": "open_ai",
+      "contextWindow": 128000,
+      "maxOutputTokens": 16384,
+      "capabilities": {
+        "streaming": true,
+        "toolUse": true,
+        "vision": true,
+        "jsonMode": true,
+        "structuredOutput": true
+      },
+      "thinking": {
+        "supported": false
+      }
+    },
+    {
+      "id": "openai/o3-mini",
+      "name": "o3-mini",
+      "provider": { "type": "open_ai" },
+      "api": "open_ai",
+      "contextWindow": 200000,
+      "maxOutputTokens": 100000,
+      "capabilities": {
+        "streaming": true,
+        "toolUse": true,
+        "vision": false,
+        "jsonMode": true,
+        "structuredOutput": true
+      },
+      "thinking": {
+        "supported": true,
+        "defaultLevel": "medium",
+        "supportedLevels": ["low", "medium", "high"],
+        "reasoningFieldName": "reasoning_content"
+      }
+    },
+    {
+      "id": "google/gemini-2.0-flash",
+      "name": "Gemini 2.0 Flash",
+      "provider": { "type": "google" },
+      "api": "gemini",
+      "contextWindow": 1048576,
+      "maxOutputTokens": 8192,
+      "capabilities": {
+        "streaming": true,
+        "toolUse": true,
+        "vision": true,
+        "jsonMode": true,
+        "structuredOutput": true
+      },
+      "thinking": {
+        "supported": false
+      }
+    },
+    {
+      "id": "deepseek/deepseek-r1",
+      "name": "DeepSeek R1",
+      "provider": { "type": "deep_seek" },
+      "api": "open_ai",
+      "contextWindow": 65536,
+      "maxOutputTokens": 8192,
+      "capabilities": {
+        "streaming": true,
+        "toolUse": false,
+        "vision": false,
+        "jsonMode": false,
+        "structuredOutput": false
+      },
+      "thinking": {
+        "supported": true,
+        "defaultLevel": "medium",
+        "supportedLevels": ["medium"],
+        "reasoningFieldName": "reasoning_content"
+      }
+    },
+    {
+      "id": "zhipu/glm-4-plus",
+      "name": "GLM-4 Plus",
+      "provider": { "type": "open_ai_compatible", "id": "zhipu" },
+      "api": "open_ai",
+      "contextWindow": 128000,
+      "maxOutputTokens": 4096,
+      "capabilities": {
+        "streaming": true,
+        "toolUse": true,
+        "vision": false,
+        "jsonMode": true,
+        "structuredOutput": false
+      },
+      "thinking": {
+        "supported": false
+      }
+    },
+    {
+      "id": "kimi/moonshot-v1-128k",
+      "name": "Moonshot v1 128k",
+      "provider": { "type": "open_ai_compatible", "id": "kimi" },
+      "api": "open_ai",
+      "contextWindow": 128000,
+      "maxOutputTokens": 4096,
+      "capabilities": {
+        "streaming": true,
+        "toolUse": true,
+        "vision": false,
+        "jsonMode": false,
+        "structuredOutput": false
+      },
+      "thinking": {
+        "supported": false
+      }
+    }
+  ]
+}
