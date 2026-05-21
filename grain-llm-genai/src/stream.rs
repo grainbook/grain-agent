@@ -1,15 +1,10 @@
 //! [`grain_agent_core::LlmStream`] implementation backed by `genai 0.5`.
 //!
-//! The actual streaming logic lives here; the message ↔ event translation
-//! lives under [`crate::mapping`]. This file mostly orchestrates:
-//!
-//! 1. Translate the incoming [`LlmContext`] into a `genai::chat::ChatRequest`.
-//! 2. Call `Client::exec_chat_stream`.
-//! 3. Wrap the returned `ChatStream` with our [`InboundState`] state machine
-//!    and surface each genai event as the appropriate grain
-//!    [`AssistantMessageEvent`].
-//! 4. Honor the [`tokio_util::sync::CancellationToken`]: when cancelled, drop
-//!    the upstream stream and emit a terminal `Aborted` error event.
+//! The streaming logic lives here; the message ↔ event translation lives in
+//! [`crate::mapping`]; the client construction + provider routing lives in
+//! [`crate::builder`].
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -18,23 +13,25 @@ use grain_agent_core::{
     AssistantMessageEvent, AssistantStream, LlmContext, LlmStream, Model, StreamError,
     StreamOptions,
 };
+use grain_llm_models::Registry;
 use tokio_util::sync::CancellationToken;
 
+use crate::builder::GenaiStreamBuilder;
+use crate::config::ProviderRouter;
 use crate::mapping::inbound::InboundState;
 use crate::mapping::outbound::{baseline_chat_options, to_chat_request};
 
 /// [`LlmStream`] implementation backed by [`genai::Client`].
 ///
-/// PR 3b ships the minimal viable wrapper:
-/// - Auto-detect provider from the model id (genai's default behavior).
-/// - Default [`ChatOptions`] enable content / usage / tool-call / reasoning
-///   capture so the terminal `StreamEnd` carries usage even when streaming.
-///
-/// PR 3c will introduce `GenaiStreamBuilder` with the env-var key resolver,
-/// OpenAI-compatible provider presets, and registry-aware model lookup.
+/// Build via [`GenaiStream::builder()`] for full configuration (env-var
+/// key resolution, OpenAI-compat presets, model registry); [`GenaiStream::new`]
+/// retains the zero-config behavior from PR 3b.
 pub struct GenaiStream {
     client: genai::Client,
     chat_options: ChatOptions,
+    provider_router: ProviderRouter,
+    #[allow(dead_code)] // Reserved for harness hooks / future adapters.
+    registry: Option<Arc<Registry>>,
 }
 
 impl Default for GenaiStream {
@@ -44,17 +41,23 @@ impl Default for GenaiStream {
 }
 
 impl GenaiStream {
-    /// Build a `GenaiStream` with [`genai::Client::default`] and
-    /// [`baseline_chat_options`].
+    /// Zero-config: default genai client + [`baseline_chat_options`].
     pub fn new() -> Self {
         GenaiStream {
             client: genai::Client::default(),
             chat_options: baseline_chat_options(),
+            provider_router: ProviderRouter::default(),
+            registry: None,
         }
     }
 
-    /// Build with a caller-provided client and options. Lets tests inject
-    /// mock clients without going through the (forthcoming) builder.
+    /// Start a configuration chain. See [`GenaiStreamBuilder`].
+    pub fn builder() -> GenaiStreamBuilder {
+        GenaiStreamBuilder::new()
+    }
+
+    /// Construct from a fully-configured client. Used by tests that want to
+    /// inject a mock client without going through the builder.
     pub fn with_client_and_options(
         client: genai::Client,
         chat_options: ChatOptions,
@@ -62,6 +65,38 @@ impl GenaiStream {
         GenaiStream {
             client,
             chat_options,
+            provider_router: ProviderRouter::default(),
+            registry: None,
+        }
+    }
+
+    /// Construct from a builder-prepared client. Public for [`GenaiStreamBuilder::build`]
+    /// to plumb its config in.
+    pub fn with_client_options_and_router(
+        client: genai::Client,
+        chat_options: ChatOptions,
+        provider_router: ProviderRouter,
+        registry: Option<Arc<Registry>>,
+    ) -> Self {
+        GenaiStream {
+            client,
+            chat_options,
+            provider_router,
+            registry,
+        }
+    }
+
+    /// Translate a grain model id (`"anthropic/claude-sonnet-4-5"`) into the
+    /// `"<namespace>::<model>"` form genai dispatches on. Provider names with
+    /// no `/` pass through unchanged so callers can also feed genai-native
+    /// identifiers directly.
+    pub fn translate_model_id(&self, model_id: &str) -> String {
+        match model_id.split_once('/') {
+            Some((provider, name)) => {
+                let ns = self.provider_router.namespace_for(provider);
+                format!("{ns}::{name}")
+            }
+            None => model_id.to_string(),
         }
     }
 }
@@ -77,15 +112,7 @@ impl LlmStream for GenaiStream {
     ) -> Result<AssistantStream, StreamError> {
         let chat_req = to_chat_request(context);
         let chat_options = self.chat_options.clone();
-
-        // Our registry keys are `"<provider>/<model>"`; genai dispatches on the
-        // model name alone (e.g. `claude-sonnet-4-5`). Strip the prefix when
-        // it's there. PR 3c will resolve this through the registry properly.
-        let model_for_genai = model
-            .id
-            .split_once('/')
-            .map(|(_, m)| m.to_string())
-            .unwrap_or_else(|| model.id.clone());
+        let model_for_genai = self.translate_model_id(&model.id);
 
         let stream_resp = match self
             .client
