@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesOrdered, StreamExt};
 use tokio_util::sync::CancellationToken;
@@ -978,8 +979,21 @@ async fn execute_prepared(
         // Fire-and-forget: emit asynchronously without awaiting from the tool
         // body. tokio's spawn keeps semantics close to the TS implementation
         // which accumulates promises and awaits them after execute resolves.
-        let fut = (emit_cloned)(event);
-        tokio::spawn(fut);
+        //
+        // Wrap in `catch_unwind` so a panicking subscriber surfaces as a
+        // stderr log instead of silently disappearing into the spawn — the
+        // JoinHandle is dropped, so without this the panic is fully eaten.
+        let fut = std::panic::AssertUnwindSafe((emit_cloned)(event)).catch_unwind();
+        tokio::spawn(async move {
+            if let Err(panic) = fut.await {
+                let msg = panic
+                    .downcast_ref::<&'static str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "<non-string panic>".into());
+                eprintln!("[warn] ToolExecutionUpdate listener panicked: {msg}");
+            }
+        });
     });
 
     let exec = prepared

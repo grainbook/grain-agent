@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use genai::chat::ChatOptions;
+use genai::chat::{ChatOptions, ReasoningEffort};
 use grain_agent_core::{
     AssistantMessageEvent, AssistantStream, LlmContext, LlmStream, Model, StreamError,
-    StreamOptions,
+    StreamOptions, ThinkingLevel,
 };
 use grain_llm_models::Registry;
 use tokio_util::sync::CancellationToken;
@@ -101,17 +101,52 @@ impl GenaiStream {
     }
 }
 
+/// Project a per-request `StreamOptions` onto a fresh `ChatOptions`.
+///
+/// Currently honored:
+/// - `reasoning` → `ChatOptions::with_reasoning_effort` (ThinkingLevel maps
+///   onto genai's `ReasoningEffort` variants 1:1, except `XHigh` collapses
+///   to `High` since genai 0.5 has no higher band).
+///
+/// **Not yet honored** (the genai 0.5 API doesn't expose per-call slots
+/// for these, so wiring them up requires a fuller refactor of the client
+/// builder; see the M-2 code-review entry):
+/// - `api_key`: would need a dynamic auth resolver per-call.
+/// - `session_id` / `transport`: provider-specific transport knobs.
+/// - `max_retry_delay_ms`: WebConfig is set at client build time.
+fn chat_options_with_runtime(base: ChatOptions, options: &StreamOptions) -> ChatOptions {
+    let mut chat = base;
+    if let Some(level) = options.reasoning
+        && let Some(effort) = thinking_level_to_effort(level)
+    {
+        chat = chat.with_reasoning_effort(effort);
+    }
+    chat
+}
+
+fn thinking_level_to_effort(level: ThinkingLevel) -> Option<ReasoningEffort> {
+    match level {
+        ThinkingLevel::Off => Some(ReasoningEffort::None),
+        ThinkingLevel::Minimal => Some(ReasoningEffort::Minimal),
+        ThinkingLevel::Low => Some(ReasoningEffort::Low),
+        ThinkingLevel::Medium => Some(ReasoningEffort::Medium),
+        // genai 0.5 caps at High; XHigh collapses up to it rather than
+        // silently dropping the user's higher-effort intent.
+        ThinkingLevel::High | ThinkingLevel::XHigh => Some(ReasoningEffort::High),
+    }
+}
+
 #[async_trait]
 impl LlmStream for GenaiStream {
     async fn stream(
         &self,
         model: &Model,
         context: &LlmContext,
-        _options: &StreamOptions,
+        options: &StreamOptions,
         cancel: CancellationToken,
     ) -> Result<AssistantStream, StreamError> {
         let chat_req = to_chat_request(context);
-        let chat_options = self.chat_options.clone();
+        let chat_options = chat_options_with_runtime(self.chat_options.clone(), options);
         let model_for_genai = self.translate_model_id(&model.id);
 
         let stream_resp = match self

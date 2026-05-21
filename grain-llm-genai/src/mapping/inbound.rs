@@ -22,6 +22,14 @@ use crate::mapping::usage::map_usage;
 /// `grain-agent-core::stream`): exactly one [`AssistantMessageEvent::Start`]
 /// followed by Text/Thinking/Toolcall block events, terminated by exactly one
 /// [`AssistantMessageEvent::Done`] or [`AssistantMessageEvent::Error`].
+///
+/// **Design note (M-3)**: `OpenBlock` only tracks `Text` and `Thinking`
+/// blocks. Tool calls arrive from genai 0.5 as complete `ToolCallChunk`s
+/// (one chunk per fully assembled call), so the state machine emits
+/// paired `ToolcallStart` + `ToolcallEnd` immediately without holding the
+/// block open. If a future genai release exposes streaming tool-call
+/// argument deltas, we'd add an `OpenBlock::ToolCall { index }` variant
+/// and route `ToolCallDelta` through it.
 pub struct InboundState {
     base: AssistantMessage,
     blocks: Vec<AssistantContent>,

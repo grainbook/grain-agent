@@ -25,6 +25,7 @@
 //! opts.transform_context = Some(guard);
 //! ```
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use grain_agent_core::{
@@ -215,31 +216,98 @@ impl ContextGuard {
     }
 }
 
-/// Apply the policy in-place and return the resulting transcript.
+/// Apply the policy and return the resulting transcript.
+///
+/// After truncating by policy, any [`ToolResultMessage`] whose
+/// [`ToolResultMessage::tool_call_id`] no longer references a preceding
+/// assistant tool-call is removed — orphaned tool results are rejected by
+/// most providers (Anthropic returns 400).
 fn apply_policy(
     messages: Vec<AgentMessage>,
     budget: u64,
     policy: &ContextGuardPolicy,
     estimator: &TokenEstimator,
 ) -> Vec<AgentMessage> {
-    let total = estimator.estimate_messages(&messages);
+    // Per-message token estimates — compute once and reuse instead of
+    // re-summing the whole transcript on every iteration of DropOldest
+    // (the old implementation was O(n²)).
+    let per_message: Vec<u64> = messages
+        .iter()
+        .map(|m| estimator.estimate_message(m))
+        .collect();
+    let total: u64 = per_message.iter().sum();
     if total <= budget {
         return messages;
     }
 
-    match policy {
+    let mut truncated = match policy {
         ContextGuardPolicy::Identity => messages,
         ContextGuardPolicy::KeepRecent(n) => {
+            // Drop from the head to keep the last N. If those N still
+            // exceed budget we additionally peel oldest off the front
+            // until we fit (or only one message remains).
             let keep = (*n).min(messages.len());
-            let drop = messages.len() - keep;
-            messages.into_iter().skip(drop).collect()
-        }
-        ContextGuardPolicy::DropOldest => {
-            let mut messages = messages;
-            while messages.len() > 1 && estimator.estimate_messages(&messages) > budget {
-                messages.remove(0);
+            let drop_n = messages.len() - keep;
+            let mut kept_total: u64 = per_message[drop_n..].iter().sum();
+            let mut messages: Vec<AgentMessage> = messages.into_iter().skip(drop_n).collect();
+            let mut per_message: Vec<u64> = per_message[drop_n..].to_vec();
+            let mut head = 0usize;
+            while messages.len() - head > 1 && kept_total > budget {
+                kept_total -= per_message[head];
+                head += 1;
+            }
+            if head > 0 {
+                messages.drain(..head);
+                per_message.drain(..head);
             }
             messages
         }
+        ContextGuardPolicy::DropOldest => {
+            // Running total: subtract dropped messages' estimates as we
+            // peel them off instead of rescanning. Single O(n) pass.
+            let mut running = total;
+            let mut head = 0usize;
+            while messages.len() - head > 1 && running > budget {
+                running -= per_message[head];
+                head += 1;
+            }
+            let mut messages = messages;
+            messages.drain(..head);
+            messages
+        }
+    };
+
+    remove_orphan_tool_results(&mut truncated);
+    truncated
+}
+
+/// After truncation, drop any tool-result whose `tool_call_id` no longer
+/// has a matching tool-call in an earlier assistant message in the trimmed
+/// transcript. Orphan tool results trip provider validation (Anthropic 400,
+/// OpenAI silent failures).
+fn remove_orphan_tool_results(messages: &mut Vec<AgentMessage>) {
+    let mut known_ids: HashSet<String> = HashSet::new();
+    let mut keep: Vec<bool> = Vec::with_capacity(messages.len());
+    for m in messages.iter() {
+        match m {
+            AgentMessage::Standard(Message::Assistant(a)) => {
+                for c in &a.content {
+                    if let AssistantContent::ToolCall(tc) = c {
+                        known_ids.insert(tc.id.clone());
+                    }
+                }
+                keep.push(true);
+            }
+            AgentMessage::Standard(Message::ToolResult(tr)) => {
+                keep.push(known_ids.contains(&tr.tool_call_id));
+            }
+            _ => keep.push(true),
+        }
     }
+    let mut idx = 0usize;
+    messages.retain(|_| {
+        let k = keep[idx];
+        idx += 1;
+        k
+    });
 }

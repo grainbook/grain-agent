@@ -101,9 +101,17 @@ impl SessionWriter {
 
     /// Append one message as a single line. Calls `flush` so a crash
     /// between turns doesn't lose already-finalized messages.
+    ///
+    /// Poison recovery: a panic inside a listener that held this mutex
+    /// would poison it. The file handle itself stays valid, so we recover
+    /// via `into_inner()` instead of letting every subsequent append panic
+    /// and drag the agent down.
     pub fn append(&self, message: &AgentMessage) -> Result<(), SessionError> {
         let line = serde_json::to_string(message)?;
-        let mut guard = self.file.lock().expect("session writer mutex poisoned");
+        let mut guard = self
+            .file
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard
             .write_all(line.as_bytes())
             .and_then(|_| guard.write_all(b"\n"))

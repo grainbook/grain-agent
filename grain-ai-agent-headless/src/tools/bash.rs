@@ -22,6 +22,18 @@
 //!   `grain_agent_harness::truncate_tail`.
 //! - Exit status drives `is_error`: any non-zero / killed-by-signal status is
 //!   surfaced as a tool error.
+//!
+//! **Security caveat (M-5)**: the `command` string is passed verbatim to
+//! `/bin/sh -c`, so anything a shell can do — `curl`, `ssh`, `chmod`,
+//! `rm -rf`, reading or writing files outside the workspace — is fair
+//! game. `cwd` containment is a speed bump, not a sandbox.
+//!
+//! This is intentional (the tool is opt-in behind `--allow-bash`), but
+//! callers should understand that enabling Bash grants the LLM effectively
+//! unrestricted command-execution capability. The system prompt asks the
+//! model to avoid destructive operations; that is a prompt-level defense,
+//! not a code-level one. Run in a container, ephemeral VM, or restricted
+//! user account if you need stronger isolation.
 
 use std::process::Stdio;
 use std::sync::Arc;

@@ -51,7 +51,7 @@ fn ymdhms_from_unix(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
     let sec = time % 60;
 
     // Convert `days` to (year, month, day) using the Howard Hinnant algorithm.
-    let mut z = days + 719_468;
+    let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = (z - era * 146_097) as u32;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
@@ -60,8 +60,6 @@ fn ymdhms_from_unix(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    z = if m <= 2 { y as i64 + 1 } else { y as i64 };
-    let _ = z;
     let year = if m <= 2 { y + 1 } else { y };
     (year, m, d, hour, min, sec)
 }

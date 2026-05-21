@@ -14,7 +14,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use grain_agent_core::{
-    AgentTool, AgentToolError, AgentToolResult, ToolDefinition, ToolUpdateCallback, UserContent,
+    AgentTool, AgentToolError, AgentToolResult, ToolDefinition, ToolExecutionMode,
+    ToolUpdateCallback, UserContent,
 };
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -57,7 +58,10 @@ impl WriteTool {
                     },
                     "required": ["path", "content"]
                 }),
-                execution_mode: None,
+                // Two concurrent writes to the same path would race. Sequential
+                // scheduling is the conservative default; same-batch writes to
+                // *different* files still wait but correctness wins.
+                execution_mode: Some(ToolExecutionMode::Sequential),
             },
             workspace,
         }

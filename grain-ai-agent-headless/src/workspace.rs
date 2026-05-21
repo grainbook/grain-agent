@@ -91,6 +91,12 @@ impl Workspace {
     ///
     /// Returns the absolute target path (parent canonicalized + file name
     /// appended). Refuses paths that would land on the workspace root.
+    ///
+    /// Symlink containment: if the final component already exists and is a
+    /// symbolic link, the link is followed once and the resolved target is
+    /// checked against the workspace root. This blocks attacks where an
+    /// existing symlink inside the workspace points at `/etc/passwd` and
+    /// the agent tries to overwrite "the file".
     pub fn resolve_for_write(&self, path: &str) -> Result<PathBuf, WorkspaceError> {
         let raw = Path::new(path);
         let abs = if raw.is_absolute() {
@@ -112,7 +118,26 @@ impl Workspace {
         if !parent_canon.starts_with(&self.root) {
             return Err(WorkspaceError::Escape(path.to_string()));
         }
-        Ok(parent_canon.join(name))
+        let target = parent_canon.join(name);
+
+        // If the target already exists and is a symlink, follow it and
+        // verify the resolved destination is still inside the workspace.
+        // `symlink_metadata` does NOT follow symlinks, so we get the link's
+        // own type rather than the target's.
+        if let Ok(meta) = std::fs::symlink_metadata(&target)
+            && meta.file_type().is_symlink()
+        {
+            let resolved = target
+                .canonicalize()
+                .map_err(|source| WorkspaceError::Io {
+                    path: target.display().to_string(),
+                    source,
+                })?;
+            if !resolved.starts_with(&self.root) {
+                return Err(WorkspaceError::Escape(path.to_string()));
+            }
+        }
+        Ok(target)
     }
 
     /// Render a workspace-relative display path for tool output. Falls back

@@ -24,7 +24,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use grain_agent_core::{
-    AgentTool, AgentToolError, AgentToolResult, ToolDefinition, ToolUpdateCallback, UserContent,
+    AgentTool, AgentToolError, AgentToolResult, ToolDefinition, ToolExecutionMode,
+    ToolUpdateCallback, UserContent,
 };
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -78,7 +79,10 @@ impl EditTool {
                     },
                     "required": ["path", "old", "new"]
                 }),
-                execution_mode: None,
+                // Edit reads, mutates, then writes the same file — parallel
+                // execution against the same path would race. Force serial
+                // scheduling so two simultaneous edits can't lose updates.
+                execution_mode: Some(ToolExecutionMode::Sequential),
             },
             workspace,
         }

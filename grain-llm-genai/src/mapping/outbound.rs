@@ -129,15 +129,30 @@ fn assistant_to_chat_message(msg: &AssistantMessage) -> ChatMessage {
 }
 
 fn tool_result_to_chat_message(msg: &ToolResultMessage) -> ChatMessage {
+    let mut dropped_images = 0usize;
     let text = msg
         .content
         .iter()
         .filter_map(|c| match c {
             UserContent::Text(t) => Some(t.text.as_str()),
-            UserContent::Image(_) => None,
+            UserContent::Image(_) => {
+                dropped_images += 1;
+                None
+            }
         })
         .collect::<Vec<_>>()
         .join("\n");
+
+    if dropped_images > 0 {
+        // genai 0.5's `ToolResponse` carries plain `content: String` only —
+        // there's no slot for image attachments. Surface this so operators
+        // know the data was lost instead of silently truncating.
+        eprintln!(
+            "[warn] grain-llm-genai: dropped {dropped_images} image content block(s) from tool \
+             result for call_id={} (genai 0.5 ToolResponse is text-only)",
+            msg.tool_call_id
+        );
+    }
 
     // `tool_name` is dropped at the genai boundary — results are correlated
     // by `call_id` (genai 0.5's `ToolResponse` has no fn_name slot).

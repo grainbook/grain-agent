@@ -1,6 +1,6 @@
 //! Stateful `Agent` wrapper, ported from `packages/agent/src/agent.ts`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -24,19 +24,20 @@ pub type EventListener = Arc<
 
 #[derive(Default)]
 struct PendingMessageQueue {
-    messages: Vec<AgentMessage>,
+    // Front-popping queue: `Vec::remove(0)` is O(n), `VecDeque::pop_front` is O(1).
+    messages: VecDeque<AgentMessage>,
     mode: QueueMode,
 }
 
 impl PendingMessageQueue {
     fn new(mode: QueueMode) -> Self {
         PendingMessageQueue {
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             mode,
         }
     }
     fn enqueue(&mut self, m: AgentMessage) {
-        self.messages.push(m);
+        self.messages.push_back(m);
     }
     fn has_items(&self) -> bool {
         !self.messages.is_empty()
@@ -46,8 +47,12 @@ impl PendingMessageQueue {
             return Vec::new();
         }
         match self.mode {
-            QueueMode::All => std::mem::take(&mut self.messages),
-            QueueMode::OneAtATime => vec![self.messages.remove(0)],
+            QueueMode::All => self.messages.drain(..).collect(),
+            QueueMode::OneAtATime => self
+                .messages
+                .pop_front()
+                .map(|m| vec![m])
+                .unwrap_or_default(),
         }
     }
     fn clear(&mut self) {
@@ -70,7 +75,13 @@ struct Inner {
     pending_tool_calls: HashSet<String>,
     error_message: Option<String>,
 
-    listeners: Vec<EventListener>,
+    /// Listeners keyed by a monotonic id. `BTreeMap` preserves subscription
+    /// order on iteration (id is monotonic, BTreeMap iterates sorted), which
+    /// keeps event delivery deterministic. `HashMap<usize, _>` would also
+    /// work but iteration order would be unpredictable.
+    listeners: BTreeMap<u64, EventListener>,
+    next_listener_id: u64,
+
     steering_queue: PendingMessageQueue,
     follow_up_queue: PendingMessageQueue,
 
@@ -200,7 +211,8 @@ impl Agent {
             streaming_message: None,
             pending_tool_calls: HashSet::new(),
             error_message: None,
-            listeners: Vec::new(),
+            listeners: BTreeMap::new(),
+            next_listener_id: 0,
             steering_queue: PendingMessageQueue::new(options.steering_mode),
             follow_up_queue: PendingMessageQueue::new(options.follow_up_mode),
             active_run: None,
@@ -223,12 +235,16 @@ impl Agent {
 
     // --- listeners -----------------------------------------------------------
 
-    /// Subscribe to lifecycle events. The returned future, when awaited,
-    /// unsubscribes the listener.
+    /// Subscribe to lifecycle events. The returned handle removes the
+    /// listener when `cancel().await`ed. Removal is keyed by a monotonic
+    /// id, so concurrent / out-of-order unsubscription doesn't shift other
+    /// listeners' identities (the previous `Vec::remove(idx)` approach
+    /// silently removed the wrong listener after the first cancellation).
     pub async fn subscribe(&self, listener: EventListener) -> Unsubscribe {
         let mut guard = self.inner.lock().await;
-        let id = guard.listeners.len();
-        guard.listeners.push(listener);
+        let id = guard.next_listener_id;
+        guard.next_listener_id += 1;
+        guard.listeners.insert(id, listener);
         Unsubscribe {
             inner: self.inner.clone(),
             id,
@@ -340,8 +356,15 @@ impl Agent {
 
     /// Continue from the current transcript.
     pub async fn continue_(&self) -> Result<(), AgentError> {
-        {
-            let g = self.inner.lock().await;
+        // Decide what to do atomically under one lock so concurrent callers
+        // can't sneak between the active-run guard and the queue drain.
+        enum ContinueAction {
+            ResumeFromSteering(Vec<AgentMessage>),
+            ResumeFromFollowUp(Vec<AgentMessage>),
+            FromTranscript,
+        }
+        let action = {
+            let mut g = self.inner.lock().await;
             if g.active_run.is_some() {
                 return Err(AgentError::AlreadyRunning);
             }
@@ -351,26 +374,30 @@ impl Agent {
                 .cloned()
                 .ok_or(AgentError::NoMessagesToContinue)?;
             if last.role() == "assistant" {
-                // Try queued steering first, then follow-ups, then fail.
-                drop(g);
-                let queued_steer = {
-                    let mut g = self.inner.lock().await;
-                    g.steering_queue.drain()
-                };
+                let queued_steer = g.steering_queue.drain();
                 if !queued_steer.is_empty() {
-                    return self.run_prompt_messages(queued_steer, true).await;
+                    ContinueAction::ResumeFromSteering(queued_steer)
+                } else {
+                    let queued_follow = g.follow_up_queue.drain();
+                    if !queued_follow.is_empty() {
+                        ContinueAction::ResumeFromFollowUp(queued_follow)
+                    } else {
+                        return Err(AgentError::CannotContinueFromAssistant);
+                    }
                 }
-                let queued_follow = {
-                    let mut g = self.inner.lock().await;
-                    g.follow_up_queue.drain()
-                };
-                if !queued_follow.is_empty() {
-                    return self.run_prompt_messages(queued_follow, false).await;
-                }
-                return Err(AgentError::CannotContinueFromAssistant);
+            } else {
+                ContinueAction::FromTranscript
             }
+        };
+        match action {
+            ContinueAction::ResumeFromSteering(msgs) => {
+                self.run_prompt_messages(msgs, true).await
+            }
+            ContinueAction::ResumeFromFollowUp(msgs) => {
+                self.run_prompt_messages(msgs, false).await
+            }
+            ContinueAction::FromTranscript => self.run_continuation().await,
         }
-        self.run_continuation().await
     }
 
     // --- internal: run lifecycle --------------------------------------------
@@ -442,25 +469,32 @@ impl Agent {
         aborted: bool,
     ) {
         if let Some(err) = loop_error {
-            // Synthesize a terminal failure message akin to the TS handleRunFailure path.
-            let failure = AssistantMessage {
-                content: vec![AssistantContent::Text(TextContent::default())],
-                api: inner.lock().await.model.api.clone(),
-                provider: inner.lock().await.model.provider.clone(),
-                model: inner.lock().await.model.id.clone(),
-                usage: Usage::default(),
-                stop_reason: if aborted {
-                    StopReason::Aborted
-                } else {
-                    StopReason::Error
-                },
-                error_message: Some(err.to_string()),
-                timestamp: current_time_ms(),
+            // Snapshot every field we need under a single lock so concurrent
+            // setters (e.g. `set_model`, `subscribe`, `abort`) can't splice
+            // mismatched parts into the synthetic failure message or pick up
+            // a different listener set partway through emission.
+            let (failure, listeners_clone, token) = {
+                let g = inner.lock().await;
+                let failure = AssistantMessage {
+                    content: vec![AssistantContent::Text(TextContent::default())],
+                    api: g.model.api.clone(),
+                    provider: g.model.provider.clone(),
+                    model: g.model.id.clone(),
+                    usage: Usage::default(),
+                    stop_reason: if aborted {
+                        StopReason::Aborted
+                    } else {
+                        StopReason::Error
+                    },
+                    error_message: Some(err.to_string()),
+                    timestamp: current_time_ms(),
+                };
+                let listeners_clone: Vec<EventListener> = g.listeners.values().cloned().collect();
+                let token = g.active_run.clone().unwrap_or_default();
+                (failure, listeners_clone, token)
             };
 
             // Emit the same three events the TS implementation emits on failure.
-            let listeners_clone = inner.lock().await.listeners.clone();
-            let token = inner.lock().await.active_run.clone().unwrap_or_default();
             for ev in [
                 AgentEvent::MessageStart {
                     message: AgentMessage::assistant(failure.clone()),
@@ -563,7 +597,10 @@ impl Agent {
             let cancel = cancel.clone();
             Box::pin(async move {
                 process_event_impl(&inner, &event).await;
-                let listeners = inner.lock().await.listeners.clone();
+                // BTreeMap iterates in key order, so listener delivery follows
+                // subscription order regardless of intervening unsubscribes.
+                let listeners: Vec<EventListener> =
+                    inner.lock().await.listeners.values().cloned().collect();
                 for listener in listeners {
                     listener(event.clone(), cancel.clone()).await;
                 }
@@ -621,15 +658,12 @@ fn current_time_ms() -> i64 {
 
 pub struct Unsubscribe {
     inner: Arc<Mutex<Inner>>,
-    id: usize,
+    id: u64,
 }
 
 impl Unsubscribe {
     pub async fn cancel(self) {
-        let mut g = self.inner.lock().await;
-        if self.id < g.listeners.len() {
-            g.listeners.remove(self.id);
-        }
+        self.inner.lock().await.listeners.remove(&self.id);
     }
 }
 
