@@ -17,10 +17,8 @@ use grain_agent_harness::context_guard::{ContextGuard, ContextGuardPolicy};
 use grain_llm_genai::{GenaiStream, OpenAiCompatPreset};
 use grain_llm_models::Registry;
 
-use crate::prompt::{
-    DEFAULT_CODING_AGENT_SYSTEM_PROMPT, WRITE_ENABLED_CODING_AGENT_SYSTEM_PROMPT,
-};
-use crate::runtime::{coding_all_tools, coding_read_tools};
+use crate::prompt::coding_agent_system_prompt;
+use crate::runtime::{coding_bash_tools, coding_read_tools, coding_write_tools};
 use crate::workspace::Workspace;
 
 /// `grain-headless` — single-prompt coding agent over the local workspace.
@@ -59,6 +57,11 @@ pub struct Args {
     /// agent can only inspect the workspace, not mutate it.
     #[arg(long, default_value_t = false)]
     pub allow_write: bool,
+
+    /// Register the `bash` tool. Off by default — explicit opt-in because
+    /// shell commands can do anything (and they will, given the chance).
+    #[arg(long, default_value_t = false)]
+    pub allow_bash: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -112,11 +115,14 @@ pub async fn run(args: Args) -> Result<(), CliError> {
     // --- Agent options + agent --------------------------------------------
     let mut opts = AgentOptions::new(model, stream);
     opts.system_prompt = system_prompt;
-    opts.tools = if args.allow_write {
-        coding_all_tools(workspace)
-    } else {
-        coding_read_tools(workspace)
-    };
+    let mut tools = coding_read_tools(workspace.clone());
+    if args.allow_write {
+        tools.extend(coding_write_tools(workspace.clone()));
+    }
+    if args.allow_bash {
+        tools.extend(coding_bash_tools(workspace));
+    }
+    opts.tools = tools;
     opts.transform_context = Some(guard);
 
     let agent = Agent::new(opts);
@@ -163,11 +169,7 @@ fn resolve_system_prompt(args: &Args) -> Result<String, CliError> {
             .map_err(|e| format!("read system prompt {}: {e}", path.display()))?;
         return Ok(s);
     }
-    Ok(if args.allow_write {
-        WRITE_ENABLED_CODING_AGENT_SYSTEM_PROMPT.to_string()
-    } else {
-        DEFAULT_CODING_AGENT_SYSTEM_PROMPT.to_string()
-    })
+    Ok(coding_agent_system_prompt(args.allow_write, args.allow_bash).to_string())
 }
 
 // ---------------------------------------------------------------------------

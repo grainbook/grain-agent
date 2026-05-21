@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use grain_agent_core::{AgentTool, AgentToolResult, UserContent};
 use grain_ai_agent_headless::{
-    EditTool, GlobTool, GrepTool, ListTool, ReadTool, Workspace, WriteTool,
+    BashTool, EditTool, GlobTool, GrepTool, ListTool, ReadTool, Workspace, WriteTool,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -521,5 +521,154 @@ async fn edit_with_explicit_count_succeeds() {
     assert_eq!(
         result.details.get("replacements").and_then(|v| v.as_u64()),
         Some(3)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Bash (Unix-only — /bin/sh is required)
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_runs_simple_echo() {
+    let (_dir, ws) = workspace_with_files(&[]);
+    let tool = BashTool::new(ws);
+    let result = tool
+        .execute(
+            "c",
+            serde_json::json!({ "command": "echo hello" }),
+            CancellationToken::new(),
+            no_update(),
+        )
+        .await
+        .expect("ok");
+    let text = text_of(&result);
+    assert!(text.contains("hello"));
+    assert_eq!(result.details.get("exitCode").and_then(|v| v.as_i64()), Some(0));
+    assert_eq!(result.details.get("success").and_then(|v| v.as_bool()), Some(true));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_captures_stderr_in_combined_output() {
+    let (_dir, ws) = workspace_with_files(&[]);
+    let tool = BashTool::new(ws);
+    let result = tool
+        .execute(
+            "c",
+            serde_json::json!({ "command": "echo to-out; echo to-err 1>&2" }),
+            CancellationToken::new(),
+            no_update(),
+        )
+        .await
+        .expect("ok");
+    let text = text_of(&result);
+    assert!(text.contains("to-out"), "stdout in output: {text}");
+    assert!(text.contains("to-err"), "stderr in output: {text}");
+    assert!(text.contains("--- stderr ---"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_reports_nonzero_exit_as_success_false() {
+    let (_dir, ws) = workspace_with_files(&[]);
+    let tool = BashTool::new(ws);
+    let result = tool
+        .execute(
+            "c",
+            serde_json::json!({ "command": "exit 7" }),
+            CancellationToken::new(),
+            no_update(),
+        )
+        .await
+        .expect("tool result returned even for non-zero exit");
+    assert_eq!(result.details.get("exitCode").and_then(|v| v.as_i64()), Some(7));
+    assert_eq!(result.details.get("success").and_then(|v| v.as_bool()), Some(false));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_honors_workspace_cwd() {
+    let (_dir, ws) = workspace_with_files(&[("sub/marker.txt", "anchor")]);
+    let tool = BashTool::new(ws);
+    let result = tool
+        .execute(
+            "c",
+            serde_json::json!({ "command": "pwd && ls", "cwd": "sub" }),
+            CancellationToken::new(),
+            no_update(),
+        )
+        .await
+        .expect("ok");
+    let text = text_of(&result);
+    assert!(text.contains("marker.txt"), "cwd switched to sub/: {text}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_rejects_cwd_outside_workspace() {
+    let (_dir, ws) = workspace_with_files(&[]);
+    let tool = BashTool::new(ws);
+    let err = tool
+        .execute(
+            "c",
+            serde_json::json!({ "command": "true", "cwd": "/tmp" }),
+            CancellationToken::new(),
+            no_update(),
+        )
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("escape") || msg.contains("io") || msg.contains("not found"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_times_out_quickly() {
+    let (_dir, ws) = workspace_with_files(&[]);
+    let tool = BashTool::new(ws);
+    let err = tool
+        .execute(
+            "c",
+            serde_json::json!({ "command": "sleep 5", "timeout_ms": 100 }),
+            CancellationToken::new(),
+            no_update(),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("timed out"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_aborts_on_cancel() {
+    let (_dir, ws) = workspace_with_files(&[]);
+    let tool = BashTool::new(ws);
+    let cancel = CancellationToken::new();
+    let cancel_for_task = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancel_for_task.cancel();
+    });
+    let err = tool
+        .execute(
+            "c",
+            serde_json::json!({ "command": "sleep 5" }),
+            cancel,
+            no_update(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, grain_agent_core::AgentToolError::Aborted));
+}
+
+#[tokio::test]
+async fn coding_full_tools_includes_bash() {
+    let (_dir, ws) = workspace_with_files(&[("a.txt", "")]);
+    let tools = grain_ai_agent_headless::coding_full_tools(ws);
+    let names: Vec<&str> = tools.iter().map(|t| t.definition().name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["read", "list", "glob", "grep", "write", "edit", "bash"]
     );
 }
