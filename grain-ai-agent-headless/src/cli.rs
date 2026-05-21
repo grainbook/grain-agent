@@ -18,6 +18,7 @@ use grain_agent_harness::context_guard::{ContextGuard, ContextGuardPolicy};
 use grain_llm_genai::{GenaiStream, OpenAiCompatPreset};
 use grain_llm_models::Registry;
 
+use crate::config::{ArgDefaults, ConfigFile};
 use crate::diagnostics::{render_doctor_report, render_source_info_block};
 use crate::prompt::coding_agent_system_prompt;
 use crate::runtime::{coding_bash_tools, coding_read_tools, coding_write_tools};
@@ -105,6 +106,18 @@ pub struct Args {
     pub allow_web: bool,
 }
 
+impl Args {
+    /// Hard-coded CLI defaults — used by `ConfigFile::apply_to_args` to
+    /// distinguish "user accepted the default" from "user set this
+    /// explicitly". Kept here so both sources of truth move together.
+    pub fn cli_defaults() -> ArgDefaults {
+        ArgDefaults {
+            model: "anthropic/claude-sonnet-4-5".into(),
+            headroom_tokens: 4096,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum OpenAiCompatChoice {
     None,
@@ -127,6 +140,15 @@ pub async fn run(args: Args) -> Result<(), CliError> {
     // --- Workspace + registry ---------------------------------------------
     let workspace = Arc::new(Workspace::new(&args.workspace)?);
     let registry = Arc::new(Registry::from_embedded_snapshot());
+
+    // --- Config file (TOML) overlay ---------------------------------------
+    // CLI flags win; config fills in fields the user accepted the default
+    // for. Failures during load are logged but never break the agent.
+    let mut args = args;
+    match ConfigFile::load(workspace.root()) {
+        Ok(cfg) => cfg.apply_to_args(&mut args, &Args::cli_defaults()),
+        Err(e) => eprintln!("[warn] config load: {e}"),
+    }
 
     // --- Doctor short-circuit ---------------------------------------------
     // Runs no LLM calls; safe even when no keys are set.

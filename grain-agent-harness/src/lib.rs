@@ -23,6 +23,7 @@ pub mod compaction;
 pub mod context_guard;
 pub mod messages;
 pub mod session;
+pub mod session_jsonl;
 pub mod system_prompt;
 pub mod truncate;
 
@@ -42,6 +43,7 @@ pub use session::{
     SessionMetadata, SessionRepo, SessionStorage, SessionTreeEntry, SessionTreeEntryKind,
     uuidv7,
 };
+pub use session_jsonl::{JsonlSessionRepo, JsonlSessionStorage};
 pub use system_prompt::{Skill, format_skills_for_system_prompt};
 pub use truncate::{
     DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, GREP_MAX_LINE_LENGTH, TruncationOptions,

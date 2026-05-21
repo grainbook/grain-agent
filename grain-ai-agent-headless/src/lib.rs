@@ -28,6 +28,7 @@
 //! - rig-backed semantic search (`SemanticSearch` tool) — separate PR.
 
 pub mod cli;
+pub mod config;
 pub mod diagnostics;
 pub mod prompt;
 pub mod runtime;
@@ -41,6 +42,7 @@ pub mod workspace;
 pub mod semantic;
 
 pub use cli::{Args, EventPrinter, OpenAiCompatChoice, run};
+pub use config::{ArgDefaults, ConfigError, ConfigFile};
 pub use prompt::{
     DEFAULT_CODING_AGENT_SYSTEM_PROMPT, FULL_CODING_AGENT_SYSTEM_PROMPT,
     WRITE_ENABLED_CODING_AGENT_SYSTEM_PROMPT, coding_agent_system_prompt,

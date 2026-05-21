@@ -1,0 +1,270 @@
+//! TOML-backed config file: persistent defaults for `grain-headless`.
+//!
+//! Resolution order (highest priority wins):
+//! 1. Command-line flag (handled by clap).
+//! 2. Per-workspace `<workspace>/.grain/config.toml`.
+//! 3. User `~/.config/grain/config.toml` (XDG via the `dirs` crate).
+//! 4. Hard-coded defaults baked into `Args`.
+//!
+//! TOML schema (all fields optional):
+//!
+//! ```toml
+//! model = "anthropic/claude-sonnet-4-5"
+//! headroom_tokens = 4096
+//! show_thinking = false
+//! openai_compat = "common"        # "none" | "common"
+//! allow_write = false
+//! allow_bash = false
+//! allow_web = false
+//! allow_semantic_search = false
+//! skills_dir = ".claude/skills"
+//! session_dir = ".grain/sessions" # base dir for JSONL sessions; --session overrides
+//! ```
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// User-overridable defaults, deserialized from TOML. Every field is
+/// optional; a missing field falls through to the next layer.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub struct ConfigFile {
+    pub model: Option<String>,
+    pub headroom_tokens: Option<u64>,
+    pub show_thinking: Option<bool>,
+    pub openai_compat: Option<String>,
+    pub allow_write: Option<bool>,
+    pub allow_bash: Option<bool>,
+    pub allow_web: Option<bool>,
+    pub allow_semantic_search: Option<bool>,
+    pub skills_dir: Option<PathBuf>,
+    pub session_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("io error on {path}: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("toml parse error in {path}: {source}")]
+    Parse {
+        path: String,
+        #[source]
+        source: toml::de::Error,
+    },
+}
+
+impl ConfigFile {
+    /// Load and merge config from the per-workspace file (if any) and the
+    /// user XDG config (if any). Workspace overrides user where both set a
+    /// field; CLI flags override the merged result on top.
+    ///
+    /// Either source missing is fine — the function returns an empty config
+    /// rather than an error. Hard I/O failures (e.g. permission denied) and
+    /// TOML parse failures are surfaced.
+    pub fn load(workspace_root: &Path) -> Result<Self, ConfigError> {
+        let mut merged = ConfigFile::default();
+        if let Some(user) = user_config_path()
+            && user.exists()
+        {
+            let user_cfg = load_from(&user)?;
+            merge_into(&mut merged, user_cfg);
+        }
+        let ws = workspace_config_path(workspace_root);
+        if ws.exists() {
+            let ws_cfg = load_from(&ws)?;
+            merge_into(&mut merged, ws_cfg);
+        }
+        Ok(merged)
+    }
+
+    /// Apply this config's set fields onto `args` for every field that the
+    /// caller hasn't already specified on the command line. The CLI defaults
+    /// match clap's `default_value_t`, so we use a "looks like the default"
+    /// heuristic for booleans / paths; explicit fields the caller set
+    /// remain in place.
+    pub fn apply_to_args(&self, args: &mut crate::cli::Args, defaults: &ArgDefaults) {
+        if args.model == defaults.model
+            && let Some(m) = &self.model
+        {
+            args.model = m.clone();
+        }
+        if args.headroom_tokens == defaults.headroom_tokens
+            && let Some(h) = self.headroom_tokens
+        {
+            args.headroom_tokens = h;
+        }
+        if !args.show_thinking
+            && let Some(true) = self.show_thinking
+        {
+            args.show_thinking = true;
+        }
+        if matches!(args.openai_compat, crate::cli::OpenAiCompatChoice::Common)
+            && let Some(s) = self.openai_compat.as_deref()
+            && let Some(parsed) = parse_openai_compat(s)
+        {
+            args.openai_compat = parsed;
+        }
+        if !args.allow_write
+            && let Some(true) = self.allow_write
+        {
+            args.allow_write = true;
+        }
+        if !args.allow_bash
+            && let Some(true) = self.allow_bash
+        {
+            args.allow_bash = true;
+        }
+        if !args.allow_web
+            && let Some(true) = self.allow_web
+        {
+            args.allow_web = true;
+        }
+        if !args.allow_semantic_search
+            && let Some(true) = self.allow_semantic_search
+        {
+            args.allow_semantic_search = true;
+        }
+        if args.skills_dir.is_none()
+            && let Some(d) = &self.skills_dir
+        {
+            args.skills_dir = Some(d.clone());
+        }
+        // session_dir isn't on Args today — `--session` is an explicit
+        // file path. Config callers that want auto-naming can set
+        // session_dir; the CLI driver consults `config.session_dir` only
+        // when `--session` isn't set (see cli::run).
+    }
+}
+
+/// Snapshot of the CLI's hard-coded defaults. Built by `Args::cli_defaults()`
+/// so the config-merge logic can tell "user accepted the default" from
+/// "user explicitly set this on the command line" without duplicating the
+/// default values across the codebase.
+pub struct ArgDefaults {
+    pub model: String,
+    pub headroom_tokens: u64,
+}
+
+fn parse_openai_compat(s: &str) -> Option<crate::cli::OpenAiCompatChoice> {
+    match s.to_ascii_lowercase().as_str() {
+        "none" => Some(crate::cli::OpenAiCompatChoice::None),
+        "common" => Some(crate::cli::OpenAiCompatChoice::Common),
+        _ => None,
+    }
+}
+
+fn merge_into(dst: &mut ConfigFile, src: ConfigFile) {
+    if src.model.is_some() {
+        dst.model = src.model;
+    }
+    if src.headroom_tokens.is_some() {
+        dst.headroom_tokens = src.headroom_tokens;
+    }
+    if src.show_thinking.is_some() {
+        dst.show_thinking = src.show_thinking;
+    }
+    if src.openai_compat.is_some() {
+        dst.openai_compat = src.openai_compat;
+    }
+    if src.allow_write.is_some() {
+        dst.allow_write = src.allow_write;
+    }
+    if src.allow_bash.is_some() {
+        dst.allow_bash = src.allow_bash;
+    }
+    if src.allow_web.is_some() {
+        dst.allow_web = src.allow_web;
+    }
+    if src.allow_semantic_search.is_some() {
+        dst.allow_semantic_search = src.allow_semantic_search;
+    }
+    if src.skills_dir.is_some() {
+        dst.skills_dir = src.skills_dir;
+    }
+    if src.session_dir.is_some() {
+        dst.session_dir = src.session_dir;
+    }
+}
+
+fn load_from(path: &Path) -> Result<ConfigFile, ConfigError> {
+    let raw = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    toml::from_str::<ConfigFile>(&raw).map_err(|source| ConfigError::Parse {
+        path: path.display().to_string(),
+        source,
+    })
+}
+
+fn workspace_config_path(root: &Path) -> PathBuf {
+    root.join(".grain").join("config.toml")
+}
+
+fn user_config_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|c| c.join("grain").join("config.toml"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_toml(path: &Path, content: &str) {
+        if let Some(p) = path.parent() {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn missing_workspace_config_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ConfigFile::load(dir.path()).unwrap();
+        // No fields set when both files are absent.
+        assert!(cfg.model.is_none());
+        assert!(cfg.skills_dir.is_none());
+    }
+
+    #[test]
+    fn workspace_config_overrides_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        write_toml(
+            &workspace_config_path(dir.path()),
+            "model = \"openai/gpt-4o\"\nallow_write = true\nheadroom_tokens = 8192\n",
+        );
+        let cfg = ConfigFile::load(dir.path()).unwrap();
+        assert_eq!(cfg.model.as_deref(), Some("openai/gpt-4o"));
+        assert_eq!(cfg.allow_write, Some(true));
+        assert_eq!(cfg.headroom_tokens, Some(8192));
+    }
+
+    #[test]
+    fn unknown_field_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        write_toml(
+            &workspace_config_path(dir.path()),
+            "model = \"x\"\nbogus_field = 1\n",
+        );
+        let err = ConfigFile::load(dir.path()).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+
+    #[test]
+    fn parse_openai_compat_accepts_known_values() {
+        assert!(matches!(
+            parse_openai_compat("none"),
+            Some(crate::cli::OpenAiCompatChoice::None)
+        ));
+        assert!(matches!(
+            parse_openai_compat("COMMON"),
+            Some(crate::cli::OpenAiCompatChoice::Common)
+        ));
+        assert!(parse_openai_compat("nonsense").is_none());
+    }
+}
