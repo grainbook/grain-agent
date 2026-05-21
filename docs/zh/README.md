@@ -61,6 +61,12 @@
 | 配置文件 | [config.md](./config.md) | `<workspace>/.grain/config.toml` + `~/.config/grain/config.toml` TOML |
 | Telemetry | [telemetry.md](./telemetry.md) | 可选的本地 JSONL 事件日志（含敏感数据警告） |
 
+### 全 workspace
+
+| 主题 | 文档 |
+|------|------|
+| 测试 & CI | [testing.md](./testing.md) —— 跑 unit / clippy / 用 `.env.test` 门控的真模型 live 测试 |
+
 ---
 
 ## 快速上手

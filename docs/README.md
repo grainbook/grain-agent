@@ -61,6 +61,12 @@ Rust port of [`@earendil-works/pi-agent-core`](https://github.com/earendil-works
 | Config file | [config.md](./config.md) | TOML config at `<workspace>/.grain/config.toml` + `~/.config/grain/config.toml` |
 | Telemetry | [telemetry.md](./telemetry.md) | Opt-in local JSONL event log (with sensitive-data warning) |
 
+### Project-wide
+
+| Topic | Doc |
+|-------|-----|
+| Testing & CI | [testing.md](./testing.md) — running unit, clippy, and `.env.test`-gated live integration suites |
+
 ---
 
 ## Quick start

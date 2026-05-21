@@ -1,6 +1,6 @@
 # `grain_llm_genai`
 
-基于 [`genai`](https://crates.io/crates/genai) 0.5 crate 的 `grain_agent_core::LlmStream` 实现。把 transport-agnostic 的 agent 循环桥接到 genai 的多 provider chat API。
+基于 [`genai`](https://crates.io/crates/genai) 0.6 crate 的 `grain_agent_core::LlmStream` 实现（当前锁在 `0.6.0-beta.20` —— 上游作者推荐用这个版本，比 0.5 稳定、provider 覆盖更广、bug 修了更多）。把 transport-agnostic 的 agent 循环桥接到 genai 的多 provider chat API。
 
 这是你接入真实 LLM 时用来连到 `AgentOptions::stream_fn` 的 crate。
 
@@ -82,7 +82,7 @@ grain 的 id 形如 `"<provider>/<model>"`（如 `"anthropic/claude-sonnet-4-5"`
 ))
 ```
 
-genai 0.5 原生支持 Anthropic、OpenAI、Gemini、DeepSeek、Groq、Mimo、Nebius、xAI、Zai、BigModel（Zhipu）、Cohere、Together、Fireworks、Ollama——它们**有意不在** OpenAI-compat preset 里，覆盖它们会覆掉原生 adapter 的 per-provider quirks。
+genai 0.6 原生支持 Anthropic、OpenAI、Gemini、DeepSeek、Groq、Mimo、Nebius、xAI、Zai、BigModel（Zhipu）、Cohere、Together、Fireworks、Ollama——它们**有意不在** OpenAI-compat preset 里，覆盖它们会覆掉原生 adapter 的 per-provider quirks。
 
 ## env-based API key
 
@@ -119,7 +119,16 @@ builder 的 `auth_resolver` 优先查这张表，未命中回退到 genai 自己
 - **入站**：`ReasoningChunk` → `AssistantContent::Thinking`；`ThoughtSignatureChunk` 写到 `signature`。PR 3b 状态机处理记账。
 - **出站**：当 `AssistantMessage` 有带 signature 的 `Thinking` 块时，signature 挂到**第一个**出站 `ToolCall::thought_signatures`。这就是 Anthropic 用来验证多轮签名 thinking 的字段——少了它，多轮签名流程会崩。
 
-**reasoning 文本有意不回送给 provider。** genai 0.5 没有出站 `reasoning_content` 槽位，并且 provider 每轮自己重新生成 reasoning（OpenAI o-series、DeepSeek-R1）。文本仍在 grain transcript 里供 app 用（UI 展示、审计……），但不上 wire。
+**reasoning 文本有意不回送给 provider。** genai 出站 API 没有 `reasoning_content` 槽位，并且 provider 每轮自己重新生成 reasoning（OpenAI o-series、DeepSeek-R1）。文本仍在 grain transcript 里供 app 用（UI 展示、审计……），但不上 wire。
+
+## genai 0.6 流式行为（重要）
+
+genai 0.6 改了 tool-call 的 streaming 事件结构，我们的状态机透明处理了两个 quirk：
+
+1. **累积 args chunk**。一次 tool call 可以发出**多个** `ToolCallChunk`，它们共享同一个 `call_id`；每个后续 chunk 携带的是**累积**到当前为止的 JSON 参数（不是 delta）。inbound 状态机用 `call_id → block index` 跟踪，每个刷新都**覆盖**现有 block 的 `arguments`，而不是 push 一个重复的 `ToolCall` content block。如果不这么做，单次 tool call 会在 assistant message 里出现 N 次、被执行 N 次——下一轮请求里 N 条 tool_result 共享同一个 `tool_call_id`，DeepSeek / OpenAI 这种严格 provider 会用 400 拒绝。
+2. **string-encoded arguments**。`GenaiToolCall.fn_arguments` 有时是 `Value::String("{ ... }")` —— JSON 对象被编码成字符串，而不是直接 `Value::Object`。状态机把每个进来的 args value 跑一遍 `normalize_tool_args(...)`：值是字符串且能 parse 为合法 JSON 时，先替换成 parse 后的对象再喂给 `tool.execute(...)`。如果不这么做，工具会以 `invalid type: string "...", expected struct FooArgs` 失败。
+
+两个 quirk 都被 live 测试端到端验证。以后升 genai 版本如果看到 "tool ran N times" 或 "expected struct ... found string"，就是这两个 helper 跟上游行为脱节了。
 
 ## 取消
 
@@ -130,16 +139,18 @@ builder 的 `auth_resolver` 优先查这张表，未命中回退到 genai 自己
 
 ## Live tests
 
-`tests/live.rs` 含 5 个 `#[ignore]` 门控的真实 provider endpoint 测试（OpenAI、Anthropic、OpenAI-compat Kimi、外加取消竞速）。当你改 outbound mapper、inbound 状态机、或 builder 时手动跑一下：
+`tests/live.rs` 含 5 个 `#[ignore]` 门控的真实 provider endpoint 测试（OpenAI、Anthropic、OpenAI-compat Kimi、外加取消竞速）。当你改 outbound mapper、inbound 状态机、或 builder 时手动跑一下。
+
+推荐工作流：在 workspace 根放 `.env.test` 填好 key（格式见 [testing.md](./testing.md)），然后：
 
 ```bash
-ANTHROPIC_API_KEY=... cargo test -p grain-llm-genai --test live -- --ignored
+cargo test -p grain-llm-genai --test live -- --ignored
 ```
 
-每个测试在缺 env var 时会打印 skip 提示，所以 `--ignored` 任何时候传都是安全的。
+每个测试在缺 env var 时会打印 skip 提示，`--ignored` 在只配了部分 provider 时仍然安全。
 
 ## 注意事项
 
-- `genai 0.5` 的 `ServiceTarget` resolver 是 sync 的，auth/target 解析时跑不了 async work（DNS、OAuth 刷新）。如果你需要 async key 查找，先在 agent 调用前做好再以 env / custom resolver 注入。
+- `genai` 的 `ServiceTarget` resolver 是 sync 的，auth/target 解析时跑不了 async work（DNS、OAuth 刷新）。如果你需要 async key 查找，先在 agent 调用前做好再以 env / custom resolver 注入。
 - provider router 只处理 namespace 翻译；重命名也存在 `grain-llm-models::Registry` 里（如 `provider: "google"`、`api: "gemini"`）。两边自定义时记得同步。
 - OpenAI-compat preset 用 `"kimi"` 和 `"siliconflow"` 作为 id；models.dev 的 catalog 用 `"moonshotai"` 表示 Kimi 原生 endpoint。如果你直接用 models.dev 的 id，请额外注册 `OpenAiCompatEndpoint { id: "moonshotai", ... }`。

@@ -1,6 +1,6 @@
 # `grain_llm_genai`
 
-`grain_agent_core::LlmStream` implementation backed by the [`genai`](https://crates.io/crates/genai) 0.5 crate. Bridges the transport-agnostic agent loop to genai's multi-provider chat API.
+`grain_agent_core::LlmStream` implementation backed by the [`genai`](https://crates.io/crates/genai) 0.6 crate (currently pinned to `0.6.0-beta.20` — the upstream maintainer recommends this over 0.5 for robustness, broader provider coverage, and bug fixes). Bridges the transport-agnostic agent loop to genai's multi-provider chat API.
 
 This is the crate you wire into `AgentOptions::stream_fn` to talk to a real LLM.
 
@@ -117,7 +117,16 @@ Both directions are wired:
 - **Inbound**: `ReasoningChunk` → `AssistantContent::Thinking`; `ThoughtSignatureChunk` populates `signature`. PR 3b's state machine handles the bookkeeping.
 - **Outbound**: when an `AssistantMessage` carries a `Thinking` block with a signature, the signature is attached to the **first** outgoing `ToolCall::thought_signatures`. This is what Anthropic uses to validate multi-turn signed thinking — without it, multi-turn signed flows break.
 
-**Reasoning text is intentionally not echoed back to the provider.** genai 0.5 has no outbound `reasoning_content` slot, and providers regenerate their own reasoning each turn (OpenAI o-series, DeepSeek-R1). The text stays in the grain transcript for app-side use (UI display, audit, …) but doesn't go on the wire.
+**Reasoning text is intentionally not echoed back to the provider.** genai's outbound API has no `reasoning_content` slot, and providers regenerate their own reasoning each turn (OpenAI o-series, DeepSeek-R1). The text stays in the grain transcript for app-side use (UI display, audit, …) but doesn't go on the wire.
+
+## genai 0.6 streaming behavior (important)
+
+genai 0.6 changed how tool-call streaming events arrive, and our state machine handles both quirks transparently:
+
+1. **Cumulative argument chunks.** A single tool call can emit *multiple* `ToolCallChunk` events that share the same `call_id`; each subsequent chunk carries the latest **accumulated** JSON arguments (not a delta). The inbound state machine tracks `call_id → block index` and overwrites the existing block's `arguments` on every refresh, instead of pushing a duplicate `ToolCall` content block. Without this, a tool call would appear N times in the assistant message and get executed N times — and the next-turn request would contain N tool-result messages with identical `tool_call_id`, which strict providers (DeepSeek, OpenAI) reject with a 400.
+2. **String-encoded arguments.** `GenaiToolCall.fn_arguments` is sometimes delivered as `Value::String("{ ... }")` — the JSON object encoded as a string — rather than as a real `Value::Object`. The state machine runs every incoming argument value through `normalize_tool_args(...)`: when the value is a string that parses as valid JSON, we substitute the parsed object before the args reach `tool.execute(...)`. Without this, tools would fail with `invalid type: string "...", expected struct FooArgs`.
+
+Both of these are exercised end-to-end by the live tests; if you ever pin to a newer genai version and see "tool ran N times" or "expected struct ... found string" symptoms, the issue is one of these helpers diverging from upstream behavior.
 
 ## Cancellation
 
@@ -128,16 +137,18 @@ The implementation races genai's stream against the `CancellationToken` you pass
 
 ## Live tests
 
-`tests/live.rs` contains five `#[ignore]`-gated tests that hit real provider endpoints (OpenAI, Anthropic, OpenAI-compat Kimi, plus a cancellation race). Run them manually when you change anything in the outbound mapper, inbound state machine, or builder:
+`tests/live.rs` contains five `#[ignore]`-gated tests that hit real provider endpoints (OpenAI, Anthropic, OpenAI-compat Kimi, plus a cancellation race). Run them manually when you change anything in the outbound mapper, inbound state machine, or builder.
+
+The recommended workflow is to put your keys in `.env.test` at the workspace root (see [testing.md](./testing.md) for the format) and then:
 
 ```bash
-ANTHROPIC_API_KEY=... cargo test -p grain-llm-genai --test live -- --ignored
+cargo test -p grain-llm-genai --test live -- --ignored
 ```
 
-Each test individually skips with a printed note when its env var isn't set, so passing `--ignored` is always safe.
+Each test individually skips with a printed note when its env var isn't set, so passing `--ignored` is always safe even with only one provider configured.
 
 ## Caveats
 
-- `genai 0.5`'s `ServiceTarget` resolver is sync; we can't run async work (DNS, OAuth refresh) inside auth/target resolution. If you need async key lookup, do it before calling the agent and pass the resolved key via env or a custom resolver.
+- `genai`'s `ServiceTarget` resolver is sync; we can't run async work (DNS, OAuth refresh) inside auth/target resolution. If you need async key lookup, do it before calling the agent and pass the resolved key via env or a custom resolver.
 - The provider router only handles the namespace translation; renames also live in `grain-llm-models::Registry` (e.g. `provider: "google"`, `api: "gemini"`). Keep them in sync if you customize either side.
 - The OpenAI-compat preset uses `"kimi"` and `"siliconflow"` as ids; models.dev's catalog uses `"moonshotai"` for Kimi's native endpoint. If you load models by their models.dev id directly, register an additional `OpenAiCompatEndpoint { id: "moonshotai", ... }`.
