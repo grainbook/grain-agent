@@ -35,6 +35,8 @@ grain-llm-genai = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "fs", "io-util", "rt-multi-thread"] }
 tempfile = "3"
+dotenvy = { workspace = true }
+futures = { workspace = true }
 
 [[bin]]
 name = "grain-headless"

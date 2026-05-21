@@ -1,3 +1,6 @@
 .omc
 **/target
 .claude
+
+# Local provider keys for live integration tests. Never commit real keys.
+.env.test

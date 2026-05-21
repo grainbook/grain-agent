@@ -33,6 +33,7 @@ anyhow = "1"
 toml = "0.8"
 dirs = "5"
 url = "2"
+dotenvy = "0.15"
 grain-agent-core = { path = "grain-agent-core" }
 grain-agent-harness = { path = "grain-agent-harness" }
 grain-llm-models = { path = "grain-llm-models" }
