@@ -129,9 +129,14 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &Pa
 }
 
 fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &Palette) {
+    // Render-time filter: when thinking is collapsed, drop every
+    // `ThinkingText` row entirely. The underlying transcript still
+    // owns the lines so a later F5 toggle brings them back without
+    // re-asking the model.
     let lines: Vec<Line> = state
         .transcript
         .iter()
+        .filter(|l| state.show_thinking || l.kind != TranscriptKind::ThinkingText)
         .flat_map(|line| split_for_render(line, palette))
         .collect();
 
@@ -399,7 +404,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &Pa
         spans.push(Span::raw("  "));
     }
     spans.push(Span::styled(
-        "↑↓ history · Tab complete · PgUp/PgDn scroll · End tail · F1 help · / cmds · Ctrl-C abort · Esc clear/quit",
+        "↑↓ history · Tab complete · PgUp/PgDn scroll · End tail · F1 help · F5 thinking · / cmds · Ctrl-C abort · Esc clear/quit",
         Style::default().fg(palette.muted),
     ));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -992,6 +997,7 @@ const HELP_TEXT: &str = "\
   Tab             complete the selected slash command (palette open)
   Ctrl-C          abort current turn while streaming; quit when idle
   F1 / F2 / F3    help · doctor · skills
+  F5              toggle thinking visibility (show/hide reasoning lines)
   ←/→/Home/End    move cursor in input
   ↑/↓             history (no palette) · navigate (palette / picker)
   PgUp / PgDn     scroll transcript (freezes view; PgDn catches up to tail)

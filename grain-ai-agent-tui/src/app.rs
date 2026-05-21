@@ -648,6 +648,21 @@ impl AppState {
                 self.overlay = Some(Overlay::Skills(Vec::new()));
                 vec![Command::ReturnSkills]
             }
+            KeyCode::F(5) => {
+                // Toggle thinking visibility. Affects both past
+                // already-emitted lines (via the render filter in
+                // `ui::draw_transcript`) and any future deltas.
+                self.show_thinking = !self.show_thinking;
+                self.push(
+                    TranscriptKind::Info,
+                    if self.show_thinking {
+                        "(thinking: visible)".into()
+                    } else {
+                        "(thinking: hidden)".into()
+                    },
+                );
+                Vec::new()
+            }
             KeyCode::Tab => {
                 // While the slash palette is open, Tab completes the
                 // current input to the focused suggestion's trigger
@@ -1052,7 +1067,11 @@ impl AppState {
                 AssistantMessageEvent::TextDelta { delta, .. } => {
                     self.append_streaming(TranscriptKind::AssistantText, &delta);
                 }
-                AssistantMessageEvent::ThinkingDelta { delta, .. } if self.show_thinking => {
+                AssistantMessageEvent::ThinkingDelta { delta, .. } => {
+                    // Always push into the underlying transcript; the
+                    // render-side filter in `ui::draw_transcript`
+                    // governs visibility via `state.show_thinking`,
+                    // toggleable at runtime with F5.
                     self.append_streaming(TranscriptKind::ThinkingText, &delta);
                 }
                 _ => {}
@@ -1209,6 +1228,7 @@ fn next_char_boundary(s: &str, idx: usize) -> usize {
 mod tests {
     use super::*;
     use crossterm::event::KeyEventKind;
+    use grain_agent_core::AssistantMessage;
 
     fn fresh() -> AppState {
         AppState::new(
@@ -2091,5 +2111,64 @@ mod tests {
         // Session-cumulative counters survive.
         assert_eq!(s.session_usage.input, 5_000);
         assert_eq!(s.session_usage.output, 1_200);
+    }
+
+    // ---- F5 thinking visibility toggle --------------------------
+
+    #[test]
+    fn f5_toggles_show_thinking_flag() {
+        let mut s = fresh();
+        // Default from fresh() is `show_thinking = false`.
+        assert!(!s.show_thinking);
+        s.on_event(TuiEvent::Key(press(KeyCode::F(5))));
+        assert!(s.show_thinking, "F5 must flip the flag on");
+        s.on_event(TuiEvent::Key(press(KeyCode::F(5))));
+        assert!(!s.show_thinking, "second F5 must flip it back off");
+    }
+
+    #[test]
+    fn f5_pushes_info_line_into_transcript() {
+        let mut s = fresh();
+        let before = s.transcript.len();
+        s.on_event(TuiEvent::Key(press(KeyCode::F(5))));
+        assert!(s.transcript.len() > before);
+        let last = s.transcript.last().unwrap();
+        assert_eq!(last.kind, TranscriptKind::Info);
+        assert!(last.text.contains("thinking"));
+    }
+
+    #[test]
+    fn thinking_deltas_are_always_pushed_regardless_of_show_thinking() {
+        // After the F5 redesign, thinking deltas always land in the
+        // transcript so they're available to render when the user
+        // later flips visibility on.
+        let mut s = fresh();
+        assert!(!s.show_thinking);
+        let am = AssistantMessage {
+            content: vec![],
+            api: "x".into(),
+            provider: "x".into(),
+            model: "x".into(),
+            usage: Default::default(),
+            stop_reason: grain_agent_core::StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+        };
+        s.on_event(TuiEvent::Agent(AgentEvent::MessageUpdate {
+            message: am.clone(),
+            assistant_message_event: AssistantMessageEvent::ThinkingDelta {
+                partial: am,
+                content_index: 0,
+                delta: "thinking-text".into(),
+            },
+        }));
+        // Even with show_thinking off, the underlying transcript
+        // holds the line — the renderer is what filters it out.
+        assert!(
+            s.transcript
+                .iter()
+                .any(|l| l.kind == TranscriptKind::ThinkingText
+                    && l.text.contains("thinking-text"))
+        );
     }
 }
