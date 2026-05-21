@@ -19,12 +19,18 @@
 //! - top-level `AgentHarness` constructor
 //! - JSONL session storage
 
+pub mod compaction;
 pub mod context_guard;
 pub mod messages;
 pub mod session;
 pub mod system_prompt;
 pub mod truncate;
 
+pub use compaction::{
+    CompactionError, CompactionPolicy, DEFAULT_COMPACTION_PROMPT, DEFAULT_KEEP_RECENT,
+    DEFAULT_MESSAGE_THRESHOLD, MessageCountPolicy, compact_transcript,
+    compaction_prepare_next_turn,
+};
 pub use context_guard::{ContextGuard, ContextGuardPolicy, TokenEstimator};
 pub use messages::{
     BRANCH_SUMMARY_PREFIX, BRANCH_SUMMARY_SUFFIX, COMPACTION_SUMMARY_PREFIX,
