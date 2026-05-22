@@ -216,16 +216,14 @@ fn ui_plugins_panel() {
         ]);
     }
     let total = plugins.len();
-    let summary_parts = [];
-    if n_config > 0 { summary_parts.push(`${n_config} config`); }
-    if n_lock > 0 { summary_parts.push(`${n_lock} lock`); }
-    if n_legacy > 0 { summary_parts.push(`${n_legacy} legacy`); }
-    if n_manual > 0 { summary_parts.push(`${n_manual} manual`); }
-    let summary = if summary_parts.len() > 0 {
-        " · " + summary_parts.join(" · ")
-    } else {
-        ""
-    };
+    // Rhai arrays don't ship `join` — concatenate by hand. Each
+    // origin chip shows up in the title only when its count > 0
+    // so the summary stays compact for small workspaces.
+    let summary = "";
+    if n_config > 0 { summary += ` · ${n_config} config`; }
+    if n_lock > 0   { summary += ` · ${n_lock} lock`; }
+    if n_legacy > 0 { summary += ` · ${n_legacy} legacy`; }
+    if n_manual > 0 { summary += ` · ${n_manual} manual`; }
     #{
         kind: "table",
         title: `Plugins (${total}${summary})`,

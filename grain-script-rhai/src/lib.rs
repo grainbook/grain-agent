@@ -746,6 +746,26 @@ mod tests {
             "plugins_remove",
             |_a: String, _b: bool| -> String { "ok".into() },
         );
+        // Stub `plugins_list()` so we can also exercise the
+        // /plugins-panel handler end-to-end, catching Rhai-stdlib
+        // mistakes (e.g. calling `join` on Array) that wouldn't
+        // surface from just loading `tools()`.
+        engine.register_fn("plugins_list", || -> rhai::Dynamic {
+            let mut m = rhai::Map::new();
+            m.insert("name".into(), rhai::Dynamic::from("demo".to_string()));
+            m.insert("version".into(), rhai::Dynamic::from("1.0".to_string()));
+            m.insert("description".into(), rhai::Dynamic::from(String::new()));
+            m.insert("author".into(), rhai::Dynamic::from(String::new()));
+            m.insert("src".into(), rhai::Dynamic::from("./demo".to_string()));
+            m.insert("rev".into(), rhai::Dynamic::from(String::new()));
+            m.insert("origin".into(), rhai::Dynamic::from("config".to_string()));
+            m.insert("root".into(), rhai::Dynamic::from("/x/demo".to_string()));
+            m.insert("skills".into(), rhai::Dynamic::from(0_i64));
+            m.insert("themes".into(), rhai::Dynamic::from(0_i64));
+            m.insert("scripts".into(), rhai::Dynamic::from(1_i64));
+            m.insert("prompts".into(), rhai::Dynamic::from(0_i64));
+            rhai::Dynamic::from(vec![rhai::Dynamic::from(m)])
+        });
         let ext = RhaiExtension::from_scripts_dirs_with_engine(engine, &[script_dir]).unwrap();
         let names: Vec<_> = ext
             .tools()
@@ -811,6 +831,25 @@ mod tests {
         assert_eq!(confirm["kind"], "confirm");
         assert_eq!(confirm["on_yes"], "ui_remove_submit");
         assert_eq!(confirm["yes_args"]["name"], "demo");
+
+        // /plugins panel handlers — exercise them end-to-end with
+        // the stubbed `plugins_list` registered above, catching
+        // Rhai-stdlib usage bugs (`join`, `sub_string`, ...) that
+        // wouldn't surface from a passive load.
+        let panel = h.call_fn_json("ui_plugins_panel", serde_json::Value::Null).unwrap();
+        assert_eq!(panel["kind"], "table");
+        assert_eq!(panel["on_select"], "ui_plugin_details");
+        assert!(
+            panel["title"].as_str().unwrap().contains("config"),
+            "title should mention origin breakdown, got: {}",
+            panel["title"]
+        );
+        let details = h
+            .call_fn_json("ui_plugin_details", serde_json::json!({ "row_index": 0 }))
+            .unwrap();
+        assert_eq!(details["kind"], "modal");
+        assert!(details["title"].as_str().unwrap().contains("demo"));
+        assert!(details["body"].as_str().unwrap().contains("Name:"));
     }
 
     #[test]
