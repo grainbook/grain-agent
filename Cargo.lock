@@ -1345,6 +1345,7 @@ dependencies = [
  "globset",
  "grain-agent-core",
  "grain-agent-harness",
+ "grain-deepseek-pack",
  "grain-llm-genai",
  "grain-llm-models",
  "grain-script-boa",

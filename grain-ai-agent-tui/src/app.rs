@@ -926,9 +926,13 @@ impl AppState {
 
     fn push(&mut self, kind: TranscriptKind, text: String) {
         self.transcript.push(TranscriptLine { kind, text });
-        if self.focus == Focus::Input {
-            self.scroll_offset = 0;
-        }
+        // No scroll mutation here. When `follow_bottom == true`
+        // (the default), the renderer pins to tail and ignores
+        // `scroll_offset`, so new content shows up automatically.
+        // When the user has scrolled up (`follow_bottom == false`),
+        // their `scroll_offset` is the anchor row index — leaving
+        // it alone is exactly what keeps the visible window stable
+        // as new lines append at the end.
     }
 
     /// Reset all per-run streaming counters. Called when the user

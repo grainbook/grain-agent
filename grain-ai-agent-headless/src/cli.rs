@@ -359,6 +359,10 @@ pub async fn run(args: Args) -> Result<(), CliError> {
         .into_transform_fn();
 
     // --- Agent options + agent --------------------------------------------
+    let deepseek = crate::deepseek::DeepSeekPack::new(&model);
+    if deepseek.is_enabled() {
+        eprintln!("[info] DeepSeek pack active — reasoning scavenge + subagent.done detection enabled");
+    }
     let mut opts = AgentOptions::new(model, stream);
     opts.system_prompt = system_prompt;
     let mut tools = coding_read_tools(workspace.clone());

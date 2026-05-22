@@ -686,6 +686,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
 
     // --- HarnessBuilder + initial harness ----------------------------------
     let model_cost = model.cost.clone();
+    let deepseek = grain_ai_agent_headless::DeepSeekPack::new(&model);
     let builder = Arc::new(HarnessBuilder {
         model,
         stream,
@@ -897,6 +898,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             builder,
             telemetry_sink,
             session_writer,
+            deepseek,
             workspace_for_task,
             registry_for_task,
             skills_dir_for_task,
@@ -981,6 +983,7 @@ async fn run_command_loop(
     builder: Arc<HarnessBuilder>,
     telemetry_sink: Option<Arc<TelemetrySink>>,
     mut session_writer: Option<Arc<SessionWriter>>,
+    deepseek: grain_ai_agent_headless::DeepSeekPack,
     workspace: Arc<Workspace>,
     registry: Arc<Registry>,
     skills_dir: PathBuf,
@@ -991,6 +994,10 @@ async fn run_command_loop(
     evt_tx: mpsc::UnboundedSender<TuiEvent>,
     #[cfg(feature = "scripts-rhai")] mut rhai_ctx: RhaiReloadCtx,
 ) {
+    if deepseek.is_enabled() {
+        eprintln!("[info] DeepSeek pack active — reasoning scavenge + subagent.done detection enabled");
+    }
+
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             Command::SendPrompt(text) => {

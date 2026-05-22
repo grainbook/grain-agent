@@ -29,6 +29,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod deepseek;
 pub mod diagnostics;
 pub mod extensions;
 pub mod migrations;
@@ -54,6 +55,7 @@ pub use cli::{
     Args, EventPrinter, EventSink, JsonEventPrinter, OpenAiCompatChoice, OutputFormat, run,
 };
 pub use config::{ArgDefaults, ConfigError, ConfigFile};
+pub use deepseek::DeepSeekPack;
 pub use extensions::{Extension, ExtensionRegistry};
 pub use migrations::{
     CURRENT_SCHEMA_VERSION, Migration, MigrationError, default_migrations, migrate_all,
