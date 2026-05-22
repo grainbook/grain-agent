@@ -1030,6 +1030,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             sessions_dir_for_task,
             plugins_dir_for_task,
             profiles,
+            overhead_banner_for_replay,
             cmd_rx,
             evt_tx_for_task,
             #[cfg(feature = "scripts-rhai")]
@@ -1164,6 +1165,7 @@ async fn run_command_loop(
     sessions_dir: PathBuf,
     plugins_dir: PathBuf,
     profiles: Vec<ProviderProfile>,
+    overhead_banner: String,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     evt_tx: mpsc::UnboundedSender<TuiEvent>,
     #[cfg(feature = "scripts-rhai")] mut rhai_ctx: RhaiReloadCtx,
@@ -1494,6 +1496,11 @@ async fn run_command_loop(
                     "(resumed: {} — {prior_count} prior message(s))",
                     path.display()
                 )));
+                // SessionResumed replaces the transcript with the
+                // resumed messages, wiping the boot-time overhead
+                // banner. Re-emit it so the guard's budget is still
+                // visible after every /resume.
+                let _ = evt_tx.send(TuiEvent::Info(format!("({overhead_banner})")));
             }
             Command::Compact { keep_recent } => match harness.compact(keep_recent).await {
                 Ok(entry_id) => {
