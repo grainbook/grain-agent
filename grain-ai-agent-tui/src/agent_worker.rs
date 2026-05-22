@@ -89,6 +89,11 @@ pub struct WorkerConfig {
     /// most-recently-modified session in `sessions_dir` so users
     /// return to where they left off across launches.
     pub new_session: bool,
+    /// Root directory for `lazy.gagent` plugins. `None` →
+    /// `<workspace>/.grain/plugins`. Phase A merges each plugin's
+    /// `skills/` (and, on the TUI side, `themes/`) into the existing
+    /// catalogs at startup.
+    pub plugins_dir: Option<PathBuf>,
 }
 
 impl From<&Args> for WorkerConfig {
@@ -117,6 +122,7 @@ impl From<&Args> for WorkerConfig {
             debug_log: a.debug_log,
             sessions_dir: a.sessions_dir.clone(),
             new_session: a.new_session,
+            plugins_dir: a.plugins_dir.clone(),
         }
     }
 }
@@ -340,7 +346,30 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         None => coding_agent_system_prompt(cfg.allow_write, cfg.allow_bash).to_string(),
     };
     let skills_dir = resolve_skills_dir(workspace.root(), cfg.skills_dir.as_deref());
-    let skills = find_skills(&skills_dir).unwrap_or_default();
+    // Phase A plugin discovery: each `<plugins_dir>/<name>/skills/`
+    // is treated as an extra skills dir and concatenated onto the
+    // primary `find_skills` result. Same load semantics — plugins
+    // just unify where related skills live.
+    let plugins_dir = cfg
+        .plugins_dir
+        .clone()
+        .unwrap_or_else(|| crate::plugins::default_plugins_dir(workspace.root()));
+    let discovered_plugins = crate::plugins::discover_plugins(&plugins_dir);
+    for p in &discovered_plugins {
+        eprintln!("[info] {}", crate::plugins::summarize_plugin(p));
+    }
+    let mut skills = find_skills(&skills_dir).unwrap_or_default();
+    for p in &discovered_plugins {
+        if let Some(d) = p.skills_dir() {
+            match find_skills(&d) {
+                Ok(extra) => skills.extend(extra),
+                Err(e) => eprintln!(
+                    "[warn] plugin '{}' skills scan: {e}",
+                    p.manifest.name
+                ),
+            }
+        }
+    }
     // Clone for the UI's slash-palette skill injection — the original
     // moves into `PinnedSystemPrompt::build` below.
     let skills_for_ui = skills.clone();

@@ -82,7 +82,21 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
             .clone()
             .unwrap_or_else(|| "default".into())
     };
-    let (themes, initial_idx) = resolve_themes(&themes_dir, &requested_theme);
+    // Phase A plugin contribution to themes: each plugin can ship a
+    // `themes/` subdirectory that gets folded into the catalog
+    // alongside `--themes-dir`. Discovery here is duplicated from the
+    // worker (cheap — one shallow read_dir) so theme resolution can
+    // happen before the worker spawns and the alt-screen takes over.
+    let plugins_dir = args
+        .plugins_dir
+        .clone()
+        .unwrap_or_else(|| crate::plugins::default_plugins_dir(&args.workspace));
+    let plugin_theme_dirs: Vec<std::path::PathBuf> = crate::plugins::discover_plugins(&plugins_dir)
+        .into_iter()
+        .filter_map(|p| p.themes_dir())
+        .collect();
+    let (themes, initial_idx) =
+        resolve_themes(&themes_dir, &plugin_theme_dirs, &requested_theme);
 
     let mut terminal = init_terminal()?;
     let result = event_loop(
@@ -136,16 +150,28 @@ fn resolve_profiles(
     (profiles, initial_idx)
 }
 
-/// Merge built-ins with user themes and pick the starting index by
-/// name. Unknown name → fall back to `default` (always index 0 in
-/// `builtin_themes()`). Disk warnings go to stderr.
-fn resolve_themes(themes_dir: &std::path::Path, requested: &str) -> (Vec<Theme>, usize) {
+/// Merge built-ins with user themes (and Phase-A plugin themes) and
+/// pick the starting index by name. Unknown name → fall back to
+/// `default` (always index 0 in `builtin_themes()`). Disk warnings go
+/// to stderr.
+fn resolve_themes(
+    themes_dir: &std::path::Path,
+    extra_theme_dirs: &[std::path::PathBuf],
+    requested: &str,
+) -> (Vec<Theme>, usize) {
     let mut all = builtin_themes();
     let (user, warnings) = load_user_themes(themes_dir);
     for w in warnings {
         eprintln!("[warn] {w}");
     }
     all.extend(user);
+    for d in extra_theme_dirs {
+        let (extra, warnings) = load_user_themes(d);
+        for w in warnings {
+            eprintln!("[warn] {w}");
+        }
+        all.extend(extra);
+    }
     let idx = all
         .iter()
         .position(|t| t.name == requested)
@@ -254,11 +280,65 @@ async fn event_loop(
             _ = ticker.tick() => TuiEvent::Tick,
         };
 
+        // Coalesce consecutive same-direction scroll events. Fast wheel
+        // spins can stuff dozens of `ScrollUp` / `ScrollDown` events
+        // into `term_rx` faster than we redraw; without coalescing the
+        // transcript keeps scrolling for several frames after the
+        // wheel physically stops, because each iteration consumes
+        // exactly one notch and renders. Draining the contiguous run
+        // of same-direction scrolls into one summed event makes the
+        // scroll snap to a stop as soon as the user lifts their
+        // finger. Any non-scroll event that gets pulled out during
+        // the drain is stashed in `leftover` so we still dispatch it
+        // (next, in the same iteration) and don't lose key presses.
+        let mut leftover: Option<TuiEvent> = None;
+        let event = match event {
+            TuiEvent::ScrollUp { mut amount } => {
+                loop {
+                    match term_rx.try_recv() {
+                        Ok(TuiEvent::ScrollUp { amount: a }) => {
+                            amount = amount.saturating_add(a);
+                        }
+                        Ok(other) => {
+                            leftover = Some(other);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                TuiEvent::ScrollUp { amount }
+            }
+            TuiEvent::ScrollDown { mut amount } => {
+                loop {
+                    match term_rx.try_recv() {
+                        Ok(TuiEvent::ScrollDown { amount: a }) => {
+                            amount = amount.saturating_add(a);
+                        }
+                        Ok(other) => {
+                            leftover = Some(other);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                TuiEvent::ScrollDown { amount }
+            }
+            other => other,
+        };
+
         let commands = state.on_event(event);
         for cmd in commands {
             if cmd_tx.send(cmd).is_err() {
                 // worker is gone — wind down gracefully.
                 return Ok(());
+            }
+        }
+        if let Some(ev) = leftover {
+            let commands = state.on_event(ev);
+            for cmd in commands {
+                if cmd_tx.send(cmd).is_err() {
+                    return Ok(());
+                }
             }
         }
         if state.current_theme_idx != last_persisted_theme_idx {

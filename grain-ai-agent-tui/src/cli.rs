@@ -102,6 +102,15 @@ pub struct Args {
     #[arg(long)]
     pub themes_dir: Option<PathBuf>,
 
+    /// Directory scanned for `lazy.gagent` plugins. Each subdirectory
+    /// is a plugin if it contains a `plugin.toml` manifest; its
+    /// `skills/` and `themes/` (Phase B: `scripts/`) folders are
+    /// merged into the corresponding catalogs at startup. Defaults to
+    /// `<workspace>/.grain/plugins`. Missing directory is fine — no
+    /// plugins load then.
+    #[arg(long)]
+    pub plugins_dir: Option<PathBuf>,
+
     /// Initial provider profile name. Looked up in profiles loaded
     /// from `--providers-file` / `<workspace>/.grain/providers.toml` /
     /// `~/.config/grain/providers.toml`. When unset, the picker opens
