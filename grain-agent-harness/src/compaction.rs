@@ -48,6 +48,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context_guard::{ActiveModelHandle, TokenEstimator};
 use crate::messages::compaction_summary_message;
+use crate::session::Session;
 
 /// Default amount of recent transcript to leave untouched. Compaction
 /// always preserves at least this many tail messages — older messages
@@ -334,15 +335,24 @@ pub async fn compact_transcript(
 /// Wrap a policy + summarizer into a [`PrepareNextTurnFn`] that compaction-
 /// rewrites the transcript between turns. Drop into
 /// [`grain_agent_core::AgentOptions::prepare_next_turn`].
+///
+/// The `session` argument is also written to on every successful compaction
+/// via [`Session::append_compaction`], so the summary survives `/resume`.
+/// Without that persist, the in-memory compaction works for the current
+/// run but the next `/resume` reloads the full pre-compaction transcript
+/// from the on-disk JSONL — which is exactly the bug `retry-on-overflow`
+/// kept band-aiding before this wiring landed.
 pub fn compaction_prepare_next_turn(
     summarizer: Arc<dyn LlmStream>,
     policy: Arc<dyn CompactionPolicy>,
     compaction_prompt: String,
+    session: Session,
 ) -> PrepareNextTurnFn {
     Arc::new(move |ctx: PrepareNextTurnContext| {
         let summarizer = summarizer.clone();
         let policy = policy.clone();
         let prompt = compaction_prompt.clone();
+        let session = session.clone();
         Box::pin(async move {
             let prefix_len = policy.evaluate(&ctx.context.messages)?;
 
@@ -361,35 +371,77 @@ pub fn compaction_prepare_next_turn(
                 Model::unknown()
             };
 
-            match compact_transcript(
+            // Build the summary directly via `produce_summary` (rather than
+            // `compact_transcript`) so we have the raw text in hand for
+            // `Session::append_compaction` — `compact_transcript` only
+            // returns the woven `Vec<AgentMessage>`.
+            let prefix = &ctx.context.messages[..prefix_len];
+            let tokens_before = approximate_token_count(prefix);
+            let summary = match produce_summary(
                 &summarizer,
                 &model,
                 &ctx.context.system_prompt,
-                &ctx.context.messages,
-                prefix_len,
+                prefix,
                 &prompt,
                 CancellationToken::new(),
             )
             .await
             {
-                Ok(new_messages) => {
-                    let new_ctx = AgentContext {
-                        system_prompt: ctx.context.system_prompt.clone(),
-                        messages: new_messages,
-                        tools: ctx.context.tools.clone(),
-                    };
-                    Some(AgentLoopTurnUpdate {
-                        context: Some(new_ctx),
-                        ..Default::default()
-                    })
+                Ok(s) if !s.trim().is_empty() => s,
+                Ok(_) => {
+                    eprintln!(
+                        "[warn] grain-agent-harness: compaction skipped this turn: empty summary"
+                    );
+                    return None;
                 }
                 Err(e) => {
                     eprintln!(
                         "[warn] grain-agent-harness: compaction skipped this turn: {e}"
                     );
-                    None
+                    return None;
                 }
+            };
+
+            // Persist the compaction node so `/resume` rebuilds the
+            // session as `[summary, ...]` instead of replaying the full
+            // pre-compaction history. Failure here is non-fatal — we
+            // still rewrite the in-memory transcript so the current
+            // run benefits.
+            let leaf = session.leaf_id().await.unwrap_or_default();
+            if let Err(e) = session
+                .append_compaction(
+                    summary.clone(),
+                    leaf,
+                    tokens_before,
+                    None,
+                    Some(true),
+                )
+                .await
+            {
+                eprintln!(
+                    "[warn] grain-agent-harness: compaction session persist failed: {e}"
+                );
             }
+
+            // Weave the in-memory transcript: [summary_message, ...tail].
+            let tail: Vec<AgentMessage> = ctx.context.messages[prefix_len..].to_vec();
+            let mut new_messages: Vec<AgentMessage> = Vec::with_capacity(tail.len() + 1);
+            new_messages.push(compaction_summary_message(
+                summary,
+                tokens_before,
+                current_time_ms(),
+            ));
+            new_messages.extend(tail);
+
+            let new_ctx = AgentContext {
+                system_prompt: ctx.context.system_prompt.clone(),
+                messages: new_messages,
+                tools: ctx.context.tools.clone(),
+            };
+            Some(AgentLoopTurnUpdate {
+                context: Some(new_ctx),
+                ..Default::default()
+            })
         })
     })
 }

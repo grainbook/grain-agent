@@ -198,7 +198,17 @@ struct HarnessBuilder {
     tools: Vec<Arc<dyn AgentTool>>,
     transform_context: TransformContextFn,
     before_tool_call: Option<BeforeToolCallFn>,
-    prepare_next_turn: Option<PrepareNextTurnFn>,
+    /// Compaction summarizer (= a clone of the live LlmStream).
+    compaction_summarizer: Arc<dyn grain_agent_core::LlmStream>,
+    /// Token-budget policy that decides when compaction fires.
+    compaction_policy: Arc<dyn grain_agent_harness::CompactionPolicy>,
+    /// Prompt fed to the summarizer.
+    compaction_prompt: String,
+    /// Optional escalation hook chained AFTER compaction in
+    /// [`Self::build_with_model`]. Compaction is built fresh per-build
+    /// so it can capture the just-created `Session`; escalation has no
+    /// session affinity, so it stays cloned.
+    escalation_hook: Option<PrepareNextTurnFn>,
     convert_to_llm: Option<ConvertToLlmFn>,
 }
 
@@ -232,12 +242,26 @@ impl HarnessBuilder {
                 eprintln!("[warn] seed session message failed: {e}");
             }
         }
+        // Build the compaction hook fresh per-build so it captures THIS
+        // session, then chain it ahead of escalation. Without this, the
+        // hook would carry a stale session from the previous /resume
+        // and `append_compaction` would write into a session the UI
+        // and on-disk JSONL no longer track.
+        let compaction_hook = grain_agent_harness::compaction_prepare_next_turn(
+            self.compaction_summarizer.clone(),
+            self.compaction_policy.clone(),
+            self.compaction_prompt.clone(),
+            session.clone(),
+        );
+        let prepare_next_turn =
+            chain_prepare_next_turn(Some(compaction_hook), self.escalation_hook.clone());
+
         let mut opts = AgentHarnessOptions::new(session, model, self.stream.clone());
         opts.system_prompt = SystemPrompt::Static(self.system_prompt.clone());
         opts.tools = self.tools.clone();
         opts.transform_context = Some(self.transform_context.clone());
         opts.before_tool_call = self.before_tool_call.clone();
-        opts.prepare_next_turn = self.prepare_next_turn.clone();
+        opts.prepare_next_turn = prepare_next_turn;
         opts.convert_to_llm = self.convert_to_llm.clone();
         Arc::new(AgentHarness::new(opts).await)
     }
@@ -714,26 +738,18 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         None => None,
     };
 
-    // --- Compaction hook (TokenBudgetPolicy) ------------------------------
-    let compaction_policy = Arc::new(grain_agent_harness::TokenBudgetPolicy::new(
-        registry.clone(),
-        active_model_handle.clone(),
-        grain_agent_harness::DEFAULT_COMPACTION_SETTINGS,
-        grain_agent_harness::TokenEstimator::approximate(),
-    ));
-    let compaction_hook: Option<PrepareNextTurnFn> = Some(
-        grain_agent_harness::compaction_prepare_next_turn(
-            stream.clone(),
-            compaction_policy,
-            grain_agent_harness::DEFAULT_COMPACTION_PROMPT.to_string(),
-        ),
-    );
-
-    // Chain compaction (A) with escalation (B). Compaction rewrites the
-    // context; escalation may override the model. B's model/thinking_level
-    // wins because escalation needs authority to swap models on failure.
-    let prepare_next_turn: Option<PrepareNextTurnFn> =
-        chain_prepare_next_turn(compaction_hook, escalation_hook);
+    // --- Compaction policy + summarizer (hook built per-build) -----------
+    // The hook itself is constructed inside `HarnessBuilder::build_with_model`
+    // because it needs to capture the fresh Session each /resume creates;
+    // here we just stash the components.
+    let compaction_policy: Arc<dyn grain_agent_harness::CompactionPolicy> =
+        Arc::new(grain_agent_harness::TokenBudgetPolicy::new(
+            registry.clone(),
+            active_model_handle.clone(),
+            grain_agent_harness::DEFAULT_COMPACTION_SETTINGS,
+            grain_agent_harness::TokenEstimator::approximate(),
+        ));
+    let compaction_prompt = grain_agent_harness::DEFAULT_COMPACTION_PROMPT.to_string();
 
     // --- Debug-log `convert_to_llm` wrapper --------------------------------
     let convert_to_llm: Option<ConvertToLlmFn> = if cfg.debug_log {
@@ -826,12 +842,15 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     let deepseek = grain_ai_agent_headless::DeepSeekPack::new(&model);
     let builder = Arc::new(HarnessBuilder {
         model,
+        compaction_summarizer: stream.clone(),
         stream,
         system_prompt,
         tools,
         transform_context: guard,
         before_tool_call,
-        prepare_next_turn,
+        compaction_policy,
+        compaction_prompt,
+        escalation_hook,
         convert_to_llm,
     });
     let harness = builder.build(prior_messages).await;
