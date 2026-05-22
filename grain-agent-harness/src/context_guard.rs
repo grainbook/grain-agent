@@ -50,15 +50,17 @@ pub enum ContextGuardPolicy {
     Identity,
 }
 
-/// Fixed chars-per-token estimator.
+/// Fixed UTF-8-bytes-per-token estimator.
 ///
-/// The default ratio (4.0 chars/token) is a generous overestimate for
-/// English-heavy LLM transcripts. Tighten it (e.g. 2.5) for CJK-heavy
-/// traffic to be more conservative, or pass a real tokenizer-backed
-/// estimator once that becomes worth its weight.
+/// Counts **bytes**, not Unicode characters: BPE tokenizers (cl100k,
+/// o200k) charge roughly 3-4 bytes/token across English, code, and
+/// CJK alike, while chars/token swings wildly (4 for English, ~1 for
+/// Chinese). At the default 4.0 ratio, ASCII estimates are identical
+/// to the legacy chars/4 behavior; CJK is now ~0.75 tokens/char
+/// instead of 0.25 — close to the real ~1 token/char BPE charges.
 #[derive(Debug, Clone, Copy)]
 pub struct TokenEstimator {
-    chars_per_token: f64,
+    bytes_per_token: f64,
 }
 
 impl Default for TokenEstimator {
@@ -68,21 +70,32 @@ impl Default for TokenEstimator {
 }
 
 impl TokenEstimator {
-    /// Standard chars-per-token approximation (4.0).
+    /// Standard bytes-per-token approximation (4.0). ASCII content
+    /// matches legacy chars/4 estimates; CJK is much closer to truth
+    /// than the old chars-based variant.
     pub const fn approximate() -> Self {
-        TokenEstimator { chars_per_token: 4.0 }
+        TokenEstimator { bytes_per_token: 4.0 }
     }
 
     /// Customize the ratio. Values ≤ 0 are clamped to 1.0 to avoid divide-by-zero.
-    pub fn with_chars_per_token(n: f64) -> Self {
+    pub fn with_bytes_per_token(n: f64) -> Self {
         let n = if n <= 0.0 { 1.0 } else { n };
-        TokenEstimator { chars_per_token: n }
+        TokenEstimator { bytes_per_token: n }
     }
 
-    /// Tokens for a UTF-8 string (character count divided by ratio).
+    /// Backwards-compat alias for [`Self::with_bytes_per_token`]. The
+    /// "chars" name is a misnomer post the byte-counting switch but
+    /// kept to avoid churning external callers.
+    pub fn with_chars_per_token(n: f64) -> Self {
+        Self::with_bytes_per_token(n)
+    }
+
+    /// Tokens for a UTF-8 string (byte count divided by ratio).
+    /// Counts bytes rather than chars so CJK content (3 bytes/char) is
+    /// estimated near its real BPE token count instead of 4× under.
     pub fn estimate_string(&self, s: &str) -> u64 {
-        let chars = s.chars().count();
-        (chars as f64 / self.chars_per_token).ceil() as u64
+        let bytes = s.len();
+        (bytes as f64 / self.bytes_per_token).ceil() as u64
     }
 
     /// Tokens for one [`AgentMessage`]. Images count as a flat 100 tokens.

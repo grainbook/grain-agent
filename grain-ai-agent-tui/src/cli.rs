@@ -27,8 +27,10 @@ pub struct Args {
     #[arg(long)]
     pub system_prompt_file: Option<PathBuf>,
 
-    /// Tokens reserved by `context_guard` for system prompt + completion.
-    #[arg(long, default_value_t = 4096)]
+    /// Output-budget reserve for the assistant response, on top of the
+    /// system+tools overhead the worker pre-charges automatically.
+    /// Bump for models that produce long answers / heavy reasoning.
+    #[arg(long, default_value_t = 8192)]
     pub headroom_tokens: u64,
 
     /// Which OpenAI-compatible provider preset to register.
