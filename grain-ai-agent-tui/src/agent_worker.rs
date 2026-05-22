@@ -659,10 +659,43 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                 .unwrap_or_else(|| format!("(profile '{}', native adapter)", p.name)),
             None => "(native adapter; genai default endpoint)".to_string(),
         };
+        // Persist to `<workspace>/.grain/debug-log` so debug data
+        // survives the TUI quitting and the in-memory request_log
+        // VecDeque rolling over. Append-mode; opened once at boot
+        // and shared via Arc<Mutex<_>>. File-open failures are
+        // surfaced as a transcript warning but don't disable the
+        // in-memory `/log` overlay (which keeps working).
+        use std::sync::Mutex;
+        let log_path = workspace.root().join(".grain").join("debug-log");
+        let log_file: Option<Arc<Mutex<std::fs::File>>> = match (|| -> std::io::Result<_> {
+            if let Some(parent) = log_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+        })() {
+            Ok(f) => {
+                let _ = evt_tx.send(TuiEvent::Info(format!(
+                    "(debug-log persisting to {})",
+                    log_path.display()
+                )));
+                Some(Arc::new(Mutex::new(f)))
+            }
+            Err(e) => {
+                let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                    "debug-log open {} failed: {e} — in-memory /log still works",
+                    log_path.display()
+                )));
+                None
+            }
+        };
         Some(Arc::new(move |messages: Vec<AgentMessage>| {
             let evt_tx_for_log = evt_tx_for_log.clone();
             let log_model_id = log_model_id.clone();
             let log_endpoint = log_endpoint.clone();
+            let log_file = log_file.clone();
             Box::pin(async move {
                 let projected: Vec<Message> = messages
                     .into_iter()
@@ -676,6 +709,20 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                 let body = format!(
                     "POST {log_endpoint}/chat/completions\nmodel: {log_model_id}\n\n{body_json}"
                 );
+                if let Some(file) = log_file.as_ref()
+                    && let Ok(mut f) = file.lock()
+                {
+                    use std::io::Write;
+                    let stamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let _ = writeln!(
+                        f,
+                        "\n===== request @ unix {stamp} =====\n{body}\n"
+                    );
+                    let _ = f.flush();
+                }
                 let _ = evt_tx_for_log.send(TuiEvent::RequestLogged { body });
                 projected
             })
