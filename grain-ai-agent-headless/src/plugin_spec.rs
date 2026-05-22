@@ -158,9 +158,20 @@ impl SyncReport {
 /// symlink (local paths). Existing directories are left untouched —
 /// the engine never auto-removes or overwrites user data.
 ///
+/// `base_dir` anchors **relative** local `src` paths — typically
+/// the directory containing `plugin-spec.toml` (i.e.
+/// `<workspace>/.grain/`). With that anchor, `src = "../lazy-gagent"`
+/// in a spec stored at `<workspace>/.grain/plugin-spec.toml`
+/// resolves to `<workspace>/lazy-gagent` — the intuitive reading.
+/// Absolute paths and `~/...` paths ignore the anchor.
+///
 /// Returns a per-name report; never fails as a whole (one bad source
 /// shouldn't block the others).
-pub fn sync_plugins(spec: &PluginSpecFile, plugins_dir: &Path) -> SyncReport {
+pub fn sync_plugins(
+    spec: &PluginSpecFile,
+    plugins_dir: &Path,
+    base_dir: &Path,
+) -> SyncReport {
     if let Err(e) = std::fs::create_dir_all(plugins_dir) {
         // Can't create the parent — every plugin is going to fail
         // with the same root cause; report the error once.
@@ -196,7 +207,7 @@ pub fn sync_plugins(spec: &PluginSpecFile, plugins_dir: &Path) -> SyncReport {
         }
         let outcome = match p.resolved_kind() {
             SourceKind::Git => clone_git(&p.src, p.rev.as_deref(), &target),
-            SourceKind::Local => symlink_local(&p.src, &target),
+            SourceKind::Local => symlink_local(&p.src, base_dir, &target),
         };
         match outcome {
             Ok(()) => report.installed.push(p.name.clone()),
@@ -246,8 +257,17 @@ fn clone_git(src: &str, rev: Option<&str>, target: &Path) -> Result<(), String> 
     Ok(())
 }
 
-fn symlink_local(src: &str, target: &Path) -> Result<(), String> {
-    let resolved = expand_tilde(src);
+fn symlink_local(src: &str, base_dir: &Path, target: &Path) -> Result<(), String> {
+    let expanded = expand_tilde(src);
+    // Relative paths in spec files are anchored at `base_dir` (the
+    // directory containing `plugin-spec.toml`) rather than the
+    // process's CWD. Absolute paths and `~/...` (already absolute
+    // after `expand_tilde`) pass through untouched.
+    let resolved = if expanded.is_absolute() {
+        expanded
+    } else {
+        base_dir.join(expanded)
+    };
     let canonical = resolved
         .canonicalize()
         .map_err(|e| format!("local path {}: {e}", resolved.display()))?;
@@ -375,7 +395,7 @@ rev = "main"
                 kind: None,
             }],
         };
-        let report = sync_plugins(&spec, &plugins_dir);
+        let report = sync_plugins(&spec, &plugins_dir, tmp.path());
         assert_eq!(report.installed, Vec::<String>::new());
         assert_eq!(report.skipped, vec!["preinstalled".to_string()]);
         assert!(report.failed.is_empty());
@@ -401,7 +421,7 @@ rev = "main"
                 },
             ],
         };
-        let report = sync_plugins(&spec, &plugins_dir);
+        let report = sync_plugins(&spec, &plugins_dir, tmp.path());
         assert_eq!(report.failed.len(), 2);
         assert!(report.failed[0].1.contains("path separator"));
     }
@@ -422,7 +442,7 @@ rev = "main"
                 kind: None,
             }],
         };
-        let report = sync_plugins(&spec, &plugins_dir);
+        let report = sync_plugins(&spec, &plugins_dir, tmp.path());
         assert_eq!(report.installed, vec!["linked".to_string()]);
         assert!(report.failed.is_empty());
         // Target should now be a symlink resolving to the source.
@@ -443,7 +463,7 @@ rev = "main"
                 kind: None,
             }],
         };
-        let report = sync_plugins(&spec, &plugins_dir);
+        let report = sync_plugins(&spec, &plugins_dir, tmp.path());
         assert!(report.installed.is_empty());
         assert_eq!(report.failed.len(), 1);
         assert_eq!(report.failed[0].0, "missing");
@@ -463,9 +483,44 @@ rev = "main"
                 kind: None,
             }],
         };
-        let report = sync_plugins(&spec, &plugins_dir);
+        let report = sync_plugins(&spec, &plugins_dir, tmp.path());
         assert_eq!(report.failed.len(), 1);
         assert!(report.failed[0].1.contains("not a directory"));
+    }
+
+    #[test]
+    fn sync_resolves_relative_src_against_base_dir_not_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Mirror the production layout: workspace/.grain/plugin-spec.toml,
+        // source plugin at workspace/lazy-gagent/.
+        let workspace = tmp.path().join("workspace");
+        let grain = workspace.join(".grain");
+        std::fs::create_dir_all(&grain).unwrap();
+        let source = workspace.join("lazy-gagent");
+        std::fs::create_dir_all(&source).unwrap();
+        writeln!(
+            std::fs::File::create(source.join("plugin.toml")).unwrap(),
+            "name = \"lazy-gagent\""
+        )
+        .unwrap();
+        let plugins_dir = grain.join("plugins");
+        let spec = PluginSpecFile {
+            plugins: vec![PluginSpec {
+                name: "lazy-gagent".into(),
+                // `..` from `<workspace>/.grain/` → `<workspace>/lazy-gagent`.
+                src: "../lazy-gagent".into(),
+                rev: None,
+                kind: None,
+            }],
+        };
+        // Pass `<workspace>/.grain/` as base_dir — the spec file's
+        // parent in a real boot.
+        let report = sync_plugins(&spec, &plugins_dir, &grain);
+        assert_eq!(report.installed, vec!["lazy-gagent".to_string()]);
+        assert!(report.failed.is_empty());
+        let target = plugins_dir.join("lazy-gagent");
+        assert!(target.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(target.join("plugin.toml").exists());
     }
 
     #[test]

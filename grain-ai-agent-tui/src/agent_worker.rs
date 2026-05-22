@@ -346,17 +346,35 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         .clone()
         .unwrap_or_else(|| grain_ai_agent_headless::default_plugins_dir(workspace.root()));
     let spec_path = grain_ai_agent_headless::default_spec_path(workspace.root());
+    // Relative `src` paths in the spec anchor at the spec file's
+    // *parent* directory (i.e. `<workspace>/.grain/`) so that
+    // `src = "../lazy-gagent"` resolves to `<workspace>/lazy-gagent`
+    // — the intuitive reading. Falls back to workspace root if the
+    // spec path has no parent (defensive; shouldn't happen).
+    let spec_base = spec_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| workspace.root().to_path_buf());
+    // Buffer plugin-install failures so we can mirror them into the
+    // TUI transcript once `evt_tx` exists. Without this the user
+    // never sees the failure: stderr writes happen before the alt
+    // screen takes over and get scrolled out of view.
+    let mut deferred_warnings: Vec<String> = Vec::new();
     match grain_ai_agent_headless::load_plugin_spec(&spec_path) {
         Ok(spec) if !spec.plugins.is_empty() => {
-            let report = grain_ai_agent_headless::sync_plugins(&spec, &plugins_dir);
+            let report = grain_ai_agent_headless::sync_plugins(&spec, &plugins_dir, &spec_base);
             report.log_to_stderr();
+            for (name, reason) in &report.failed {
+                deferred_warnings.push(format!(
+                    "plugin '{name}' install failed: {reason}"
+                ));
+            }
         }
         Ok(_) => {} // empty spec / file absent
         Err(e) => {
-            eprintln!(
-                "[warn] plugin-spec.toml at {}: {e}",
-                spec_path.display()
-            );
+            let msg = format!("plugin-spec.toml at {}: {e}", spec_path.display());
+            eprintln!("[warn] {msg}");
+            deferred_warnings.push(msg);
         }
     }
     // Discover before the system prompt + skills resolution so plugin
@@ -534,6 +552,16 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // --- Channels ----------------------------------------------------------
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
     let (evt_tx, evt_rx) = mpsc::unbounded_channel::<TuiEvent>();
+
+    // Replay any plugin-spec sync failures into the TUI transcript so
+    // the user actually sees them — the equivalent stderr lines emit
+    // *before* `init_terminal()` switches to the alt screen and get
+    // hidden behind the UI. AgentWorkerError renders red in the
+    // transcript, which is the right visibility for a startup
+    // problem the user should act on.
+    for msg in deferred_warnings.drain(..) {
+        let _ = evt_tx.send(TuiEvent::AgentWorkerError(msg));
+    }
 
     // --- Hooks: storm suppressor + optional escalation ---------------------
     let before_tool_call: Option<BeforeToolCallFn> = Some(grain_agent_harness::storm_hook(
