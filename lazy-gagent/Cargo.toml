@@ -3,13 +3,7 @@ name = "lazy-gagent"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "lazy.gagent — Neovim/lazy.nvim-style plugin manager built on grain-ai-agent-headless::plugins. Provides install / update / remove on top of the engine's spec-file declarative install."
+description = "lazy.gagent — placeholder crate for the plugin manager that runs ON TOP OF grain-ai-agent-headless's plugin system. The Rust-side install / update / remove primitives now live in `grain_ai_agent_headless::plugin_manager` so they're available to any front-end. This crate stays as a brand-name re-export shim; the *actual* lazy-gagent UX ships as a plugin under `<workspace>/.grain/plugins/lazy-gagent/` (scripts/install.rhai etc.)."
 
 [dependencies]
 grain-ai-agent-headless = { workspace = true }
-serde = { workspace = true }
-toml = { workspace = true }
-thiserror = { workspace = true }
-
-[dev-dependencies]
-tempfile = "3"

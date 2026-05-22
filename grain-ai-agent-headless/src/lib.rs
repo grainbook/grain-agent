@@ -32,6 +32,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod extensions;
 pub mod migrations;
+pub mod plugin_manager;
 pub mod plugin_spec;
 pub mod plugins;
 pub mod prompt;
@@ -78,6 +79,9 @@ pub use plugins::{
 pub use plugin_spec::{
     PluginSpec, PluginSpecFile, SourceKind, SyncReport, default_spec_path, detect_source_kind,
     load_plugin_spec, sync_plugins,
+};
+pub use plugin_manager::{
+    InstallOutcome, ManagerError, RemoveOutcome, UpdateOutcome, install, remove, update,
 };
 pub use diagnostics::{SourceInfo, render_doctor_report, render_source_info_block, source_info};
 pub use slash::{HELP_TEXT, SlashCommand, parse as parse_slash_command};

@@ -816,7 +816,7 @@ async fn run_command_loop(
             Command::InstallPlugin { name, src, rev } => {
                 let spec_path =
                     grain_ai_agent_headless::default_spec_path(workspace.root());
-                match lazy_gagent::install(
+                match grain_ai_agent_headless::install(
                     &spec_path,
                     &plugins_dir,
                     &name,
@@ -849,13 +849,13 @@ async fn run_command_loop(
                 }
             }
             Command::UpdatePlugin { name } => {
-                match lazy_gagent::update(&plugins_dir, &name) {
-                    Ok(lazy_gagent::UpdateOutcome::Symlink) => {
+                match grain_ai_agent_headless::update(&plugins_dir, &name) {
+                    Ok(grain_ai_agent_headless::UpdateOutcome::Symlink) => {
                         let _ = evt_tx.send(TuiEvent::Info(format!(
                             "(plugin '{name}' is a symlink — source tree is live, nothing to pull)"
                         )));
                     }
-                    Ok(lazy_gagent::UpdateOutcome::Pulled) => {
+                    Ok(grain_ai_agent_headless::UpdateOutcome::Pulled) => {
                         let _ = evt_tx.send(TuiEvent::Info(format!(
                             "(updated '{name}' via git pull — restart TUI to pick up changes)"
                         )));
@@ -873,7 +873,7 @@ async fn run_command_loop(
             } => {
                 let spec_path =
                     grain_ai_agent_headless::default_spec_path(workspace.root());
-                match lazy_gagent::remove(&spec_path, &plugins_dir, &name, delete_files) {
+                match grain_ai_agent_headless::remove(&spec_path, &plugins_dir, &name, delete_files) {
                     Ok(outcome) => {
                         let suffix = if outcome.files_removed {
                             " + files"
