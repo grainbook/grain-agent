@@ -617,12 +617,39 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         Arc::new(std::sync::RwLock::new(active_model_id.clone()));
 
     // --- Context guard -----------------------------------------------------
+    // The transform fn only sees `Vec<AgentMessage>` — it never sees
+    // the system prompt or tool schemas the provider tacks on for
+    // every request. Pre-charge the budget for that fixed overhead so
+    // we don't trim to the model's window only to overshoot when the
+    // request actually goes out. Computed once at boot from the
+    // pinned prompt + serialized tool definitions; 1.3x fudge covers
+    // per-message JSON framing and provider-side role tokens.
+    let system_overhead_tokens: u64 = {
+        let estimator = grain_agent_harness::TokenEstimator::approximate();
+        let mut raw = estimator.estimate_string(&system_prompt);
+        for t in &tools {
+            let def = t.definition();
+            raw += estimator.estimate_string(&def.name);
+            raw += estimator.estimate_string(&def.description);
+            raw += estimator.estimate_string(
+                &serde_json::to_string(&def.parameters).unwrap_or_default(),
+            );
+        }
+        (raw as f64 * 1.3).ceil() as u64
+    };
+    eprintln!(
+        "[info] context guard: system+tools overhead ≈ {system_overhead_tokens} tokens \
+         ({} tools, system_prompt {} bytes)",
+        tools.len(),
+        system_prompt.len(),
+    );
     let guard = ContextGuard::with_active_model_handle(
         registry.clone(),
         active_model_handle.clone(),
     )
     .with_policy(ContextGuardPolicy::DropOldest)
     .with_headroom_tokens(cfg.headroom_tokens)
+    .with_system_overhead_tokens(system_overhead_tokens)
     .into_transform_fn();
 
     // --- Channels ----------------------------------------------------------

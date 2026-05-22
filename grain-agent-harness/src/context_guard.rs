@@ -162,9 +162,20 @@ pub struct ContextGuard {
     model_handle: ActiveModelHandle,
     policy: ContextGuardPolicy,
     estimator: TokenEstimator,
-    /// Tokens reserved for the system prompt + the model's response.
-    /// Defaults to 1024 — enough for a small system prompt and a short reply.
+    /// Tokens reserved for the model's response (output budget).
+    /// Defaults to 1024 — bump this if you let the model produce long
+    /// answers or use heavy reasoning.
     headroom_tokens: u64,
+    /// Tokens spent on per-request fixed overhead the guard CAN'T see:
+    /// system prompt, `<available_skills>` block, tool JSON schemas,
+    /// and per-message framing the provider adds on top of message
+    /// content. The transform fn only receives `Vec<AgentMessage>`,
+    /// so anything outside that vector has to be subtracted up front
+    /// or the budget calculation runs hot.
+    ///
+    /// Compute this once at agent boot — see
+    /// [`Self::with_system_overhead_tokens`].
+    system_overhead_tokens: u64,
 }
 
 impl ContextGuard {
@@ -179,6 +190,7 @@ impl ContextGuard {
             policy: ContextGuardPolicy::default(),
             estimator: TokenEstimator::approximate(),
             headroom_tokens: 1024,
+            system_overhead_tokens: 0,
         }
     }
 
@@ -197,6 +209,7 @@ impl ContextGuard {
             policy: ContextGuardPolicy::default(),
             estimator: TokenEstimator::approximate(),
             headroom_tokens: 1024,
+            system_overhead_tokens: 0,
         }
     }
 
@@ -233,6 +246,29 @@ impl ContextGuard {
         self
     }
 
+    /// Pre-charge the budget by the per-request fixed overhead the guard
+    /// can't see directly — typically `system_prompt` + tool JSON
+    /// schemas. Without this, the guard trims the transcript to just
+    /// under the model's window, then the provider tacks on
+    /// system+tools and the request lands over budget.
+    ///
+    /// Compute at boot, e.g.:
+    /// ```ignore
+    /// let estimator = TokenEstimator::approximate();
+    /// let mut overhead = estimator.estimate_string(&system_prompt);
+    /// for t in &tools {
+    ///     overhead += estimator.estimate_string(
+    ///         &serde_json::to_string(&t.definition().input_schema)
+    ///             .unwrap_or_default(),
+    ///     );
+    /// }
+    /// guard.with_system_overhead_tokens(overhead);
+    /// ```
+    pub fn with_system_overhead_tokens(mut self, n: u64) -> Self {
+        self.system_overhead_tokens = n;
+        self
+    }
+
     /// Materialize a [`TransformContextFn`] you can drop into
     /// [`grain_agent_core::AgentOptions::transform_context`].
     pub fn into_transform_fn(self) -> TransformContextFn {
@@ -242,6 +278,7 @@ impl ContextGuard {
             policy,
             estimator,
             headroom_tokens,
+            system_overhead_tokens,
         } = self;
         Arc::new(move |messages, _cancel| {
             let registry = registry.clone();
@@ -254,9 +291,10 @@ impl ContextGuard {
             let policy = policy.clone();
             Box::pin(async move {
                 let budget = match registry.lookup(&model_id) {
-                    Some(m) if m.context_window > 0 => {
-                        m.context_window.saturating_sub(headroom_tokens)
-                    }
+                    Some(m) if m.context_window > 0 => m
+                        .context_window
+                        .saturating_sub(headroom_tokens)
+                        .saturating_sub(system_overhead_tokens),
                     _ => return messages, // unknown model — no-op
                 };
                 apply_policy(messages, budget, &policy, &estimator)
