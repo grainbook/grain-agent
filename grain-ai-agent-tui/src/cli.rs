@@ -127,6 +127,21 @@ pub struct Args {
     /// override or to opt-in on non-zh locales.
     #[arg(long)]
     pub cny_rate: Option<f64>,
+
+    /// Whether to bypass process-wide HTTP proxies (`HTTPS_PROXY` /
+    /// `ALL_PROXY` / ...) when calling LLM endpoints.
+    ///
+    /// - Unset (default): auto — bypass when at least one configured
+    ///   OpenAI-compat profile points at a loopback host (LM Studio,
+    ///   vLLM, llama.cpp, Ollama). All other traffic still honors the
+    ///   proxy env vars.
+    /// - `true`: always bypass — useful in environments where a
+    ///   transparent proxy on `localhost` mangles requests, even for
+    ///   remote endpoints.
+    /// - `false`: never bypass — useful when you've set `NO_PROXY`
+    ///   yourself and want full proxy control via env vars.
+    #[arg(long)]
+    pub bypass_proxy: Option<bool>,
 }
 
 impl Args {

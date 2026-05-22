@@ -30,6 +30,16 @@ pub struct GenaiStreamBuilder {
     provider_router: ProviderRouter,
     openai_compat: Vec<OpenAiCompatEndpoint>,
     registry: Option<Arc<Registry>>,
+    /// Whether the built reqwest client should ignore process-wide
+    /// proxy env vars (`HTTPS_PROXY` / `ALL_PROXY` / ...).
+    ///
+    /// - `None` (default) → auto-detect: bypass when any registered
+    ///   OpenAI-compat endpoint resolves to a loopback host. Matches
+    ///   pre-config behavior so local LM Studio / vLLM / llama.cpp
+    ///   "just works" behind a corporate proxy.
+    /// - `Some(true)` → always bypass, regardless of endpoints.
+    /// - `Some(false)` → never bypass; let `reqwest` honor the env vars.
+    bypass_proxy: Option<bool>,
 }
 
 impl Default for GenaiStreamBuilder {
@@ -46,7 +56,15 @@ impl GenaiStreamBuilder {
             provider_router: ProviderRouter::default(),
             openai_compat: Vec::new(),
             registry: None,
+            bypass_proxy: None,
         }
+    }
+
+    /// Override proxy-bypass behavior. See [`Self::bypass_proxy`] field
+    /// docs for the truth table.
+    pub fn with_bypass_proxy(mut self, choice: Option<bool>) -> Self {
+        self.bypass_proxy = choice;
+        self
     }
 
     pub fn with_chat_options(mut self, options: ChatOptions) -> Self {
@@ -153,6 +171,7 @@ impl GenaiStreamBuilder {
             provider_router,
             openai_compat,
             registry,
+            bypass_proxy,
         } = self;
 
         let chat_options = chat_options.unwrap_or_else(baseline_chat_options);
@@ -234,7 +253,12 @@ impl GenaiStreamBuilder {
             .with_chat_options(chat_options.clone())
             .with_auth_resolver_fn(auth_resolver)
             .with_service_target_resolver_fn(target_resolver);
-        if has_loopback_compat_endpoint {
+        // Tristate: explicit `Some(_)` overrides the auto-detect.
+        // `None` → fall back to auto-detect (bypass if any registered
+        // compat endpoint is a loopback URL — the typical
+        // local-model setup).
+        let should_bypass = bypass_proxy.unwrap_or(has_loopback_compat_endpoint);
+        if should_bypass {
             let reqwest_client = reqwest13::Client::builder()
                 .no_proxy()
                 .build()

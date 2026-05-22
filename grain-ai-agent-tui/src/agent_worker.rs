@@ -60,6 +60,11 @@ pub struct WorkerConfig {
     pub escalate_to: Option<String>,
     /// Failure-signal count that triggers `escalate_to`. Defaults to 3.
     pub escalate_after: u32,
+    /// Tristate proxy-bypass override for the genai HTTP client. See
+    /// [`crate::cli::Args::bypass_proxy`] for the full truth table.
+    /// `None` → auto-detect from registered endpoints (the historical
+    /// default; bypasses when any compat endpoint is on loopback).
+    pub bypass_proxy: Option<bool>,
 }
 
 impl From<&Args> for WorkerConfig {
@@ -84,6 +89,7 @@ impl From<&Args> for WorkerConfig {
             scripts_dir: a.scripts_dir.clone(),
             escalate_to: a.escalate_to.clone(),
             escalate_after: a.escalate_after,
+            bypass_proxy: a.bypass_proxy,
         }
     }
 }
@@ -236,6 +242,7 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         GenaiStream::builder()
             .with_openai_compat_preset(cfg.openai_compat)
             .with_provider_profiles(&cfg.profiles)
+            .with_bypass_proxy(cfg.bypass_proxy)
             .with_registry(registry.clone())
             .build(),
     );

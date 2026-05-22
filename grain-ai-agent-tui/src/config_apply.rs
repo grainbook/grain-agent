@@ -85,6 +85,12 @@ pub fn apply_config_to_args(cfg: &ConfigFile, args: &mut Args, explicit: &HashSe
     {
         args.allow_semantic_search = b;
     }
+    if !explicit.contains("bypass_proxy")
+        && args.bypass_proxy.is_none()
+        && cfg.bypass_proxy.is_some()
+    {
+        args.bypass_proxy = cfg.bypass_proxy;
+    }
     if !explicit.contains("skills_dir")
         && args.skills_dir.is_none()
         && let Some(d) = &cfg.skills_dir
@@ -191,6 +197,47 @@ mod tests {
             (OpenAiCompatChoice::Common, OpenAiCompatChoice::Common)
                 | (OpenAiCompatChoice::None, OpenAiCompatChoice::None)
         ));
+    }
+
+    #[test]
+    fn bypass_proxy_overrides_default_unset() {
+        let mut args = parse(&[]);
+        assert!(args.bypass_proxy.is_none());
+        let cfg = ConfigFile {
+            bypass_proxy: Some(true),
+            ..ConfigFile::default()
+        };
+        apply_config_to_args(&cfg, &mut args, &HashSet::new());
+        assert_eq!(args.bypass_proxy, Some(true));
+    }
+
+    #[test]
+    fn bypass_proxy_cli_true_beats_config_false() {
+        let mut args = parse(&["--bypass-proxy", "true"]);
+        assert_eq!(args.bypass_proxy, Some(true));
+        let mut explicit = HashSet::new();
+        explicit.insert("bypass_proxy".to_string());
+        let cfg = ConfigFile {
+            bypass_proxy: Some(false),
+            ..ConfigFile::default()
+        };
+        apply_config_to_args(&cfg, &mut args, &explicit);
+        assert_eq!(
+            args.bypass_proxy,
+            Some(true),
+            "CLI must win when explicit"
+        );
+    }
+
+    #[test]
+    fn bypass_proxy_config_false_disables_default() {
+        let mut args = parse(&[]);
+        let cfg = ConfigFile {
+            bypass_proxy: Some(false),
+            ..ConfigFile::default()
+        };
+        apply_config_to_args(&cfg, &mut args, &HashSet::new());
+        assert_eq!(args.bypass_proxy, Some(false));
     }
 
     #[test]

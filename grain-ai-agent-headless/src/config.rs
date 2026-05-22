@@ -41,6 +41,11 @@ pub struct ConfigFile {
     pub allow_semantic_search: Option<bool>,
     pub skills_dir: Option<PathBuf>,
     pub session_dir: Option<PathBuf>,
+    /// Override for the proxy-bypass behavior of the genai HTTP client.
+    /// `None` (unset) keeps the default auto-detect (bypass when a
+    /// configured OpenAI-compat endpoint is on loopback). `Some(true)`
+    /// always bypasses; `Some(false)` always respects proxy env vars.
+    pub bypass_proxy: Option<bool>,
 }
 
 #[derive(Debug, Error)]
@@ -200,6 +205,9 @@ fn merge_into(dst: &mut ConfigFile, src: ConfigFile) {
     }
     if src.session_dir.is_some() {
         dst.session_dir = src.session_dir;
+    }
+    if src.bypass_proxy.is_some() {
+        dst.bypass_proxy = src.bypass_proxy;
     }
 }
 
