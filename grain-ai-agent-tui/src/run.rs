@@ -117,29 +117,61 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
     result
 }
 
-/// Load profiles from the configured providers.toml (CLI override,
-/// then workspace, then user) and resolve `--provider <name>` to an
-/// index. Disk-load warnings go to stderr.
+/// Load profiles from:
+/// 1. `config.toml`'s `[[provider]]` blocks (authoritative).
+/// 2. The legacy `providers.toml` (workspace or user XDG), unioned
+///    in by name. Config wins on collision.
+///
+/// Resolves `--provider <name>` to an index in the merged list.
+/// Disk-load warnings go to stderr.
 fn resolve_profiles(
     cli_override: Option<&std::path::Path>,
     workspace_root: &std::path::Path,
     requested: Option<&str>,
 ) -> (Vec<ProviderProfile>, Option<usize>) {
-    let path = resolve_providers_file(cli_override, workspace_root);
-    let (profiles, warnings) = match path {
-        Some(p) => load_profiles(&p),
-        None => (Vec::new(), Vec::new()),
-    };
-    for w in warnings {
-        eprintln!("[warn] {w}");
+    let mut profiles: Vec<ProviderProfile> = Vec::new();
+
+    // 1. config.toml `[[provider]]` — authoritative.
+    if let Ok(cfg) = grain_ai_agent_headless::ConfigFile::load(workspace_root) {
+        for entry in cfg.providers {
+            match grain_llm_genai::profile_from_entry(entry) {
+                Ok(p) => profiles.push(p),
+                Err(e) => eprintln!("[warn] config.toml provider: {e}"),
+            }
+        }
     }
+
+    // 2. Legacy providers.toml — fill in any names config didn't
+    // already cover.
+    let legacy_path = resolve_providers_file(cli_override, workspace_root);
+    if let Some(p) = legacy_path {
+        let (legacy_profiles, warnings) = load_profiles(&p);
+        for w in warnings {
+            eprintln!("[warn] {w}");
+        }
+        let mut migration_count = 0usize;
+        for legacy in legacy_profiles {
+            if profiles.iter().any(|e| e.name == legacy.name) {
+                continue;
+            }
+            migration_count += 1;
+            profiles.push(legacy);
+        }
+        if migration_count > 0 {
+            eprintln!(
+                "[warn] {migration_count} entries in legacy {}; consider migrating to config.toml [[provider]] blocks",
+                p.display()
+            );
+        }
+    }
+
     let initial_idx = match requested {
         None => None,
         Some(name) => match profiles.iter().position(|p| p.name == name) {
             Some(i) => Some(i),
             None => {
                 eprintln!(
-                    "[warn] provider '{name}' not found in providers.toml \
+                    "[warn] provider '{name}' not found in config.toml or providers.toml \
                      ({} profiles loaded)",
                     profiles.len()
                 );

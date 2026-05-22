@@ -32,6 +32,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod extensions;
 pub mod migrations;
+pub mod plugin_lock;
 pub mod plugin_manager;
 pub mod plugin_spec;
 pub mod plugin_ui;
@@ -84,6 +85,9 @@ pub use plugin_spec::{
 };
 pub use plugin_ui::{
     BoundUiCommand, FormField, ModalSeverity, OverlayDescriptor, UiCommand, collect_ui_commands,
+};
+pub use plugin_lock::{
+    PluginOrigin, default_lock_path, effective_spec, load_plugin_lock, origin_of, save_plugin_lock,
 };
 pub use plugin_manager::{
     InstallOutcome, ManagerError, RemoveOutcome, UpdateOutcome, install, remove, update,

@@ -345,41 +345,38 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         .plugins_dir
         .clone()
         .unwrap_or_else(|| grain_ai_agent_headless::default_plugins_dir(workspace.root()));
-    let spec_path = grain_ai_agent_headless::default_spec_path(workspace.root());
-    // Relative `src` paths in the spec anchor at the spec file's
-    // *parent* directory (i.e. `<workspace>/.grain/`) so that
-    // `src = "../lazy-gagent"` resolves to `<workspace>/lazy-gagent`
-    // — the intuitive reading. Falls back to workspace root if the
-    // spec path has no parent (defensive; shouldn't happen).
-    let spec_base = spec_path
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| workspace.root().to_path_buf());
+    // Spec base for relative `src` paths is `<workspace>/.grain/`
+    // — the parent of config.toml / plugin-lock.toml / legacy
+    // plugin-spec.toml (all three live there). `src = "../lazy-gagent"`
+    // resolves to `<workspace>/lazy-gagent`.
+    let spec_base = workspace.root().join(".grain");
     // Buffer plugin-install failures so we can mirror them into the
     // TUI transcript once `evt_tx` exists. Without this the user
     // never sees the failure: stderr writes happen before the alt
     // screen takes over and get scrolled out of view.
     let mut deferred_warnings: Vec<String> = Vec::new();
-    let plugin_spec = match grain_ai_agent_headless::load_plugin_spec(&spec_path) {
-        Ok(spec) => {
-            if !spec.plugins.is_empty() {
-                let report =
-                    grain_ai_agent_headless::sync_plugins(&spec, &plugins_dir, &spec_base);
-                report.log_to_stderr();
-                for (name, reason) in &report.failed {
-                    deferred_warnings.push(format!(
-                        "plugin '{name}' install failed: {reason}"
-                    ));
-                }
+    // Effective spec = config.toml [[plugin]] ∪ plugin-lock.toml ∪
+    // legacy plugin-spec.toml (first-source-wins). Reload config
+    // here so worker doesn't depend on the earlier apply pass —
+    // the file read is cheap and the call site stays self-contained.
+    let plugin_spec = {
+        let config = grain_ai_agent_headless::ConfigFile::load(workspace.root())
+            .unwrap_or_default();
+        let (spec, warnings) =
+            grain_ai_agent_headless::effective_spec(workspace.root(), &config);
+        for w in warnings {
+            eprintln!("[warn] {w}");
+            deferred_warnings.push(w);
+        }
+        if !spec.plugins.is_empty() {
+            let report =
+                grain_ai_agent_headless::sync_plugins(&spec, &plugins_dir, &spec_base);
+            report.log_to_stderr();
+            for (name, reason) in &report.failed {
+                deferred_warnings.push(format!("plugin '{name}' install failed: {reason}"));
             }
-            spec
         }
-        Err(e) => {
-            let msg = format!("plugin-spec.toml at {}: {e}", spec_path.display());
-            eprintln!("[warn] {msg}");
-            deferred_warnings.push(msg);
-            grain_ai_agent_headless::PluginSpecFile::default()
-        }
+        spec
     };
     // Discover both filesystem-installed plugins (`plugins_dir` walk
     // — gets git-cloned + legacy-symlinked + hand-placed dirs) and
@@ -571,8 +568,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         v
     };
     #[cfg(feature = "scripts-rhai")]
-    let spec_path_for_rhai =
-        grain_ai_agent_headless::default_spec_path(workspace.root());
+    let workspace_for_rhai: PathBuf = workspace.root().to_path_buf();
 
     // Base tools snapshot **before** Rhai contribution — held by the
     // worker so hot-reload can rebuild the full tool list as
@@ -583,7 +579,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     #[cfg(feature = "scripts-rhai")]
     let rhai_bundle: RhaiBundle = {
         let bundle = build_rhai_bundle(
-            &spec_path_for_rhai,
+            &workspace_for_rhai,
             &plugins_dir,
             &rhai_dirs,
         );
@@ -758,7 +754,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // `agent.tools = base_tools + fresh_rhai_tools`.
     #[cfg(feature = "scripts-rhai")]
     let rhai_ctx_for_task = RhaiReloadCtx {
-        spec_path: spec_path_for_rhai.clone(),
+        workspace_root: workspace_for_rhai.clone(),
         plugins_dir: plugins_dir.clone(),
         script_dirs: rhai_dirs.clone(),
         base_tools,
@@ -918,10 +914,10 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
 #[cfg(feature = "scripts-rhai")]
 #[derive(Clone)]
 pub struct RhaiReloadCtx {
-    /// Path to `<workspace>/.grain/plugin-spec.toml` — host fn
-    /// closures need this to install / remove plugins from inside
-    /// scripts.
-    pub spec_path: PathBuf,
+    /// Workspace root — host fn closures derive the lock /
+    /// legacy-spec paths from this and re-read `config.toml` per
+    /// call so they always see the current plugin declaration set.
+    pub workspace_root: PathBuf,
     /// `<plugins_dir>` resolved at boot. Same path the boot-time
     /// `discover_plugins` walked.
     pub plugins_dir: PathBuf,
@@ -1028,16 +1024,13 @@ async fn run_command_loop(
                 let _ = evt_tx.send(TuiEvent::SessionsListed(list));
             }
             Command::ReturnPlugins => {
-                // Re-read the spec so local-source entries the user
-                // added since boot show up in the overlay.
-                let spec_path =
-                    grain_ai_agent_headless::default_spec_path(workspace.root());
-                let spec_base = spec_path
-                    .parent()
-                    .map(std::path::Path::to_path_buf)
-                    .unwrap_or_else(|| workspace.root().to_path_buf());
-                let spec = grain_ai_agent_headless::load_plugin_spec(&spec_path)
+                // Re-read config + lock + legacy spec so entries
+                // the user added since boot show up in the overlay.
+                let config = grain_ai_agent_headless::ConfigFile::load(workspace.root())
                     .unwrap_or_default();
+                let (spec, _warnings) =
+                    grain_ai_agent_headless::effective_spec(workspace.root(), &config);
+                let spec_base = workspace.root().join(".grain");
                 let discovered = grain_ai_agent_headless::discover_plugins_with_spec(
                     &plugins_dir,
                     &spec,
@@ -1055,10 +1048,23 @@ async fn run_command_loop(
                 });
             }
             Command::InstallPlugin { name, src, rev } => {
-                let spec_path =
-                    grain_ai_agent_headless::default_spec_path(workspace.root());
+                // Block writes that would shadow a config.toml
+                // entry — the runtime can't safely modify
+                // hand-written declarations.
+                let config = grain_ai_agent_headless::ConfigFile::load(workspace.root())
+                    .unwrap_or_default();
+                if let Some(grain_ai_agent_headless::PluginOrigin::Config) =
+                    grain_ai_agent_headless::origin_of(workspace.root(), &config, &name)
+                {
+                    let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                        "install '{name}': already declared in config.toml — edit that file directly"
+                    )));
+                    continue;
+                }
+                let lock_path =
+                    grain_ai_agent_headless::default_lock_path(workspace.root());
                 match grain_ai_agent_headless::install(
-                    &spec_path,
+                    &lock_path,
                     &plugins_dir,
                     &name,
                     &src,
@@ -1112,9 +1118,38 @@ async fn run_command_loop(
                 name,
                 delete_files,
             } => {
-                let spec_path =
-                    grain_ai_agent_headless::default_spec_path(workspace.root());
-                match grain_ai_agent_headless::remove(&spec_path, &plugins_dir, &name, delete_files) {
+                let config = grain_ai_agent_headless::ConfigFile::load(workspace.root())
+                    .unwrap_or_default();
+                let target_path = match grain_ai_agent_headless::origin_of(
+                    workspace.root(),
+                    &config,
+                    &name,
+                ) {
+                    Some(grain_ai_agent_headless::PluginOrigin::Config) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "remove '{name}': declared in config.toml — edit that file directly"
+                        )));
+                        continue;
+                    }
+                    Some(grain_ai_agent_headless::PluginOrigin::Lock) => {
+                        grain_ai_agent_headless::default_lock_path(workspace.root())
+                    }
+                    Some(grain_ai_agent_headless::PluginOrigin::LegacySpec) => {
+                        grain_ai_agent_headless::default_spec_path(workspace.root())
+                    }
+                    None => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "remove '{name}': not declared in config.toml, plugin-lock.toml, or plugin-spec.toml"
+                        )));
+                        continue;
+                    }
+                };
+                match grain_ai_agent_headless::remove(
+                    &target_path,
+                    &plugins_dir,
+                    &name,
+                    delete_files,
+                ) {
                     Ok(outcome) => {
                         let suffix = if outcome.files_removed {
                             " + files"
@@ -1122,7 +1157,8 @@ async fn run_command_loop(
                             ""
                         };
                         let _ = evt_tx.send(TuiEvent::Info(format!(
-                            "(removed '{name}' from spec{suffix} — restart TUI to drop it from the live catalog)"
+                            "(removed '{name}' from {}{suffix} — restart TUI to drop it from the live catalog)",
+                            target_path.file_name().and_then(|s| s.to_str()).unwrap_or("spec")
                         )));
                     }
                     Err(e) => {
@@ -1141,7 +1177,7 @@ async fn run_command_loop(
                 // freshly-defined `[[ui_command]]` handlers become
                 // dispatchable without restart.
                 let fresh = build_rhai_bundle(
-                    &rhai_ctx.spec_path,
+                    &rhai_ctx.workspace_root,
                     &rhai_ctx.plugins_dir,
                     &rhai_ctx.script_dirs,
                 );
@@ -1329,21 +1365,33 @@ pub struct RhaiBundle {
 
 #[cfg(feature = "scripts-rhai")]
 fn build_rhai_bundle(
-    spec_path: &std::path::Path,
+    workspace_root: &std::path::Path,
     plugins_dir: &std::path::Path,
     script_dirs: &[PathBuf],
 ) -> RhaiBundle {
     use grain_script_rhai::RhaiExtension;
     let mut engine = RhaiExtension::default_engine();
 
-    // plugins_install(name, src) → status string
-    let spec_install = spec_path.to_path_buf();
+    // plugins_install(name, src) → status string. Writes to
+    // <workspace>/.grain/plugin-lock.toml; refuses to shadow a
+    // config.toml [[plugin]] declaration.
+    let ws_install = workspace_root.to_path_buf();
     let pdir_install = plugins_dir.to_path_buf();
     engine.register_fn(
         "plugins_install",
         move |name: String, src: String| -> String {
+            let config = grain_ai_agent_headless::ConfigFile::load(&ws_install)
+                .unwrap_or_default();
+            if let Some(grain_ai_agent_headless::PluginOrigin::Config) =
+                grain_ai_agent_headless::origin_of(&ws_install, &config, &name)
+            {
+                return format!(
+                    "install '{name}' refused: declared in config.toml — edit that file directly"
+                );
+            }
+            let lock_path = grain_ai_agent_headless::default_lock_path(&ws_install);
             match grain_ai_agent_headless::install(
-                &spec_install,
+                &lock_path,
                 &pdir_install,
                 &name,
                 &src,
@@ -1363,7 +1411,8 @@ fn build_rhai_bundle(
         },
     );
 
-    // plugins_update(name) → status string
+    // plugins_update(name) → status string. Doesn't touch any
+    // spec file — just `git pull`s in <plugins_dir>/<name>/.
     let pdir_update = plugins_dir.to_path_buf();
     engine.register_fn("plugins_update", move |name: String| -> String {
         match grain_ai_agent_headless::update(&pdir_update, &name) {
@@ -1377,14 +1426,37 @@ fn build_rhai_bundle(
         }
     });
 
-    // plugins_remove(name, delete_files) → status string
-    let spec_remove = spec_path.to_path_buf();
+    // plugins_remove(name, delete_files) → status string. Targets
+    // the file the entry actually lives in (lock or legacy spec).
+    // Refuses to mutate config.toml-declared entries.
+    let ws_remove = workspace_root.to_path_buf();
     let pdir_remove = plugins_dir.to_path_buf();
     engine.register_fn(
         "plugins_remove",
         move |name: String, delete_files: bool| -> String {
+            let config = grain_ai_agent_headless::ConfigFile::load(&ws_remove)
+                .unwrap_or_default();
+            let target_path =
+                match grain_ai_agent_headless::origin_of(&ws_remove, &config, &name) {
+                    Some(grain_ai_agent_headless::PluginOrigin::Config) => {
+                        return format!(
+                            "remove '{name}' refused: declared in config.toml — edit that file directly"
+                        );
+                    }
+                    Some(grain_ai_agent_headless::PluginOrigin::Lock) => {
+                        grain_ai_agent_headless::default_lock_path(&ws_remove)
+                    }
+                    Some(grain_ai_agent_headless::PluginOrigin::LegacySpec) => {
+                        grain_ai_agent_headless::default_spec_path(&ws_remove)
+                    }
+                    None => {
+                        return format!(
+                            "remove '{name}' error: not declared in config.toml, plugin-lock.toml, or plugin-spec.toml"
+                        );
+                    }
+                };
             match grain_ai_agent_headless::remove(
-                &spec_remove,
+                &target_path,
                 &pdir_remove,
                 &name,
                 delete_files,
