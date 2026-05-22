@@ -133,6 +133,25 @@ pub enum Command {
     /// Cheap (one shallow `read_dir` + N manifest parses); safe to
     /// call every time the user opens the overlay.
     ReturnPlugins,
+    /// `/install <name> <src> [rev]` — append a `[[plugin]]` block to
+    /// `<workspace>/.grain/plugin-spec.toml` and sync. Worker emits
+    /// a [`TuiEvent::Info`] on success or
+    /// [`TuiEvent::AgentWorkerError`] on failure.
+    InstallPlugin {
+        name: String,
+        src: String,
+        rev: Option<String>,
+    },
+    /// `/update <name>` — `git pull` on a git-sourced plugin or
+    /// no-op for a symlink. Same event channel as `InstallPlugin`.
+    UpdatePlugin { name: String },
+    /// `/remove <name> [--keep-files]` — drop the `[[plugin]]` entry
+    /// from the spec; by default also tear down the installed
+    /// directory. `--keep-files` preserves the install dir.
+    RemovePlugin {
+        name: String,
+        delete_files: bool,
+    },
     Quit,
 }
 
@@ -284,6 +303,18 @@ pub const SLASH_CATALOG: &[CommandCatalogItem] = &[
     CommandCatalogItem {
         trigger: "/plugins",
         description: "list lazy.gagent plugins discovered under .grain/plugins/",
+    },
+    CommandCatalogItem {
+        trigger: "/install",
+        description: "/install <name> <src> [rev] — add to plugin-spec.toml + sync",
+    },
+    CommandCatalogItem {
+        trigger: "/update",
+        description: "/update <name> — git pull a previously installed plugin",
+    },
+    CommandCatalogItem {
+        trigger: "/remove",
+        description: "/remove <name> [--keep-files] — drop from spec (and dir)",
     },
     CommandCatalogItem {
         trigger: "/exit",
@@ -1662,6 +1693,73 @@ impl AppState {
                 // `TuiEvent::PluginsListed`, which swaps the list in.
                 self.overlay = Some(Overlay::Plugins(Vec::new()));
                 vec![Command::ReturnPlugins]
+            }
+            "install" => {
+                let mut parts = rest.split_whitespace();
+                let _ = parts.next(); // skip "install"
+                let Some(name) = parts.next() else {
+                    self.push(
+                        TranscriptKind::Info,
+                        "(usage: /install <name> <src> [rev])".into(),
+                    );
+                    return Vec::new();
+                };
+                let Some(src) = parts.next() else {
+                    self.push(
+                        TranscriptKind::Info,
+                        "(usage: /install <name> <src> [rev])".into(),
+                    );
+                    return Vec::new();
+                };
+                let rev = parts.next().map(String::from);
+                self.push(
+                    TranscriptKind::Info,
+                    format!("(installing '{name}' from {src} …)"),
+                );
+                vec![Command::InstallPlugin {
+                    name: name.into(),
+                    src: src.into(),
+                    rev,
+                }]
+            }
+            "update" => {
+                let mut parts = rest.split_whitespace();
+                let _ = parts.next(); // skip "update"
+                let Some(name) = parts.next() else {
+                    self.push(
+                        TranscriptKind::Info,
+                        "(usage: /update <name>)".into(),
+                    );
+                    return Vec::new();
+                };
+                self.push(
+                    TranscriptKind::Info,
+                    format!("(updating '{name}' …)"),
+                );
+                vec![Command::UpdatePlugin { name: name.into() }]
+            }
+            "remove" | "uninstall" => {
+                let mut parts = rest.split_whitespace();
+                let _ = parts.next(); // skip head
+                let Some(name) = parts.next() else {
+                    self.push(
+                        TranscriptKind::Info,
+                        "(usage: /remove <name> [--keep-files])".into(),
+                    );
+                    return Vec::new();
+                };
+                let delete_files = !parts.any(|p| p == "--keep-files");
+                self.push(
+                    TranscriptKind::Info,
+                    format!(
+                        "(removing '{name}'{} …)",
+                        if delete_files { " + files" } else { "" }
+                    ),
+                );
+                vec![Command::RemovePlugin {
+                    name: name.into(),
+                    delete_files,
+                }]
             }
             "exit" | "quit" | "q" => {
                 self.should_quit = true;

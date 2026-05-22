@@ -813,6 +813,84 @@ async fn run_command_loop(
                         .collect();
                 let _ = evt_tx.send(TuiEvent::PluginsListed(infos));
             }
+            Command::InstallPlugin { name, src, rev } => {
+                let spec_path =
+                    grain_ai_agent_headless::default_spec_path(workspace.root());
+                match lazy_gagent::install(
+                    &spec_path,
+                    &plugins_dir,
+                    &name,
+                    &src,
+                    rev.as_deref(),
+                ) {
+                    Ok(outcome) => {
+                        if outcome.report.failed.iter().any(|(n, _)| n == &name) {
+                            let reason = outcome
+                                .report
+                                .failed
+                                .iter()
+                                .find(|(n, _)| n == &name)
+                                .map(|(_, r)| r.clone())
+                                .unwrap_or_default();
+                            let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                                "install '{name}' sync failed: {reason}"
+                            )));
+                        } else {
+                            let _ = evt_tx.send(TuiEvent::Info(format!(
+                                "(installed '{name}' — restart TUI to pick up its skills / themes / prompts / scripts)"
+                            )));
+                        }
+                    }
+                    Err(e) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "install '{name}': {e}"
+                        )));
+                    }
+                }
+            }
+            Command::UpdatePlugin { name } => {
+                match lazy_gagent::update(&plugins_dir, &name) {
+                    Ok(lazy_gagent::UpdateOutcome::Symlink) => {
+                        let _ = evt_tx.send(TuiEvent::Info(format!(
+                            "(plugin '{name}' is a symlink — source tree is live, nothing to pull)"
+                        )));
+                    }
+                    Ok(lazy_gagent::UpdateOutcome::Pulled) => {
+                        let _ = evt_tx.send(TuiEvent::Info(format!(
+                            "(updated '{name}' via git pull — restart TUI to pick up changes)"
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "update '{name}': {e}"
+                        )));
+                    }
+                }
+            }
+            Command::RemovePlugin {
+                name,
+                delete_files,
+            } => {
+                let spec_path =
+                    grain_ai_agent_headless::default_spec_path(workspace.root());
+                match lazy_gagent::remove(&spec_path, &plugins_dir, &name, delete_files) {
+                    Ok(outcome) => {
+                        let suffix = if outcome.files_removed {
+                            " + files"
+                        } else {
+                            ""
+                        };
+                        let _ = evt_tx.send(TuiEvent::Info(format!(
+                            "(removed '{name}' from spec{suffix} — restart TUI to drop it from the live catalog)"
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "remove '{name}': {e}"
+                        )));
+                    }
+                }
+            }
             Command::ResumeSession(path) => {
                 // Cancel any in-flight turn and wait for the old
                 // harness to settle so we don't get late events from

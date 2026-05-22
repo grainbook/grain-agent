@@ -22,6 +22,7 @@ grain-agent-harness = { workspace = true }
 grain-llm-models = { workspace = true }
 grain-llm-genai = { workspace = true }
 grain-ai-agent-headless = { workspace = true }
+lazy-gagent = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 grain-script-boa = { workspace = true, optional = true }
