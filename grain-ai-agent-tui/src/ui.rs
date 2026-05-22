@@ -19,7 +19,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{AppState, Focus, Overlay, SLASH_CATALOG, TranscriptKind};
+use crate::app::{AppState, Focus, Overlay, SLASH_CATALOG, TranscriptKind, TranscriptLine};
 use crate::theme::{Palette, Theme, ThemeSource};
 use grain_llm_genai::{ProviderKind, ProviderProfile};
 
@@ -246,43 +246,54 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette:
     // mouse handlers + selection highlighting can compute precise
     // (row, col) coordinates. Doing our own wrap also lets us track
     // each row's `TranscriptKind` for per-row styling.
+    //
+    // The outer loop walks **blocks** (returned by
+    // `build_transcript_blocks`) rather than raw lines. Foldable
+    // blocks (tool calls, thinking) render either as one collapsed
+    // summary line or as an expanded header + child lines, driven
+    // by `AppState::is_block_expanded`.
+    let blocks = crate::app::build_transcript_blocks(&state.transcript);
     let mut rendered: Vec<crate::app::RenderedRow> = Vec::new();
-    for line in &state.transcript {
-        if !state.show_thinking && line.kind == TranscriptKind::ThinkingText {
+    for block in &blocks {
+        // Hard-hide thinking blocks when the legacy `show_thinking`
+        // toggle is off — that key (F5) historically removed them
+        // from the buffer entirely; fold semantics still apply to
+        // them when they're visible.
+        if block.kind == crate::app::BlockKind::Thinking && !state.show_thinking {
             continue;
         }
-        let prefix = prefix_for_kind(line.kind);
-        let continuation = "  ";
-        for (seg_i, segment) in line.text.split('\n').enumerate() {
-            let initial_prefix = if seg_i == 0 { prefix } else { continuation };
-            // Reserve room for the prefix so wrapped chunks fit the
-            // visible column budget. Use *display* width (not byte
-            // length) — the prefix may contain multi-byte chars like
-            // `›` (3 bytes, 1 column) or `· ` (3 bytes, 2 columns);
-            // using `.len()` over-reserved space, which shifted wrap
-            // boundaries and misaligned selection highlights on
-            // anything past the first non-ASCII row.
-            let inner = width
-                .saturating_sub(UnicodeWidthStr::width(initial_prefix))
-                .max(1);
-            let wrapped: Vec<String> = if segment.is_empty() {
-                vec![String::new()]
-            } else {
-                textwrap::wrap(segment, inner)
-                    .into_iter()
-                    .map(|c| c.into_owned())
-                    .collect()
-            };
-            for (frag_i, frag) in wrapped.into_iter().enumerate() {
-                let p = if frag_i == 0 {
-                    initial_prefix
-                } else {
-                    continuation
-                };
-                rendered.push(crate::app::RenderedRow {
-                    text: format!("{p}{frag}"),
-                    kind: line.kind,
-                });
+        let foldable = block.is_foldable();
+        let expanded = state.is_block_expanded(block);
+        if foldable && !expanded {
+            // Single summary line replaces the whole block.
+            let summary = format!("▸ {}", block_summary(block, &state.transcript));
+            wrap_one_line(
+                &TranscriptLine {
+                    kind: block_chrome_kind(block.kind),
+                    text: summary,
+                },
+                width,
+                &mut rendered,
+            );
+            continue;
+        }
+        if foldable && expanded {
+            // Header row tells the user the block is open + how
+            // many child lines fall under it. Child lines follow,
+            // each indented.
+            let header = format!("▾ {}", block_summary(block, &state.transcript));
+            wrap_one_line(
+                &TranscriptLine {
+                    kind: block_chrome_kind(block.kind),
+                    text: header,
+                },
+                width,
+                &mut rendered,
+            );
+        }
+        for idx in block.first_line..=block.last_line {
+            if let Some(line) = state.transcript.get(idx) {
+                wrap_one_line(line, width, &mut rendered);
             }
         }
     }
@@ -318,6 +329,104 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette:
     // already-sized rows).
     let paragraph = Paragraph::new(Text::from(lines));
     frame.render_widget(paragraph, area);
+}
+
+/// Wrap one `TranscriptLine` into 1+ rendered rows, identical to
+/// what the legacy in-line loop did. Extracted so the block-aware
+/// outer loop can reuse it both for raw transcript lines and for
+/// synthetic fold-header / fold-summary lines.
+fn wrap_one_line(
+    line: &TranscriptLine,
+    width: usize,
+    rendered: &mut Vec<crate::app::RenderedRow>,
+) {
+    let prefix = prefix_for_kind(line.kind);
+    let continuation = "  ";
+    for (seg_i, segment) in line.text.split('\n').enumerate() {
+        let initial_prefix = if seg_i == 0 { prefix } else { continuation };
+        let inner = width
+            .saturating_sub(UnicodeWidthStr::width(initial_prefix))
+            .max(1);
+        let wrapped: Vec<String> = if segment.is_empty() {
+            vec![String::new()]
+        } else {
+            textwrap::wrap(segment, inner)
+                .into_iter()
+                .map(|c| c.into_owned())
+                .collect()
+        };
+        for (frag_i, frag) in wrapped.into_iter().enumerate() {
+            let p = if frag_i == 0 {
+                initial_prefix
+            } else {
+                continuation
+            };
+            rendered.push(crate::app::RenderedRow {
+                text: format!("{p}{frag}"),
+                kind: line.kind,
+            });
+        }
+    }
+}
+
+/// One-line summary of a foldable block. Shape:
+/// `tool: read · foo.rs · 2 lines` or `thinking · 5 lines`.
+/// The leading `▸` / `▾` glyph is added by the caller so the same
+/// summary works for both collapsed + expanded headers.
+fn block_summary(
+    block: &crate::app::TranscriptBlock,
+    transcript: &[TranscriptLine],
+) -> String {
+    let count = block.line_count();
+    match block.kind {
+        crate::app::BlockKind::ToolCall => {
+            // Extract the head line ("→ tool(args)") and use up to
+            // the first newline as the headline. Truncate so the
+            // summary stays single-line.
+            let head = transcript
+                .get(block.first_line)
+                .map(|l| l.text.as_str())
+                .unwrap_or("");
+            // Strip the leading "→ " arrow if present so the
+            // collapsed glyph carries the navigation cue alone.
+            let cleaned = head.trim_start_matches("→ ").trim();
+            let trimmed = truncate_oneline(cleaned, 60);
+            if count > 1 {
+                format!("tool: {trimmed}  ({count} lines)")
+            } else {
+                format!("tool: {trimmed}")
+            }
+        }
+        crate::app::BlockKind::Thinking => {
+            format!("thinking  ({count} line{})", if count == 1 { "" } else { "s" })
+        }
+        crate::app::BlockKind::Plain => transcript
+            .get(block.first_line)
+            .map(|l| l.text.clone())
+            .unwrap_or_default(),
+    }
+}
+
+/// Pick a chrome `TranscriptKind` for a synthetic fold header /
+/// summary line. We borrow an existing kind so style mapping +
+/// prefix glyphs reuse the established palette.
+fn block_chrome_kind(kind: crate::app::BlockKind) -> TranscriptKind {
+    match kind {
+        crate::app::BlockKind::ToolCall => TranscriptKind::ToolCallStart,
+        crate::app::BlockKind::Thinking => TranscriptKind::ThinkingText,
+        crate::app::BlockKind::Plain => TranscriptKind::Info,
+    }
+}
+
+fn truncate_oneline(s: &str, max: usize) -> String {
+    let s = s.replace('\n', " ");
+    if s.chars().count() <= max {
+        s
+    } else {
+        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
 }
 
 /// Build one rendered `Line` with the kind's base style + optional
