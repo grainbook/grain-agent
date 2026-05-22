@@ -548,103 +548,44 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // registers `plugins_install` / `plugins_update` / `plugins_remove`
     // as host native functions. Plugin Rhai scripts can call those
     // to manage other plugins (e.g. lazy-gagent's install.rhai).
+    //
+    // Same dir set as Boa: workspace primary + each plugin's
+    // scripts/. RhaiExtension filters to `*.rhai` so .js files are
+    // silently ignored.
     #[cfg(feature = "scripts-rhai")]
-    let rhai_extension = {
-        use grain_script_rhai::RhaiExtension;
-        let mut engine = RhaiExtension::default_engine();
-
-        let spec_path_for_rhai =
-            grain_ai_agent_headless::default_spec_path(workspace.root());
-        let plugins_dir_for_rhai = plugins_dir.clone();
-
-        // plugins_install(name, src) → status string
-        let spec_install = spec_path_for_rhai.clone();
-        let pdir_install = plugins_dir_for_rhai.clone();
-        engine.register_fn(
-            "plugins_install",
-            move |name: String, src: String| -> String {
-                match grain_ai_agent_headless::install(
-                    &spec_install,
-                    &pdir_install,
-                    &name,
-                    &src,
-                    None,
-                ) {
-                    Ok(outcome) => {
-                        if let Some((_, reason)) =
-                            outcome.report.failed.iter().find(|(n, _)| n == &name)
-                        {
-                            format!("install '{name}' sync failed: {reason}")
-                        } else {
-                            format!("installed '{name}'")
-                        }
-                    }
-                    Err(e) => format!("install '{name}' error: {e}"),
-                }
-            },
-        );
-
-        // plugins_update(name) → status string
-        let pdir_update = plugins_dir_for_rhai.clone();
-        engine.register_fn("plugins_update", move |name: String| -> String {
-            match grain_ai_agent_headless::update(&pdir_update, &name) {
-                Ok(grain_ai_agent_headless::UpdateOutcome::Symlink) => {
-                    format!("'{name}' is a symlink (live, no pull needed)")
-                }
-                Ok(grain_ai_agent_headless::UpdateOutcome::Pulled) => {
-                    format!("updated '{name}' via git pull")
-                }
-                Err(e) => format!("update '{name}' error: {e}"),
-            }
-        });
-
-        // plugins_remove(name, delete_files) → status string
-        let spec_remove = spec_path_for_rhai.clone();
-        let pdir_remove = plugins_dir_for_rhai.clone();
-        engine.register_fn(
-            "plugins_remove",
-            move |name: String, delete_files: bool| -> String {
-                match grain_ai_agent_headless::remove(
-                    &spec_remove,
-                    &pdir_remove,
-                    &name,
-                    delete_files,
-                ) {
-                    Ok(outcome) => {
-                        let suffix = if outcome.files_removed { " + files" } else { "" };
-                        format!("removed '{name}'{suffix}")
-                    }
-                    Err(e) => format!("remove '{name}' error: {e}"),
-                }
-            },
-        );
-
-        // Same dir set as Boa: workspace primary + each plugin's
-        // scripts/. RhaiExtension filters to `*.rhai` so .js files
-        // are silently ignored.
-        let mut rhai_dirs: Vec<PathBuf> = vec![scripts_path.clone()];
-        rhai_dirs.extend(grain_ai_agent_headless::plugin_script_dirs(
+    let rhai_dirs: Vec<PathBuf> = {
+        let mut v = vec![scripts_path.clone()];
+        v.extend(grain_ai_agent_headless::plugin_script_dirs(
             &discovered_plugins,
         ));
-        match RhaiExtension::from_scripts_dirs_with_engine(engine, &rhai_dirs) {
-            Ok(ext) => {
-                let scripted = ext.tools();
-                if !scripted.is_empty() {
-                    eprintln!(
-                        "[info] loaded {} Rhai tool(s) from {} dir(s)",
-                        scripted.len(),
-                        rhai_dirs.len()
-                    );
-                }
-                tools.extend(scripted);
-                Some(ext)
-            }
-            Err(e) => {
-                eprintln!("[warn] rhai scripts: {e}");
-                None
-            }
-        }
+        v
     };
+    #[cfg(feature = "scripts-rhai")]
+    let spec_path_for_rhai =
+        grain_ai_agent_headless::default_spec_path(workspace.root());
+
+    // Base tools snapshot **before** Rhai contribution — held by the
+    // worker so hot-reload can rebuild the full tool list as
+    // `base + fresh_rhai`. Trivially cloneable (each entry is `Arc`).
+    #[cfg(feature = "scripts-rhai")]
+    let base_tools: Vec<Arc<dyn AgentTool>> = tools.clone();
+
+    #[cfg(feature = "scripts-rhai")]
+    {
+        let rhai_tools = build_rhai_tools(
+            &spec_path_for_rhai,
+            &plugins_dir,
+            &rhai_dirs,
+        );
+        if !rhai_tools.is_empty() {
+            eprintln!(
+                "[info] loaded {} Rhai tool(s) from {} dir(s)",
+                rhai_tools.len(),
+                rhai_dirs.len()
+            );
+        }
+        tools.extend(rhai_tools);
+    }
 
     // --- Context guard -----------------------------------------------------
     let guard = ContextGuard::new(registry.clone(), active_model_id.clone())
@@ -796,19 +737,15 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // Shutdown to that worker thread.
     #[cfg(feature = "scripts-boa")]
     let _scripts_keepalive = scripts_extension;
-    // Rhai extension owns the `Arc<Engine>` referenced by every
-    // scripted tool's `execute()`. Dropping it would invalidate
-    // those tools — keep it alive for the worker task's lifetime.
-    #[cfg(feature = "scripts-rhai")]
-    let _rhai_keepalive = rhai_extension;
+    // Rhai tools each own their own `Arc<Engine>` (cloned during
+    // `RhaiExtension::tools()`) so we don't need a separate
+    // keepalive — dropping the extension wrapper is fine.
 
     let join = tokio::spawn(async move {
         // Pin the Boa extension into the task scope so its worker
         // thread lives until the agent task exits.
         #[cfg(feature = "scripts-boa")]
         let _boa_keepalive = _scripts_keepalive;
-        #[cfg(feature = "scripts-rhai")]
-        let _rhai_keepalive_in_task = _rhai_keepalive;
 
         install_subscriptions(
             &harness,
@@ -1107,6 +1044,99 @@ async fn run_command_loop(
 /// profile name so genai routes through the per-profile endpoint
 /// registered by `with_provider_profiles`. Native-kind profiles pass
 /// through unchanged.
+/// Build the Rhai engine, register the plugin-manager host
+/// primitives, and load every `*.rhai` script under each of
+/// `script_dirs`. Returns the agent tools registered by those
+/// scripts — each tool owns an `Arc<Engine>` so the caller doesn't
+/// have to keep the engine alive separately.
+///
+/// Called both from `spawn()` at boot and from
+/// `Command::ReloadRhaiScripts` so the same code path produces the
+/// initial tool list and the hot-reload tool list — the agent never
+/// sees inconsistency between "fresh boot" and "after reload".
+///
+/// Failures emit a `[warn]` and return an empty vec — one bad
+/// script never breaks the rest of the agent.
+#[cfg(feature = "scripts-rhai")]
+fn build_rhai_tools(
+    spec_path: &std::path::Path,
+    plugins_dir: &std::path::Path,
+    script_dirs: &[PathBuf],
+) -> Vec<Arc<dyn AgentTool>> {
+    use grain_script_rhai::RhaiExtension;
+    let mut engine = RhaiExtension::default_engine();
+
+    // plugins_install(name, src) → status string
+    let spec_install = spec_path.to_path_buf();
+    let pdir_install = plugins_dir.to_path_buf();
+    engine.register_fn(
+        "plugins_install",
+        move |name: String, src: String| -> String {
+            match grain_ai_agent_headless::install(
+                &spec_install,
+                &pdir_install,
+                &name,
+                &src,
+                None,
+            ) {
+                Ok(outcome) => {
+                    if let Some((_, reason)) =
+                        outcome.report.failed.iter().find(|(n, _)| n == &name)
+                    {
+                        format!("install '{name}' sync failed: {reason}")
+                    } else {
+                        format!("installed '{name}'")
+                    }
+                }
+                Err(e) => format!("install '{name}' error: {e}"),
+            }
+        },
+    );
+
+    // plugins_update(name) → status string
+    let pdir_update = plugins_dir.to_path_buf();
+    engine.register_fn("plugins_update", move |name: String| -> String {
+        match grain_ai_agent_headless::update(&pdir_update, &name) {
+            Ok(grain_ai_agent_headless::UpdateOutcome::Symlink) => {
+                format!("'{name}' is a symlink (live, no pull needed)")
+            }
+            Ok(grain_ai_agent_headless::UpdateOutcome::Pulled) => {
+                format!("updated '{name}' via git pull")
+            }
+            Err(e) => format!("update '{name}' error: {e}"),
+        }
+    });
+
+    // plugins_remove(name, delete_files) → status string
+    let spec_remove = spec_path.to_path_buf();
+    let pdir_remove = plugins_dir.to_path_buf();
+    engine.register_fn(
+        "plugins_remove",
+        move |name: String, delete_files: bool| -> String {
+            match grain_ai_agent_headless::remove(
+                &spec_remove,
+                &pdir_remove,
+                &name,
+                delete_files,
+            ) {
+                Ok(outcome) => {
+                    let suffix = if outcome.files_removed { " + files" } else { "" };
+                    format!("removed '{name}'{suffix}")
+                }
+                Err(e) => format!("remove '{name}' error: {e}"),
+            }
+        },
+    );
+
+    match RhaiExtension::from_scripts_dirs_with_engine(engine, script_dirs) {
+        Ok(ext) => ext.tools(),
+        Err(e) => {
+            eprintln!("[warn] rhai scripts: {e}");
+            Vec::new()
+        }
+    }
+}
+
 fn override_model_provider(
     mut model: grain_agent_core::Model,
     profile: &ProviderProfile,

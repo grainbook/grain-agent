@@ -26,9 +26,16 @@ serde = { workspace = true }
 toml = { workspace = true }
 grain-script-boa = { workspace = true, optional = true }
 grain-script-rhai = { workspace = true, optional = true }
+notify = { workspace = true, optional = true }
 
 [features]
 default = []
+# Watch plugin script dirs for changes and live-reload the Rhai
+# engine + agent tool catalog. Requires `scripts-rhai`. Off by
+# default — adds ~150KB compile cost and one extra OS thread for
+# the notify backend; users without an iterate-on-scripts workflow
+# don't need it.
+hot-reload = ["dep:notify", "scripts-rhai"]
 # Enable JavaScript scripting through `grain-script-boa`. With this on
 # the TUI accepts `--scripts-dir <PATH>` and auto-discovers
 # `<workspace>/.grain/scripts/`. Off by default — Boa adds ~5MB to the
