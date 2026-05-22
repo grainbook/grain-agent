@@ -6,6 +6,8 @@ This lives in [`grain-llm-genai`](./llm-genai.md) as a first-class capability, t
 
 中文版：[zh/providers.md](./zh/providers.md).
 
+> **Provider profiles can now live in [`config.toml`](./config.md#consolidated-plugin--provider-declarations)** under `[[provider]]` blocks (same fields, renamed from `[[profile]]` for clarity). The legacy `<workspace>/.grain/providers.toml` is still read; entries declared in both files prefer `config.toml`. New setups should put providers in `config.toml`.
+
 ---
 
 ## Why profiles

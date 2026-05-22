@@ -4,6 +4,8 @@ A Neovim/lazy.nvim-style plugin layer for the grain agent. Drop a directory unde
 
 中文版：[zh/plugins.md](./zh/plugins.md)。
 
+> **Declarative plugin entries belong in [`config.toml`](./config.md#consolidated-plugin--provider-declarations)** under `[[plugin]]` blocks. The legacy `<workspace>/.grain/plugin-spec.toml` is still read for back-compat, and runtime install / remove operations write to a separate `plugin-lock.toml` so they never trample your hand-edited config. See the config-file doc for the merge rules.
+
 ---
 
 ## Mental model
