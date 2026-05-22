@@ -1137,6 +1137,28 @@ impl AppState {
         // their `scroll_offset` is the anchor row index — leaving
         // it alone is exactly what keeps the visible window stable
         // as new lines append at the end.
+
+        // Fade-in effect for new lines — only when the line will be
+        // visible (tailing mode). Place a 1-row fade at the bottom
+        // of the transcript pane.
+        if self.follow_bottom {
+            let ta = self.transcript_area.get();
+            if ta.height > 0 {
+                use crate::anim::{EffectKind, FxDuration, fx};
+                let palette = &self.themes[self.current_theme_idx].palette;
+                let row_area = Rect {
+                    x: ta.x,
+                    y: ta.y.saturating_add(ta.height.saturating_sub(1)),
+                    width: ta.width,
+                    height: 1,
+                };
+                self.effects.push(
+                    EffectKind::NewMessage,
+                    fx::fade_from_fg(palette.surface, FxDuration::from_millis(220)),
+                    row_area,
+                );
+            }
+        }
     }
 
     /// Whether `block` should currently render expanded. Combines
