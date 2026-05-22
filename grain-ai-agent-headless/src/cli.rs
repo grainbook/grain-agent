@@ -239,14 +239,40 @@ pub async fn run(args: Args) -> Result<(), CliError> {
     // genai builder. When `--provider <name>` is set, the named
     // profile's model + auth replace what `--model` / env-vars would
     // otherwise pick.
-    let providers_path =
-        resolve_providers_file(args.providers_file.as_deref(), workspace.root());
-    let (profiles, profile_warnings) = match providers_path {
-        Some(p) => load_profiles(&p),
-        None => (Vec::new(), Vec::new()),
-    };
-    for w in profile_warnings {
-        eprintln!("[warn] {w}");
+    //
+    // Two sources, in order:
+    //   1. config.toml [[provider]] — authoritative.
+    //   2. legacy providers.toml — fills in any names config didn't
+    //      already cover. Migration warning emitted when it
+    //      contributes.
+    let mut profiles: Vec<ProviderProfile> = Vec::new();
+    if let Ok(cfg) = crate::config::ConfigFile::load(workspace.root()) {
+        for entry in cfg.providers {
+            match grain_llm_genai::profile_from_entry(entry) {
+                Ok(p) => profiles.push(p),
+                Err(e) => eprintln!("[warn] config.toml provider: {e}"),
+            }
+        }
+    }
+    if let Some(p) = resolve_providers_file(args.providers_file.as_deref(), workspace.root()) {
+        let (legacy_profiles, profile_warnings) = load_profiles(&p);
+        for w in profile_warnings {
+            eprintln!("[warn] {w}");
+        }
+        let mut migrated = 0usize;
+        for legacy in legacy_profiles {
+            if profiles.iter().any(|e| e.name == legacy.name) {
+                continue;
+            }
+            migrated += 1;
+            profiles.push(legacy);
+        }
+        if migrated > 0 {
+            eprintln!(
+                "[warn] {migrated} entries in legacy {}; consider migrating to config.toml [[provider]] blocks",
+                p.display()
+            );
+        }
     }
     let active_profile: Option<&ProviderProfile> = match &args.provider {
         None => None,
@@ -254,7 +280,7 @@ pub async fn run(args: Args) -> Result<(), CliError> {
             Some(p) => Some(p),
             None => {
                 return Err(format!(
-                    "provider '{name}' not in providers.toml ({} loaded)",
+                    "provider '{name}' not in config.toml or providers.toml ({} loaded)",
                     profiles.len()
                 )
                 .into());
