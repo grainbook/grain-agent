@@ -40,6 +40,9 @@ pub struct Palette {
     pub accent: Color,
     pub secondary: Color,
     pub fg: Color,
+    /// Between `fg` and `muted` — secondary text that should be legible
+    /// but not compete with primary content (timestamps, metadata).
+    pub subdued: Color,
     pub muted: Color,
     pub error: Color,
     pub warning: Color,
@@ -66,6 +69,7 @@ pub fn builtin_themes() -> Vec<Theme> {
             accent: rgb(0xc6, 0x78, 0xdd),
             secondary: rgb(0x56, 0xb6, 0xc2),
             fg: rgb(0xeb, 0xeb, 0xeb),
+            subdued: rgb(0xab, 0xad, 0xb8),
             muted: rgb(0x6c, 0x70, 0x86),
             error: rgb(0xe0, 0x6c, 0x75),
             warning: rgb(0xe5, 0xc0, 0x7b),
@@ -77,6 +81,7 @@ pub fn builtin_themes() -> Vec<Theme> {
             accent: rgb(0xbd, 0x93, 0xf9),
             secondary: rgb(0x62, 0x72, 0xa4),
             fg: rgb(0xf8, 0xf8, 0xf2),
+            subdued: rgb(0xad, 0xb5, 0xcb),
             muted: rgb(0x62, 0x72, 0xa4),
             error: rgb(0xff, 0x55, 0x55),
             warning: rgb(0xff, 0xb8, 0x6c),
@@ -88,6 +93,7 @@ pub fn builtin_themes() -> Vec<Theme> {
             accent: rgb(0x88, 0xc0, 0xd0),
             secondary: rgb(0x81, 0xa1, 0xc1),
             fg: rgb(0xec, 0xef, 0xf4),
+            subdued: rgb(0x9c, 0xa2, 0xaf),
             muted: rgb(0x4c, 0x56, 0x6a),
             error: rgb(0xbf, 0x61, 0x6a),
             warning: rgb(0xeb, 0xcb, 0x8b),
@@ -99,6 +105,7 @@ pub fn builtin_themes() -> Vec<Theme> {
             accent: rgb(0xfa, 0xbd, 0x2f),
             secondary: rgb(0xd6, 0x5d, 0x0e),
             fg: rgb(0xeb, 0xdb, 0xb2),
+            subdued: rgb(0xbe, 0xaf, 0x93),
             muted: rgb(0x92, 0x83, 0x74),
             error: rgb(0xfb, 0x49, 0x34),
             warning: rgb(0xfe, 0x80, 0x19),
@@ -110,6 +117,7 @@ pub fn builtin_themes() -> Vec<Theme> {
             accent: rgb(0xd7, 0x99, 0x21),
             secondary: rgb(0xaf, 0x3a, 0x03),
             fg: rgb(0x3c, 0x38, 0x36),
+            subdued: rgb(0x5c, 0x54, 0x4d),
             muted: rgb(0x7c, 0x6f, 0x64),
             error: rgb(0xcc, 0x24, 0x1d),
             warning: rgb(0xd6, 0x5d, 0x0e),
@@ -121,6 +129,7 @@ pub fn builtin_themes() -> Vec<Theme> {
             accent: rgb(0x7a, 0xa2, 0xf7),
             secondary: rgb(0xbb, 0x9a, 0xf7),
             fg: rgb(0xc0, 0xca, 0xf5),
+            subdued: rgb(0x8b, 0x95, 0xbf),
             muted: rgb(0x56, 0x5f, 0x89),
             error: rgb(0xf7, 0x76, 0x8e),
             warning: rgb(0xe0, 0xaf, 0x68),
@@ -132,6 +141,7 @@ pub fn builtin_themes() -> Vec<Theme> {
             accent: rgb(0xcb, 0xa6, 0xf7),
             secondary: rgb(0xf5, 0xc2, 0xe7),
             fg: rgb(0xcd, 0xd6, 0xf4),
+            subdued: rgb(0x9c, 0xa3, 0xbd),
             muted: rgb(0x6c, 0x70, 0x86),
             error: rgb(0xf3, 0x8b, 0xa8),
             warning: rgb(0xfa, 0xb3, 0x87),
@@ -143,6 +153,7 @@ pub fn builtin_themes() -> Vec<Theme> {
             accent: rgb(0x26, 0x8b, 0xd2),
             secondary: rgb(0x2a, 0xa1, 0x98),
             fg: rgb(0x93, 0xa1, 0xa1),
+            subdued: rgb(0x76, 0x88, 0x8b),
             muted: rgb(0x58, 0x6e, 0x75),
             error: rgb(0xdc, 0x32, 0x2f),
             warning: rgb(0xb5, 0x89, 0x00),
@@ -154,6 +165,7 @@ pub fn builtin_themes() -> Vec<Theme> {
             accent: rgb(0x61, 0xaf, 0xef),
             secondary: rgb(0xc6, 0x78, 0xdd),
             fg: rgb(0xab, 0xb2, 0xbf),
+            subdued: rgb(0x84, 0x8b, 0x98),
             muted: rgb(0x5c, 0x63, 0x70),
             error: rgb(0xe0, 0x6c, 0x75),
             warning: rgb(0xe5, 0xc0, 0x7b),
@@ -196,6 +208,10 @@ struct PaletteFile {
     warning: String,
     success: String,
     info: String,
+    /// Optional — defaults to midpoint between `fg` and `muted` so
+    /// older user themes still load.
+    #[serde(default)]
+    subdued: Option<String>,
     /// Optional — defaults to the same color as `muted` so older
     /// user themes (written before `surface` existed) still load.
     #[serde(default)]
@@ -240,7 +256,12 @@ pub fn load_user_themes(dir: &Path) -> (Vec<Theme>, Vec<String>) {
 fn load_theme_file(path: &Path) -> Result<Theme, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let file: ThemeFile = toml::from_str(&text).map_err(|e| e.to_string())?;
+    let fg = parse_color(&file.palette.fg)?;
     let muted = parse_color(&file.palette.muted)?;
+    let subdued = match file.palette.subdued.as_deref() {
+        Some(s) => parse_color(s)?,
+        None => midpoint_color(fg, muted),
+    };
     let surface = match file.palette.surface.as_deref() {
         Some(s) => parse_color(s)?,
         None => muted,
@@ -251,7 +272,8 @@ fn load_theme_file(path: &Path) -> Result<Theme, String> {
         palette: Palette {
             accent: parse_color(&file.palette.accent)?,
             secondary: parse_color(&file.palette.secondary)?,
-            fg: parse_color(&file.palette.fg)?,
+            fg,
+            subdued,
             muted,
             error: parse_color(&file.palette.error)?,
             warning: parse_color(&file.palette.warning)?,
@@ -260,6 +282,19 @@ fn load_theme_file(path: &Path) -> Result<Theme, String> {
             surface,
         },
     })
+}
+
+/// Average two colors component-wise. Used as the default `subdued`
+/// when a user theme omits it.
+fn midpoint_color(a: Color, b: Color) -> Color {
+    match (a, b) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => Color::Rgb(
+            ((r1 as u16 + r2 as u16) / 2) as u8,
+            ((g1 as u16 + g2 as u16) / 2) as u8,
+            ((b1 as u16 + b2 as u16) / 2) as u8,
+        ),
+        _ => a,
+    }
 }
 
 /// Parse `#rrggbb` or `#rgb`. ANSI names (`"red"`, `"cyan"`) are not

@@ -79,12 +79,15 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState, elapsed: crate::anim::F
     // the transcript: keeps retry-on-overflow progress visible without
     // stacking N warns per turn.
     let status_rows: u16 = if state.ephemeral_status.is_some() { 1 } else { 0 };
+    // Visual spacer between transcript and input when there is content.
+    let spacer_rows: u16 = if state.transcript.len() > 1 { 1 } else { 0 };
     let constraints: Vec<Constraint> = if palette_rows > 0 {
         vec![
             Constraint::Length(header_rows),  // header (dynamic)
             Constraint::Min(1),               // transcript (flex)
             Constraint::Length(palette_rows), // slash palette
             Constraint::Length(status_rows),  // ephemeral status
+            Constraint::Length(spacer_rows),  // spacer
             Constraint::Length(input_rows),   // input (dynamic)
             Constraint::Length(footer_rows),  // footer (dynamic)
         ]
@@ -93,6 +96,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState, elapsed: crate::anim::F
             Constraint::Length(header_rows),  // header (dynamic)
             Constraint::Min(1),               // transcript (flex)
             Constraint::Length(status_rows),  // ephemeral status
+            Constraint::Length(spacer_rows),  // spacer
             Constraint::Length(input_rows),   // input (dynamic)
             Constraint::Length(footer_rows),  // footer (dynamic)
         ]
@@ -108,12 +112,14 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState, elapsed: crate::anim::F
     if palette_rows > 0 {
         draw_palette(frame, chunks[2], state, palette);
         draw_status(frame, chunks[3], state, palette);
-        draw_input(frame, chunks[4], state, palette);
-        frame.render_widget(footer_para, chunks[5]);
+        // chunks[4] = spacer (blank)
+        draw_input(frame, chunks[5], state, palette);
+        frame.render_widget(footer_para, chunks[6]);
     } else {
         draw_status(frame, chunks[2], state, palette);
-        draw_input(frame, chunks[3], state, palette);
-        frame.render_widget(footer_para, chunks[4]);
+        // chunks[3] = spacer (blank)
+        draw_input(frame, chunks[4], state, palette);
+        frame.render_widget(footer_para, chunks[5]);
     }
 
     if let Some(overlay) = &state.overlay {
@@ -767,7 +773,9 @@ fn build_footer_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
         "↑↓ history · Tab complete · PgUp/PgDn scroll · End tail · F1 help · F5 thinking · / cmds · Ctrl-C abort · Esc clear/quit",
         Style::default().fg(palette.muted),
     ));
-    Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false })
+    Paragraph::new(Line::from(spans))
+        .alignment(ratatui::layout::Alignment::Right)
+        .wrap(Wrap { trim: false })
 }
 
 /// Braille-dot spinner glyph rotating at ~10 fps.
