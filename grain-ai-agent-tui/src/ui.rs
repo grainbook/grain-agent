@@ -281,6 +281,7 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette:
                     text: summary,
                 },
                 width,
+                Some(block.id()),
                 &mut rendered,
             );
             continue;
@@ -299,12 +300,13 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette:
                     text: header,
                 },
                 width,
+                Some(block.id()),
                 &mut rendered,
             );
         }
         for idx in block.first_line..=block.last_line {
             if let Some(line) = state.transcript.get(idx) {
-                wrap_one_line(line, width, &mut rendered);
+                wrap_one_line(line, width, None, &mut rendered);
             }
         }
     }
@@ -346,9 +348,16 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette:
 /// what the legacy in-line loop did. Extracted so the block-aware
 /// outer loop can reuse it both for raw transcript lines and for
 /// synthetic fold-header / fold-summary lines.
+///
+/// `chrome_for_block` is propagated onto every wrapped fragment so
+/// mouse handlers can recognize **any** sub-row of a chrome line as
+/// "click here toggles the fold". (Most chrome lines fit on one
+/// terminal row, but very wide terminals + long tool names can
+/// still wrap.)
 fn wrap_one_line(
     line: &TranscriptLine,
     width: usize,
+    chrome_for_block: Option<usize>,
     rendered: &mut Vec<crate::app::RenderedRow>,
 ) {
     let prefix = prefix_for_kind(line.kind);
@@ -375,6 +384,7 @@ fn wrap_one_line(
             rendered.push(crate::app::RenderedRow {
                 text: format!("{p}{frag}"),
                 kind: line.kind,
+                chrome_for_block,
             });
         }
     }

@@ -403,6 +403,12 @@ pub struct RenderMetrics {
 pub struct RenderedRow {
     pub text: String,
     pub kind: TranscriptKind,
+    /// `Some(id)` when this row is the **chrome** (collapsed
+    /// summary or expanded header) of a foldable block. Mouse
+    /// handlers consult this to convert a click into a fold
+    /// toggle: click on a chrome row → toggle that block, instead
+    /// of starting a text selection.
+    pub chrome_for_block: Option<usize>,
 }
 
 /// Active text selection inside the transcript. Coordinates are
@@ -1463,6 +1469,27 @@ impl AppState {
             }
             TuiEvent::MouseDown { row, col } => {
                 if let Some(pos) = self.translate_mouse_to_rendered(row, col) {
+                    // Click on a fold-chrome row (the summary or
+                    // header line of a foldable block) toggles
+                    // the block instead of starting a selection.
+                    // The cursor jumps to the clicked block so a
+                    // subsequent Ctrl-J / Ctrl-K resumes from a
+                    // sensible spot.
+                    let chrome_block = self
+                        .rendered_rows
+                        .borrow()
+                        .get(pos.0)
+                        .and_then(|r| r.chrome_for_block);
+                    if let Some(block_id) = chrome_block {
+                        self.transcript_cursor = Some(block_id);
+                        let blocks = build_transcript_blocks(&self.transcript);
+                        if let Some(block) = blocks.iter().find(|b| b.id() == block_id) {
+                            self.toggle_block_fold(block);
+                        }
+                        // Skip selection start — the user is
+                        // clicking to toggle, not to drag-copy.
+                        return Vec::new();
+                    }
                     self.selection = Some(Selection {
                         anchor: pos,
                         active: pos,
@@ -3649,6 +3676,71 @@ mod tests {
     }
 
     #[test]
+    fn mouse_click_on_chrome_row_toggles_fold() {
+        // Seed the transcript with a tool-call block so it has a
+        // chrome row, then fake the post-render state the mouse
+        // path expects: a `rendered_rows` snapshot + a
+        // transcript_area covering the click.
+        let mut s = fresh();
+        s.push(TranscriptKind::ToolCallStart, "→ read".into());
+        s.push(TranscriptKind::ToolCallEnd, "← ok".into());
+        // `fresh()` pushes a Plain boot-banner line as
+        // transcript[0]; the tool-call block lands later. Find it
+        // explicitly instead of assuming `[0]`.
+        let blocks = build_transcript_blocks(&s.transcript);
+        let block_id = blocks
+            .iter()
+            .find(|b| b.kind == BlockKind::ToolCall)
+            .map(|b| b.id())
+            .expect("tool-call block present");
+        s.transcript_area.set(Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 10,
+        });
+        s.rendered_rows.replace(vec![RenderedRow {
+            text: " ▸ tool: read (2 lines)".into(),
+            kind: TranscriptKind::ToolCallStart,
+            chrome_for_block: Some(block_id),
+        }]);
+        let pre_blocks = build_transcript_blocks(&s.transcript);
+        let pre = pre_blocks.iter().find(|b| b.id() == block_id).unwrap();
+        let initial_expanded = s.is_block_expanded(pre);
+        // Click row 0.
+        let _ = s.on_event(TuiEvent::MouseDown { row: 0, col: 5 });
+        let post_blocks = build_transcript_blocks(&s.transcript);
+        let post = post_blocks.iter().find(|b| b.id() == block_id).unwrap();
+        assert_ne!(s.is_block_expanded(post), initial_expanded);
+        // Click should also park the cursor on the clicked block.
+        assert_eq!(s.transcript_cursor, Some(block_id));
+        // And NOT start a selection.
+        assert!(s.selection.is_none());
+    }
+
+    #[test]
+    fn mouse_click_on_body_row_still_starts_selection() {
+        // A click in the **expanded body** of a block (a row with
+        // `chrome_for_block: None`) keeps the legacy drag-to-copy
+        // behavior — fold-click only fires on chrome rows.
+        let mut s = fresh();
+        s.push(TranscriptKind::AssistantText, "some body text".into());
+        s.transcript_area.set(Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 10,
+        });
+        s.rendered_rows.replace(vec![RenderedRow {
+            text: "  some body text".into(),
+            kind: TranscriptKind::AssistantText,
+            chrome_for_block: None,
+        }]);
+        let _ = s.on_event(TuiEvent::MouseDown { row: 0, col: 5 });
+        assert!(s.selection.is_some());
+    }
+
+    #[test]
     fn text_delta_appends_to_last_assistant_line() {
         let mut s = fresh();
         use grain_agent_core::{AssistantMessage, StopReason, Usage};
@@ -3835,6 +3927,7 @@ mod tests {
             .map(|(t, k)| RenderedRow {
                 text: (*t).to_string(),
                 kind: *k,
+                chrome_for_block: None,
             })
             .collect()
     }
