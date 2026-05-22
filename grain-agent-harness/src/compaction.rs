@@ -42,9 +42,11 @@ use grain_agent_core::{
     LlmContext, LlmStream, Message, Model, PrepareNextTurnContext, PrepareNextTurnFn,
     StreamOptions, TextContent, UserContent, UserMessage,
 };
+use grain_llm_models::Registry;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+use crate::context_guard::{ActiveModelHandle, TokenEstimator};
 use crate::messages::compaction_summary_message;
 
 /// Default amount of recent transcript to leave untouched. Compaction
@@ -103,6 +105,175 @@ impl CompactionPolicy for MessageCountPolicy {
         if prefix_len < 2 {
             return None;
         }
+        Some(prefix_len)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Token-budget compaction (ports compaction.ts shouldCompact + cut logic)
+// ---------------------------------------------------------------------------
+
+/// Settings controlling when and how token-budget compaction fires.
+/// Mirrors `DEFAULT_COMPACTION_SETTINGS` from the TS reference.
+#[derive(Debug, Clone)]
+pub struct CompactionSettings {
+    pub enabled: bool,
+    /// Fixed token threshold. Values ≤ 0 → use fallback formula.
+    pub threshold_tokens: i64,
+    /// Percentage of context window. Valid range 1–99; values outside
+    /// that range (including the default -1) → use fallback formula.
+    pub threshold_percent: i32,
+    /// Tokens reserved for the model's response in the fallback formula.
+    pub reserve_tokens: u64,
+    /// Minimum number of recent tokens to keep untouched when choosing
+    /// the compaction cut boundary.
+    pub keep_recent_tokens: u64,
+}
+
+/// Defaults matching the TS `DEFAULT_COMPACTION_SETTINGS`.
+pub const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = CompactionSettings {
+    enabled: true,
+    threshold_tokens: -1,
+    threshold_percent: -1,
+    reserve_tokens: 16384,
+    keep_recent_tokens: 20000,
+};
+
+/// Resolve the effective threshold in tokens above which compaction fires.
+///
+/// Priority:
+/// 1. `settings.threshold_tokens > 0` → clamp to `[1, ctx_window - 1]`
+/// 2. `settings.threshold_percent` in 1..=99 → `ctx_window * pct / 100`
+/// 3. Fallback → `ctx_window - max(15% * ctx_window, reserve_tokens)`
+pub fn resolve_threshold_tokens(ctx_window: u64, settings: &CompactionSettings) -> u64 {
+    if settings.threshold_tokens > 0 {
+        let t = settings.threshold_tokens as u64;
+        return t.clamp(1, ctx_window.saturating_sub(1).max(1));
+    }
+    if (1..=99).contains(&settings.threshold_percent) {
+        let pct = settings.threshold_percent as u64;
+        let t = ctx_window * pct / 100;
+        // Clamp to [1% of window, 99% of window]
+        let lo = ctx_window / 100;
+        let hi = ctx_window * 99 / 100;
+        return t.clamp(lo.max(1), hi.max(1));
+    }
+    // Fallback: ctx_window - max(15% * ctx_window, reserve_tokens)
+    let fifteen_pct = ctx_window * 15 / 100;
+    let reserve = fifteen_pct.max(settings.reserve_tokens);
+    ctx_window.saturating_sub(reserve)
+}
+
+/// Returns `true` when the transcript's estimated token count exceeds
+/// the compaction threshold for the given context window.
+pub fn should_compact(ctx_tokens: u64, ctx_window: u64, settings: &CompactionSettings) -> bool {
+    if !settings.enabled || ctx_window == 0 {
+        return false;
+    }
+    ctx_tokens > resolve_threshold_tokens(ctx_window, settings)
+}
+
+/// Token-budget compaction policy: uses the model registry to look up
+/// the active model's context window and decides whether to compact
+/// based on estimated token counts.
+///
+/// Shares the same [`ActiveModelHandle`] as [`crate::ContextGuard`] so
+/// a mid-session model switch is immediately visible.
+pub struct TokenBudgetPolicy {
+    registry: Arc<Registry>,
+    model_handle: ActiveModelHandle,
+    settings: CompactionSettings,
+    estimator: TokenEstimator,
+}
+
+impl TokenBudgetPolicy {
+    pub fn new(
+        registry: Arc<Registry>,
+        model_handle: ActiveModelHandle,
+        settings: CompactionSettings,
+        estimator: TokenEstimator,
+    ) -> Self {
+        TokenBudgetPolicy {
+            registry,
+            model_handle,
+            settings,
+            estimator,
+        }
+    }
+}
+
+impl CompactionPolicy for TokenBudgetPolicy {
+    fn evaluate(&self, messages: &[AgentMessage]) -> Option<usize> {
+        // 1. Look up current model's context window.
+        let model_id = self.model_handle.read().ok()?.clone();
+        let ctx_window = self.registry.lookup(&model_id)?.context_window;
+        if ctx_window == 0 {
+            return None;
+        }
+
+        // 2. Estimate total tokens.
+        let ctx_tokens = self.estimator.estimate_messages(messages);
+        if !should_compact(ctx_tokens, ctx_window, &self.settings) {
+            return None;
+        }
+
+        // 3. Walk backward from tail accumulating tokens until we've
+        //    kept at least `keep_recent_tokens`.
+        let keep_recent = self.settings.keep_recent_tokens;
+        let per_msg: Vec<u64> = messages
+            .iter()
+            .map(|m| self.estimator.estimate_message(m))
+            .collect();
+        let mut tail_tokens: u64 = 0;
+        let mut keep_start = messages.len(); // index of first kept message
+        for i in (0..messages.len()).rev() {
+            tail_tokens += per_msg[i];
+            keep_start = i;
+            if tail_tokens >= keep_recent {
+                break;
+            }
+        }
+
+        // 4. Snap forward to a safe cut boundary:
+        //    - The cut point must NOT be a ToolResult (would orphan it
+        //      from its preceding assistant ToolCall).
+        //    - The message immediately before the kept tail must NOT be
+        //      an Assistant message with a ToolCall (the ToolResult for
+        //      that call would be in the kept tail but the call itself
+        //      would be in the summarized prefix, orphaning the pair).
+        while keep_start < messages.len() {
+            // Never cut at a ToolResult boundary.
+            if matches!(
+                &messages[keep_start],
+                AgentMessage::Standard(Message::ToolResult(_))
+            ) {
+                keep_start += 1;
+                continue;
+            }
+            // Check the message just before keep_start: if it's an
+            // assistant message with tool calls, we'd orphan them.
+            if keep_start > 0
+                && let AgentMessage::Standard(Message::Assistant(a)) = &messages[keep_start - 1]
+            {
+                let has_tool_call = a
+                    .content
+                    .iter()
+                    .any(|c| matches!(c, AssistantContent::ToolCall(_)));
+                if has_tool_call {
+                    keep_start += 1;
+                    continue;
+                }
+            }
+            break;
+        }
+
+        let prefix_len = keep_start;
+
+        // 5. Refuse degenerate compactions.
+        if prefix_len < 2 {
+            return None;
+        }
+
         Some(prefix_len)
     }
 }
@@ -500,5 +671,267 @@ mod tests {
         let small = vec![user("hi")];
         let large = vec![user(&"x".repeat(400))];
         assert!(approximate_token_count(&large) > approximate_token_count(&small));
+    }
+
+    // --- TokenBudgetPolicy + threshold formula tests -------------------------
+
+    #[test]
+    fn resolve_threshold_fixed_tokens() {
+        let s = CompactionSettings {
+            threshold_tokens: 5000,
+            ..DEFAULT_COMPACTION_SETTINGS
+        };
+        assert_eq!(resolve_threshold_tokens(10000, &s), 5000);
+    }
+
+    #[test]
+    fn resolve_threshold_fixed_tokens_clamped_to_window() {
+        let s = CompactionSettings {
+            threshold_tokens: 99999,
+            ..DEFAULT_COMPACTION_SETTINGS
+        };
+        // ctx_window = 10000, threshold = 99999 → clamped to 9999
+        assert_eq!(resolve_threshold_tokens(10000, &s), 9999);
+    }
+
+    #[test]
+    fn resolve_threshold_percent() {
+        let s = CompactionSettings {
+            threshold_percent: 80,
+            ..DEFAULT_COMPACTION_SETTINGS
+        };
+        // 80% of 100_000 = 80_000
+        assert_eq!(resolve_threshold_tokens(100_000, &s), 80_000);
+    }
+
+    #[test]
+    fn resolve_threshold_fallback_uses_reserve() {
+        let s = DEFAULT_COMPACTION_SETTINGS;
+        // ctx_window = 100_000
+        // 15% = 15_000, reserve = 16384 → max = 16384
+        // threshold = 100_000 - 16384 = 83616
+        assert_eq!(resolve_threshold_tokens(100_000, &s), 83616);
+    }
+
+    #[test]
+    fn resolve_threshold_fallback_fifteen_pct_wins_over_reserve() {
+        let s = DEFAULT_COMPACTION_SETTINGS;
+        // ctx_window = 200_000
+        // 15% = 30_000, reserve = 16384 → max = 30_000
+        // threshold = 200_000 - 30_000 = 170_000
+        assert_eq!(resolve_threshold_tokens(200_000, &s), 170_000);
+    }
+
+    #[test]
+    fn should_compact_disabled() {
+        let s = CompactionSettings {
+            enabled: false,
+            ..DEFAULT_COMPACTION_SETTINGS
+        };
+        assert!(!should_compact(999_999, 100_000, &s));
+    }
+
+    #[test]
+    fn should_compact_zero_window() {
+        assert!(!should_compact(50_000, 0, &DEFAULT_COMPACTION_SETTINGS));
+    }
+
+    #[test]
+    fn should_compact_below_threshold() {
+        // Default threshold for 100k window = 83616
+        assert!(!should_compact(80_000, 100_000, &DEFAULT_COMPACTION_SETTINGS));
+    }
+
+    #[test]
+    fn should_compact_above_threshold() {
+        assert!(should_compact(90_000, 100_000, &DEFAULT_COMPACTION_SETTINGS));
+    }
+
+    // Helpers for TokenBudgetPolicy tests
+    use std::sync::RwLock;
+
+    fn make_test_registry(
+        models: Vec<grain_llm_models::descriptor::ModelDescriptor>,
+    ) -> Arc<Registry> {
+        Arc::new(Registry::from_descriptors(models).unwrap())
+    }
+
+    fn test_model_descriptor(
+        id: &str,
+        context_window: u64,
+    ) -> grain_llm_models::descriptor::ModelDescriptor {
+        use grain_llm_models::descriptor::*;
+        ModelDescriptor {
+            id: id.into(),
+            name: id.into(),
+            provider: ProviderId::Other { id: "test".into() },
+            api: ApiKind::OpenAi,
+            context_window,
+            max_output_tokens: 4096,
+            cost: grain_agent_core::Cost::default(),
+            capabilities: Capabilities::default(),
+            thinking: ThinkingProfile::default(),
+            extra: serde_json::Value::Null,
+        }
+    }
+
+    fn tool_call_assistant(text: &str, tool_call_id: &str, tool_name: &str) -> AgentMessage {
+        AgentMessage::assistant(AssistantMessage {
+            content: vec![
+                AssistantContent::Text(TextContent { text: text.into() }),
+                AssistantContent::ToolCall(grain_agent_core::ToolCall {
+                    id: tool_call_id.into(),
+                    name: tool_name.into(),
+                    arguments: serde_json::json!({}),
+                }),
+            ],
+            api: "test".into(),
+            provider: "test".into(),
+            model: "test".into(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+        })
+    }
+
+    fn tool_result(tool_call_id: &str, text: &str) -> AgentMessage {
+        AgentMessage::tool_result(grain_agent_core::ToolResultMessage {
+            tool_call_id: tool_call_id.into(),
+            tool_name: "test_tool".into(),
+            content: vec![UserContent::Text(TextContent { text: text.into() })],
+            details: serde_json::Value::Null,
+            is_error: false,
+            timestamp: 0,
+        })
+    }
+
+    #[test]
+    fn token_budget_policy_no_compact_below_threshold() {
+        let registry = make_test_registry(vec![test_model_descriptor("test/big", 1_000_000)]);
+        let handle: ActiveModelHandle = Arc::new(RwLock::new("test/big".into()));
+        let policy = TokenBudgetPolicy::new(
+            registry,
+            handle,
+            DEFAULT_COMPACTION_SETTINGS,
+            TokenEstimator::approximate(),
+        );
+        // Small transcript → well below 1M window threshold.
+        let msgs: Vec<AgentMessage> = (0..5).map(|i| user(&format!("u{i}"))).collect();
+        assert!(policy.evaluate(&msgs).is_none());
+    }
+
+    #[test]
+    fn token_budget_policy_compacts_when_above_threshold() {
+        // Small window model (2000 tokens), transcript that exceeds it.
+        let registry = make_test_registry(vec![test_model_descriptor("test/tiny", 2000)]);
+        let handle: ActiveModelHandle = Arc::new(RwLock::new("test/tiny".into()));
+        let policy = TokenBudgetPolicy::new(
+            registry,
+            handle,
+            CompactionSettings {
+                keep_recent_tokens: 100,
+                reserve_tokens: 200,
+                ..DEFAULT_COMPACTION_SETTINGS
+            },
+            TokenEstimator::approximate(),
+        );
+        // Each message ~250 tokens (1000 chars / 4). 10 messages → ~2500 tokens.
+        // Threshold ≈ 2000 - max(300, 200) = 1700 → 2500 > 1700, should compact.
+        let msgs: Vec<AgentMessage> = (0..10)
+            .map(|i| user(&format!("msg{i}: {}", "x".repeat(1000))))
+            .collect();
+        let prefix_len = policy.evaluate(&msgs);
+        assert!(prefix_len.is_some(), "should compact");
+        let n = prefix_len.unwrap();
+        assert!(n >= 2, "prefix_len must be >= 2");
+        assert!(n < msgs.len(), "must keep some tail");
+    }
+
+    #[test]
+    fn token_budget_policy_never_cuts_mid_tool_pair() {
+        // Transcript: [user, assistant+toolcall, toolresult, user]
+        // The policy should never split between assistant+toolcall and toolresult.
+        let registry = make_test_registry(vec![test_model_descriptor("test/tiny", 500)]);
+        let handle: ActiveModelHandle = Arc::new(RwLock::new("test/tiny".into()));
+        let policy = TokenBudgetPolicy::new(
+            registry,
+            handle,
+            CompactionSettings {
+                keep_recent_tokens: 10,
+                reserve_tokens: 50,
+                ..DEFAULT_COMPACTION_SETTINGS
+            },
+            TokenEstimator::approximate(),
+        );
+        let msgs = vec![
+            user(&"x".repeat(800)),             // 0: ~200 tokens
+            tool_call_assistant("think", "tc1", "read_file"), // 1: assistant+toolcall
+            tool_result("tc1", &"y".repeat(400)), // 2: tool result
+            user("follow up"),                    // 3: user
+        ];
+        if let Some(prefix_len) = policy.evaluate(&msgs) {
+            // The cut must NOT land at index 2 (tool result) or leave
+            // index 1 (assistant+toolcall) as the last message before
+            // the kept tail. Valid cuts: 0 (degenerate, rejected),
+            // or >= 3 (after the tool result).
+            assert!(
+                prefix_len != 2,
+                "must not cut at tool result boundary"
+            );
+            // If prefix_len == 1, the preceding message (index 0) is a
+            // user message, which is fine. If prefix_len == 3, the
+            // preceding message (index 2) is a tool result which is
+            // fine (the assistant+toolcall at 1 is in the prefix and
+            // will be summarized together with its result).
+            if prefix_len > 1 {
+                // Verify the message just before the cut isn't an
+                // assistant with tool calls (would orphan them).
+                let prev = &msgs[prefix_len - 1];
+                if let AgentMessage::Standard(Message::Assistant(a)) = prev {
+                    let has_tc = a.content.iter().any(|c| matches!(c, AssistantContent::ToolCall(_)));
+                    assert!(!has_tc, "must not leave orphaned tool call at boundary");
+                }
+            }
+        }
+        // If None, the policy decided not to compact at all — also valid.
+    }
+
+    #[test]
+    fn token_budget_policy_refuses_degenerate() {
+        let registry = make_test_registry(vec![test_model_descriptor("test/tiny", 200)]);
+        let handle: ActiveModelHandle = Arc::new(RwLock::new("test/tiny".into()));
+        let policy = TokenBudgetPolicy::new(
+            registry,
+            handle,
+            CompactionSettings {
+                keep_recent_tokens: 10,
+                reserve_tokens: 20,
+                ..DEFAULT_COMPACTION_SETTINGS
+            },
+            TokenEstimator::approximate(),
+        );
+        // Only 2 messages — even if over threshold, prefix_len would be < 2.
+        let msgs = vec![user(&"x".repeat(400)), user(&"y".repeat(400))];
+        // Either None or Some(n >= 2).
+        if let Some(n) = policy.evaluate(&msgs) {
+            assert!(n >= 2);
+        }
+    }
+
+    #[test]
+    fn token_budget_policy_unknown_model_returns_none() {
+        let registry = make_test_registry(vec![test_model_descriptor("test/known", 100_000)]);
+        let handle: ActiveModelHandle = Arc::new(RwLock::new("test/unknown".into()));
+        let policy = TokenBudgetPolicy::new(
+            registry,
+            handle,
+            DEFAULT_COMPACTION_SETTINGS,
+            TokenEstimator::approximate(),
+        );
+        let msgs: Vec<AgentMessage> = (0..20)
+            .map(|i| user(&format!("msg{i}: {}", "x".repeat(4000))))
+            .collect();
+        assert!(policy.evaluate(&msgs).is_none());
     }
 }

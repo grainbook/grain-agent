@@ -38,9 +38,10 @@ pub use agent_harness::{
 };
 
 pub use compaction::{
-    CompactionError, CompactionPolicy, DEFAULT_COMPACTION_PROMPT, DEFAULT_KEEP_RECENT,
-    DEFAULT_MESSAGE_THRESHOLD, MessageCountPolicy, compact_transcript,
-    compaction_prepare_next_turn,
+    CompactionError, CompactionPolicy, CompactionSettings, DEFAULT_COMPACTION_PROMPT,
+    DEFAULT_COMPACTION_SETTINGS, DEFAULT_KEEP_RECENT, DEFAULT_MESSAGE_THRESHOLD,
+    MessageCountPolicy, TokenBudgetPolicy, compact_transcript, compaction_prepare_next_turn,
+    resolve_threshold_tokens, should_compact,
 };
 pub use context_guard::{ActiveModelHandle, ContextGuard, ContextGuardPolicy, TokenEstimator};
 pub use messages::{
