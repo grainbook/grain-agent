@@ -38,6 +38,7 @@ pub enum StreamError {
 }
 
 impl StreamError {
+    /// Convenience constructor wrapping a message into [`StreamError::Other`].
     pub fn msg(s: impl Into<String>) -> Self {
         StreamError::Other(s.into())
     }

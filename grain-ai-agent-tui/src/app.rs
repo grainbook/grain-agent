@@ -114,6 +114,16 @@ pub enum Command {
     /// returns the list via [`TuiEvent::SessionsListed`], which
     /// populates the `/resume` overlay.
     ReturnSessions,
+    /// Tear down the current harness and re-build it on top of the
+    /// JSONL transcript at this path. Worker re-installs all
+    /// subscriptions (event fan-out, telemetry, session writer) and
+    /// emits a [`TuiEvent::Info`] when the swap completes.
+    ResumeSession(std::path::PathBuf),
+    /// Run a compaction pass on the harness's session: summarize all
+    /// but the last `keep_recent` messages. Worker emits a
+    /// [`TuiEvent::Info`] on success or [`TuiEvent::AgentWorkerError`]
+    /// on failure (e.g. empty transcript).
+    Compact { keep_recent: usize },
     Quit,
 }
 
@@ -257,6 +267,10 @@ pub const SLASH_CATALOG: &[CommandCatalogItem] = &[
     CommandCatalogItem {
         trigger: "/resume",
         description: "open the session-resume picker (past transcripts)",
+    },
+    CommandCatalogItem {
+        trigger: "/compact",
+        description: "summarize transcript prefix (keeps last 4 turns)",
     },
     CommandCatalogItem {
         trigger: "/exit",
@@ -822,6 +836,10 @@ impl AppState {
                 }
                 Vec::new()
             }
+            TuiEvent::Info(text) => {
+                self.push(TranscriptKind::Info, text);
+                Vec::new()
+            }
             TuiEvent::ScrollUp { amount } => {
                 // Wheel routes to the overlay when one is open and
                 // scrollable; otherwise to the transcript.
@@ -1328,14 +1346,13 @@ impl AppState {
             }
             KeyCode::Enter => {
                 if let Some(sel) = sessions.get(*focused) {
-                    let path = sel.path.display().to_string();
+                    let path = sel.path.clone();
                     self.push(
                         TranscriptKind::Info,
-                        format!(
-                            "(to resume: relaunch with `grain-tui --session {path}` \
-                             — in-place /resume coming in Phase 4)"
-                        ),
+                        format!("(resuming session: {})", path.display()),
                     );
+                    self.overlay = None;
+                    return vec![Command::ResumeSession(path)];
                 }
                 self.overlay = None;
             }
@@ -1506,6 +1523,16 @@ impl AppState {
                 }
                 self.overlay = Some(Overlay::Log { scroll: 0 });
                 Vec::new()
+            }
+            "compact" => {
+                // Keep last 4 messages (≈2 turns) — sane default that
+                // matches Claude Code's /compact behavior. Power users
+                // can extend with `/compact <n>` later.
+                self.push(
+                    TranscriptKind::Info,
+                    "(compacting transcript — keeping last 4 messages)".into(),
+                );
+                vec![Command::Compact { keep_recent: 4 }]
             }
             "exit" | "quit" | "q" => {
                 self.should_quit = true;
@@ -2852,19 +2879,22 @@ mod tests {
     }
 
     #[test]
-    fn resume_picker_enter_pushes_relaunch_hint_and_closes() {
+    fn resume_picker_enter_dispatches_resume_command_and_closes() {
         let mut s = fresh();
+        let meta = fake_session_meta("xyz", 10);
+        let path = meta.path.clone();
         s.overlay = Some(Overlay::SessionResume {
             focused: 0,
-            sessions: vec![fake_session_meta("xyz", 10)],
+            sessions: vec![meta],
         });
-        s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
         assert!(s.overlay.is_none());
+        assert_eq!(cmds, vec![Command::ResumeSession(path)]);
         assert!(
             s.transcript
                 .iter()
                 .any(|l| l.kind == TranscriptKind::Info
-                    && l.text.contains("--session")
+                    && l.text.contains("resuming session")
                     && l.text.contains("xyz.jsonl"))
         );
     }
@@ -2877,6 +2907,34 @@ mod tests {
     #[test]
     fn slash_log_appears_in_catalog() {
         assert!(SLASH_CATALOG.iter().any(|c| c.trigger == "/log"));
+    }
+
+    #[test]
+    fn slash_compact_appears_in_catalog() {
+        assert!(SLASH_CATALOG.iter().any(|c| c.trigger == "/compact"));
+    }
+
+    #[test]
+    fn slash_compact_dispatches_compact_command() {
+        let mut s = fresh();
+        s.input = "/compact".into();
+        s.cursor = s.input.len();
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert!(matches!(
+            cmds.as_slice(),
+            [Command::Compact { keep_recent: 4 }]
+        ));
+    }
+
+    #[test]
+    fn tui_info_event_pushes_info_transcript_line() {
+        let mut s = fresh();
+        s.on_event(TuiEvent::Info("(resumed: foo.jsonl)".into()));
+        assert!(
+            s.transcript
+                .iter()
+                .any(|l| l.kind == TranscriptKind::Info && l.text.contains("resumed"))
+        );
     }
 
     #[test]

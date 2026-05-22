@@ -14,10 +14,13 @@ pub struct Skill {
     pub description: String,
     pub file_path: String,                  // absolute SKILL.md path the model sees
     pub disable_model_invocation: bool,     // true → omit from the rendered block
+    pub body: String,                       // full content after the frontmatter `---` fence
 }
 ```
 
-Serialized as `name` / `description` / `filePath` / `disableModelInvocation` (camelCase).
+Serialized as `name` / `description` / `filePath` / `disableModelInvocation` / `body` (camelCase).
+
+`body` is the entire text after the second `---` fence in the SKILL.md file. It's used by TUI slash-palette skill injection (Enter on a skill pastes its body into the input) and by any future "read skill on demand" mechanism. The system-prompt renderer ignores `body` — only `name`, `description`, `file_path`, and `disable_model_invocation` appear in the `<available_skills>` block.
 
 ## `format_skills_for_system_prompt`
 
@@ -56,12 +59,14 @@ let skills = vec![
         description: "Runs shell commands".into(),
         file_path: "/skills/bash/SKILL.md".into(),
         disable_model_invocation: false,
+        body: String::new(),  // system prompt renderer ignores this field
     },
     Skill {
         name: "Internal".into(),
         description: "Internal-only helper".into(),
         file_path: "/skills/internal/SKILL.md".into(),
-        disable_model_invocation: true,  // omitted from prompt
+        disable_model_invocation: true,
+        body: String::new(),
     },
 ];
 

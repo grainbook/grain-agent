@@ -21,6 +21,8 @@ use crate::messages::{branch_summary_message, compaction_summary_message};
 // IDs / timestamps
 // ---------------------------------------------------------------------------
 
+/// Generate a sortable, time-based UUIDv7 string. Used as the default
+/// session / entry id throughout the session tree.
 pub fn uuidv7() -> String {
     uuid::Uuid::now_v7().to_string()
 }
@@ -259,30 +261,39 @@ pub struct Session {
 }
 
 impl Session {
+    /// Wrap a shared storage backend. Cheap to clone — all copies
+    /// share the same underlying storage.
     pub fn new(storage: Arc<dyn SessionStorage>) -> Self {
         Session { storage }
     }
 
+    /// Access the underlying storage.
     pub fn storage(&self) -> &Arc<dyn SessionStorage> {
         &self.storage
     }
 
+    /// Return session-level metadata (id, creation time, extra).
     pub async fn metadata(&self) -> SessionMetadata {
         self.storage.get_metadata().await
     }
 
+    /// The current leaf entry id, or `None` for an empty session.
     pub async fn leaf_id(&self) -> Option<String> {
         self.storage.get_leaf_id().await
     }
 
+    /// Look up a single entry by id.
     pub async fn entry(&self, id: &str) -> Option<SessionTreeEntry> {
         self.storage.get_entry(id).await
     }
 
+    /// All entries in the session (unordered).
     pub async fn entries(&self) -> Vec<SessionTreeEntry> {
         self.storage.get_entries().await
     }
 
+    /// Walk the path from `from_id` (or the current leaf) to the root,
+    /// returning entries in chronological order.
     pub async fn branch(&self, from_id: Option<&str>) -> Vec<SessionTreeEntry> {
         if let Some(id) = from_id {
             self.storage.get_path_to_root(Some(id)).await
@@ -292,14 +303,19 @@ impl Session {
         }
     }
 
+    /// Build the agent-facing context from the current branch:
+    /// turn the ordered entry chain into `Vec<AgentMessage>` via
+    /// [`build_session_context`].
     pub async fn build_context(&self) -> SessionContext {
         build_session_context(&self.branch(None).await)
     }
 
+    /// The human-readable label for an entry, if one was set.
     pub async fn label(&self, id: &str) -> Option<String> {
         self.storage.get_label(id).await
     }
 
+    /// The last `session_info` name saved, or `None` if never set.
     pub async fn session_name(&self) -> Option<String> {
         let entries = self.storage.find_entries("session_info").await;
         let last = entries.into_iter().next_back();
@@ -329,11 +345,17 @@ impl Session {
         Ok(entry)
     }
 
+    /// Append a message to the session tree. Returns the new entry id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError`] when the underlying storage write fails.
     pub async fn append_message(&self, message: AgentMessage) -> Result<String, SessionError> {
         let entry = self.next_entry(SessionTreeEntryKind::Message { message }).await?;
         Ok(entry.id)
     }
 
+    /// Record a thinking-level change in the session tree.
     pub async fn append_thinking_level_change(
         &self,
         thinking_level: impl Into<String>,
@@ -346,6 +368,7 @@ impl Session {
         Ok(entry.id)
     }
 
+    /// Record a model change (provider + model id) in the session tree.
     pub async fn append_model_change(
         &self,
         provider: impl Into<String>,
@@ -360,6 +383,7 @@ impl Session {
         Ok(entry.id)
     }
 
+    /// Record a compaction event: which entries were dropped and why.
     pub async fn append_compaction(
         &self,
         summary: impl Into<String>,
@@ -380,6 +404,7 @@ impl Session {
         Ok(entry.id)
     }
 
+    /// Append an opaque custom entry to the session tree.
     pub async fn append_custom(
         &self,
         custom_type: impl Into<String>,
@@ -394,6 +419,7 @@ impl Session {
         Ok(entry.id)
     }
 
+    /// Append a custom message entry (displayable in transcript UIs).
     pub async fn append_custom_message(
         &self,
         custom_type: impl Into<String>,
@@ -412,6 +438,7 @@ impl Session {
         Ok(entry.id)
     }
 
+    /// Attach a human-readable label to an existing entry.
     pub async fn append_label(
         &self,
         target_id: impl Into<String>,
@@ -427,6 +454,7 @@ impl Session {
         Ok(entry.id)
     }
 
+    /// Set the session display name (persisted as a `session_info` entry).
     pub async fn append_session_name(&self, name: impl Into<String>) -> Result<String, SessionError> {
         let name = name.into().trim().to_string();
         let entry = self

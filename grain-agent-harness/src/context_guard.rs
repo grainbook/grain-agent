@@ -174,16 +174,20 @@ impl ContextGuard {
         }
     }
 
+    /// Set the guard policy (default: [`ContextGuardPolicy::TruncateHead`]).
     pub fn with_policy(mut self, policy: ContextGuardPolicy) -> Self {
         self.policy = policy;
         self
     }
 
+    /// Set the token estimator (default: [`TokenEstimator::approximate()`]).
     pub fn with_estimator(mut self, estimator: TokenEstimator) -> Self {
         self.estimator = estimator;
         self
     }
 
+    /// Override headroom tokens reserved for the assistant response.
+    /// Default is 1024.
     pub fn with_headroom_tokens(mut self, n: u64) -> Self {
         self.headroom_tokens = n;
         self

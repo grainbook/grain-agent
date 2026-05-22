@@ -1,19 +1,31 @@
-//! Tokio task that owns the [`grain_agent_core::Agent`] and acts as the
-//! bridge between UI [`Command`]s and [`TuiEvent`]s.
+//! Tokio task that owns the [`grain_agent_harness::AgentHarness`] and
+//! acts as the bridge between UI [`Command`]s and [`TuiEvent`]s.
 //!
 //! Construction mirrors `grain-ai-agent-headless::cli::run`: build a
 //! Workspace, Registry, GenaiStream, tools per CLI flags, install the
 //! context guard, subscribe a telemetry/session writer if requested,
 //! then loop on commands.
 //!
-//! This module owns the only `Agent`. The UI thread can only address it
-//! through the [`mpsc`] channels returned by [`spawn`].
+//! This module owns the only `AgentHarness`. The UI thread can only
+//! address it through the [`mpsc`] channels returned by [`spawn`].
+//!
+//! `/resume` swaps the harness in-place by rebuilding it on top of a
+//! different session — the [`HarnessBuilder`] captures the long-lived
+//! ingredients (model, tools, hooks, etc.) so each rebuild only has
+//! to feed in a fresh transcript.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use grain_agent_core::{Agent, AgentEvent, AgentMessage, AgentOptions, Message};
-use grain_agent_harness::context_guard::{ContextGuard, ContextGuardPolicy};
+use grain_agent_core::{
+    AgentEvent, AgentMessage, AgentTool, BeforeToolCallFn, ConvertToLlmFn, Message, Model,
+    PrepareNextTurnFn, StreamFn, TransformContextFn,
+};
+use grain_agent_harness::{
+    AgentHarness, AgentHarnessOptions, InMemorySessionStorage, Session, SessionMetadata,
+    SystemPrompt,
+    context_guard::{ContextGuard, ContextGuardPolicy},
+};
 use grain_ai_agent_headless::{
     SessionWriter, TelemetrySink, Workspace, coding_agent_system_prompt, coding_bash_tools,
     coding_read_tools, coding_web_tools, coding_write_tools, find_skills, load_messages,
@@ -162,8 +174,106 @@ pub struct Worker {
     pub join: tokio::task::JoinHandle<()>,
 }
 
+/// Captures the long-lived ingredients for re-building an
+/// [`AgentHarness`] across `/resume` swaps. Hooks / system prompt /
+/// tool catalog / streaming endpoint don't change once the worker
+/// boots — only the underlying session does.
+struct HarnessBuilder {
+    model: Model,
+    stream: StreamFn,
+    system_prompt: String,
+    tools: Vec<Arc<dyn AgentTool>>,
+    transform_context: TransformContextFn,
+    before_tool_call: Option<BeforeToolCallFn>,
+    prepare_next_turn: Option<PrepareNextTurnFn>,
+    convert_to_llm: Option<ConvertToLlmFn>,
+}
+
+impl HarnessBuilder {
+    /// Build a fresh harness backed by an in-memory session seeded
+    /// with `prior_messages`. The harness mirrors every finalized
+    /// message back into the session (used by `compact()` and any
+    /// future branch / fork logic); on-disk JSONL persistence stays
+    /// with the separate `SessionWriter` subscription installed in
+    /// [`install_subscriptions`].
+    async fn build(&self, prior_messages: Vec<AgentMessage>) -> Arc<AgentHarness> {
+        let session = Session::new(Arc::new(InMemorySessionStorage::new(
+            SessionMetadata::new(),
+        )));
+        for msg in prior_messages {
+            if let Err(e) = session.append_message(msg).await {
+                eprintln!("[warn] seed session message failed: {e}");
+            }
+        }
+        let mut opts = AgentHarnessOptions::new(
+            session,
+            self.model.clone(),
+            self.stream.clone(),
+        );
+        opts.system_prompt = SystemPrompt::Static(self.system_prompt.clone());
+        opts.tools = self.tools.clone();
+        opts.transform_context = Some(self.transform_context.clone());
+        opts.before_tool_call = self.before_tool_call.clone();
+        opts.prepare_next_turn = self.prepare_next_turn.clone();
+        opts.convert_to_llm = self.convert_to_llm.clone();
+        Arc::new(AgentHarness::new(opts).await)
+    }
+}
+
+/// Fan the harness's inner-`Agent` events into the TUI's mpsc channel
+/// plus (optionally) a telemetry sink and an on-disk session writer.
+/// Called once at startup and again on every `/resume` swap.
+///
+/// The session-writer subscription duplicates what the harness already
+/// mirrors into its in-memory session — that's deliberate: harness
+/// state powers branch / compaction logic, while the flat-file JSONL
+/// on disk is what `/resume`'s discovery scan reads.
+async fn install_subscriptions(
+    harness: &Arc<AgentHarness>,
+    evt_tx: &mpsc::UnboundedSender<TuiEvent>,
+    telemetry_sink: Option<Arc<TelemetrySink>>,
+    session_writer: Option<Arc<SessionWriter>>,
+) {
+    let fan_tx = evt_tx.clone();
+    harness
+        .agent()
+        .subscribe(Arc::new(move |event, _signal| {
+            let tx = fan_tx.clone();
+            Box::pin(async move {
+                let _ = tx.send(TuiEvent::Agent(event));
+            })
+        }))
+        .await;
+
+    if let Some(sink) = telemetry_sink {
+        harness
+            .agent()
+            .subscribe(Arc::new(move |event, _signal| {
+                let s = sink.clone();
+                Box::pin(async move {
+                    s.record(&event);
+                })
+            }))
+            .await;
+    }
+
+    if let Some(writer) = session_writer {
+        harness
+            .agent()
+            .subscribe(Arc::new(move |event, _signal| {
+                let w = writer.clone();
+                Box::pin(async move {
+                    if let AgentEvent::MessageEnd { message } = event {
+                        let _ = w.append(&message);
+                    }
+                })
+            }))
+            .await;
+    }
+}
+
 /// Spawn the agent worker. Returns a [`Worker`] bundle on success.
-pub fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
+pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // --- Workspace + registry ---------------------------------------------
     let workspace = Arc::new(
         Workspace::new(&cfg.workspace_root)
@@ -236,18 +346,10 @@ pub fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     let system_prompt = pinned.to_string_owned();
 
     // --- Session auto-create + restore -------------------------------------
-    // Resolve the sessions directory once — used for both
-    // auto-create on startup and for `/resume`'s `list_sessions` scan
-    // in the command loop.
     let sessions_dir = cfg
         .sessions_dir
         .clone()
         .unwrap_or_else(|| workspace.root().join(".grain").join("sessions"));
-    // When `--session` isn't given, mint a fresh `<uuidv7>.jsonl`
-    // inside `sessions_dir` so every run leaves a recoverable
-    // transcript that `/resume` can later find. Failure to create the
-    // dir downgrades to "no session writer" rather than aborting
-    // startup.
     if cfg.session.is_none() {
         match std::fs::create_dir_all(&sessions_dir) {
             Ok(()) => {
@@ -273,11 +375,7 @@ pub fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     };
 
     // --- Stream ------------------------------------------------------------
-    // Profile endpoint/env routing is now a first-class `grain-llm-genai`
-    // capability (`with_provider_profiles`) — runtime
-    // `Command::ApplyProvider` only has to swap the active model since
-    // the stream already knows how to reach every profile's endpoint.
-    let stream = Arc::new(
+    let stream: StreamFn = Arc::new(
         GenaiStream::builder()
             .with_openai_compat_preset(cfg.openai_compat)
             .with_provider_profiles(&cfg.profiles)
@@ -287,7 +385,7 @@ pub fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     );
 
     // --- Tools -------------------------------------------------------------
-    let mut tools = coding_read_tools(workspace.clone());
+    let mut tools: Vec<Arc<dyn AgentTool>> = coding_read_tools(workspace.clone());
     if cfg.allow_write {
         tools.extend(coding_write_tools(workspace.clone()));
     }
@@ -302,11 +400,6 @@ pub fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     }
 
     // --- JS scripted tools (optional, behind `scripts-boa` feature) ------
-    // Default path: `<workspace>/.grain/scripts/`. Missing directory
-    // is fine — `BoaExtension::from_scripts_dir` returns an empty
-    // extension. We hold the extension in the closure that gets
-    // moved into the worker task; dropping it stops the worker
-    // thread cleanly when the agent shuts down.
     let scripts_path = cfg
         .scripts_dir
         .clone()
@@ -342,49 +435,56 @@ pub fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     }
 
     // --- Context guard -----------------------------------------------------
-    // Use the resolved active model id (which may have come from a
-    // profile) so the token budget matches the model the agent will
-    // actually call.
     let guard = ContextGuard::new(registry.clone(), active_model_id.clone())
         .with_policy(ContextGuardPolicy::DropOldest)
         .with_headroom_tokens(cfg.headroom_tokens)
         .into_transform_fn();
 
     // --- Channels ----------------------------------------------------------
-    // Created before AgentOptions so the optional `--debug-log`
-    // `convert_to_llm` wrapper can capture `evt_tx` for the `/log`
-    // overlay forward.
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
     let (evt_tx, evt_rx) = mpsc::unbounded_channel::<TuiEvent>();
 
-    // --- AgentOptions ------------------------------------------------------
-    // Snapshot the pricing table before `model` moves into AgentOptions —
-    // the footer renders a live cost chip from this.
-    let model_cost = model.cost.clone();
-    let mut opts = AgentOptions::new(model, stream);
-    opts.system_prompt = system_prompt;
-    opts.tools = tools;
-    opts.messages = prior_messages;
-    opts.transform_context = Some(guard);
-    if cfg.debug_log {
-        // Wrap the default projection (Standard kept / Custom dropped)
-        // so each turn snapshot also lands in the UI's `/log` overlay.
-        // Cheap: a serialize + a non-blocking channel send per turn.
+    // --- Hooks: storm suppressor + optional escalation ---------------------
+    let before_tool_call: Option<BeforeToolCallFn> = Some(grain_agent_harness::storm_hook(
+        grain_agent_harness::StormConfig::default(),
+    ));
+    let prepare_next_turn: Option<PrepareNextTurnFn> = match &cfg.escalate_to {
+        Some(target_id) => match registry.to_core_model(target_id) {
+            Some(target) => {
+                eprintln!(
+                    "[info] escalation armed: → {} after {} failure(s)",
+                    target.id, cfg.escalate_after
+                );
+                Some(grain_agent_harness::failure_escalation_hook(
+                    grain_agent_harness::EscalationConfig::new(cfg.escalate_after, target),
+                ))
+            }
+            None => {
+                eprintln!(
+                    "[warn] --escalate-to '{target_id}' not in registry; \
+                     escalation disabled"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+
+    // --- Debug-log `convert_to_llm` wrapper --------------------------------
+    let convert_to_llm: Option<ConvertToLlmFn> = if cfg.debug_log {
         let evt_tx_for_log = evt_tx.clone();
-        // Captured at startup — model / provider runtime switches
-        // (`/provider`) won't update these. Good enough for the
-        // common debug case; a header line prefixes each entry.
         let log_model_id = active_model_id.clone();
         let log_endpoint = match cfg
             .initial_profile_idx
             .and_then(|idx| cfg.profiles.get(idx))
         {
-            Some(p) => p.base_url.clone().unwrap_or_else(|| {
-                format!("(profile '{}', native adapter)", p.name)
-            }),
+            Some(p) => p
+                .base_url
+                .clone()
+                .unwrap_or_else(|| format!("(profile '{}', native adapter)", p.name)),
             None => "(native adapter; genai default endpoint)".to_string(),
         };
-        opts.convert_to_llm = Some(Arc::new(move |messages: Vec<AgentMessage>| {
+        Some(Arc::new(move |messages: Vec<AgentMessage>| {
             let evt_tx_for_log = evt_tx_for_log.clone();
             let log_model_id = log_model_id.clone();
             let log_endpoint = log_endpoint.clone();
@@ -396,48 +496,32 @@ pub fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                         AgentMessage::Custom(_) => None,
                     })
                     .collect();
-                let body_json =
-                    serde_json::to_string_pretty(&projected).unwrap_or_else(|e| {
-                        format!("(serialize failed: {e})")
-                    });
+                let body_json = serde_json::to_string_pretty(&projected)
+                    .unwrap_or_else(|e| format!("(serialize failed: {e})"));
                 let body = format!(
                     "POST {log_endpoint}/chat/completions\nmodel: {log_model_id}\n\n{body_json}"
                 );
                 let _ = evt_tx_for_log.send(TuiEvent::RequestLogged { body });
                 projected
             })
-        }));
-    }
-    // Storm suppressor: blocks the 3rd identical (tool, args) call
-    // within a 60s window and feeds a reflection note back to the
-    // model. Provider-agnostic — defaults are tuned for coding
-    // agents that occasionally lock onto a useless grep / search.
-    opts.before_tool_call = Some(grain_agent_harness::storm_hook(
-        grain_agent_harness::StormConfig::default(),
-    ));
-    // Auto-escalation: when configured, swap to `escalate_to` after
-    // `escalate_after` cumulative failure signals. Missing target
-    // model just disables the hook (logged once at startup).
-    if let Some(target_id) = &cfg.escalate_to {
-        match registry.to_core_model(target_id) {
-            Some(target) => {
-                eprintln!(
-                    "[info] escalation armed: → {} after {} failure(s)",
-                    target.id, cfg.escalate_after
-                );
-                opts.prepare_next_turn = Some(grain_agent_harness::failure_escalation_hook(
-                    grain_agent_harness::EscalationConfig::new(cfg.escalate_after, target),
-                ));
-            }
-            None => {
-                eprintln!(
-                    "[warn] --escalate-to '{target_id}' not in registry; \
-                     escalation disabled"
-                );
-            }
-        }
-    }
-    let agent = Arc::new(Agent::new(opts));
+        }))
+    } else {
+        None
+    };
+
+    // --- HarnessBuilder + initial harness ----------------------------------
+    let model_cost = model.cost.clone();
+    let builder = Arc::new(HarnessBuilder {
+        model,
+        stream,
+        system_prompt,
+        tools,
+        transform_context: guard,
+        before_tool_call,
+        prepare_next_turn,
+        convert_to_llm,
+    });
+    let harness = builder.build(prior_messages).await;
 
     let handles = WorkerHandles {
         model_id: active_model_id.clone(),
@@ -449,17 +533,39 @@ pub fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         model_cost: model_cost.clone(),
     };
 
-    // --- Per-instance subscriptions: telemetry + session ------------------
-    // These have to happen on the worker task because `subscribe` is async.
-    let telemetry_path = cfg.telemetry_file.clone();
-    let session_path = cfg.session.clone();
+    // --- Telemetry sink (Arc'd; lives across `/resume` swaps) -------------
+    let telemetry_sink: Option<Arc<TelemetrySink>> = match cfg.telemetry_file.clone() {
+        Some(path) => match TelemetrySink::open(&path) {
+            Ok(sink) => Some(Arc::new(sink)),
+            Err(e) => {
+                let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                    "telemetry open failed: {e}"
+                )));
+                None
+            }
+        },
+        None => None,
+    };
+
+    // --- Session writer (reopened on every `/resume` swap) -----------------
+    let session_writer: Option<Arc<SessionWriter>> = match cfg.session.clone() {
+        Some(path) => match SessionWriter::open(&path) {
+            Ok(w) => Some(Arc::new(w)),
+            Err(e) => {
+                let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                    "session writer open failed: {e}"
+                )));
+                None
+            }
+        },
+        None => None,
+    };
+
     let profiles = cfg.profiles.clone();
-    let agent_for_task = agent.clone();
     let workspace_for_task = workspace.clone();
     let registry_for_task = registry.clone();
     let skills_dir_for_task = skills_dir.clone();
     let sessions_dir_for_task = sessions_dir.clone();
-    let skills_for_ui = skills_for_ui.clone();
     let evt_tx_for_task = evt_tx.clone();
     let model_cost_for_task = model_cost.clone();
     // Captured by the worker task closure so the Boa worker stays
@@ -473,62 +579,14 @@ pub fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         // thread lives until the agent task exits.
         #[cfg(feature = "scripts-boa")]
         let _boa_keepalive = _scripts_keepalive;
-        // Fan AgentEvents into TuiEvents.
-        let fan_tx = evt_tx_for_task.clone();
-        agent_for_task
-            .subscribe(Arc::new(move |event, _signal| {
-                let tx = fan_tx.clone();
-                Box::pin(async move {
-                    let _ = tx.send(TuiEvent::Agent(event));
-                })
-            }))
-            .await;
 
-        // Optional telemetry sink.
-        if let Some(path) = telemetry_path {
-            match TelemetrySink::open(&path) {
-                Ok(sink) => {
-                    let sink = Arc::new(sink);
-                    agent_for_task
-                        .subscribe(Arc::new(move |event, _signal| {
-                            let s = sink.clone();
-                            Box::pin(async move {
-                                s.record(&event);
-                            })
-                        }))
-                        .await;
-                }
-                Err(e) => {
-                    let _ = evt_tx_for_task.send(TuiEvent::AgentWorkerError(format!(
-                        "telemetry open failed: {e}"
-                    )));
-                }
-            }
-        }
-
-        // Optional session writer.
-        if let Some(path) = session_path {
-            match SessionWriter::open(&path) {
-                Ok(writer) => {
-                    let writer = Arc::new(writer);
-                    agent_for_task
-                        .subscribe(Arc::new(move |event, _signal| {
-                            let w = writer.clone();
-                            Box::pin(async move {
-                                if let AgentEvent::MessageEnd { message } = event {
-                                    let _ = w.append(&message);
-                                }
-                            })
-                        }))
-                        .await;
-                }
-                Err(e) => {
-                    let _ = evt_tx_for_task.send(TuiEvent::AgentWorkerError(format!(
-                        "session writer open failed: {e}"
-                    )));
-                }
-            }
-        }
+        install_subscriptions(
+            &harness,
+            &evt_tx_for_task,
+            telemetry_sink.clone(),
+            session_writer.clone(),
+        )
+        .await;
 
         // Send loaded skills to the UI so the slash-palette can offer
         // skill prompt injection alongside built-in commands.
@@ -545,7 +603,10 @@ pub fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         }
 
         run_command_loop(
-            agent_for_task,
+            harness,
+            builder,
+            telemetry_sink,
+            session_writer,
             workspace_for_task,
             registry_for_task,
             skills_dir_for_task,
@@ -567,7 +628,10 @@ pub fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_command_loop(
-    agent: Arc<Agent>,
+    mut harness: Arc<AgentHarness>,
+    builder: Arc<HarnessBuilder>,
+    telemetry_sink: Option<Arc<TelemetrySink>>,
+    mut session_writer: Option<Arc<SessionWriter>>,
     workspace: Arc<Workspace>,
     registry: Arc<Registry>,
     skills_dir: PathBuf,
@@ -580,20 +644,24 @@ async fn run_command_loop(
         match cmd {
             Command::SendPrompt(text) => {
                 // Fire and continue — the prompt task lives on its own
-                // until completion; AgentEvent forwarding already wired.
-                let agent = agent.clone();
+                // until completion; AgentEvent forwarding is wired via
+                // `install_subscriptions`.
+                let harness = harness.clone();
                 let evt_tx = evt_tx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = agent.prompt_text(text).await {
+                    if let Err(e) = harness.prompt_text(text).await {
                         let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!("prompt: {e}")));
                     }
                 });
             }
             Command::AbortCurrentTurn => {
-                agent.abort().await;
+                harness.abort().await;
             }
             Command::Reset => {
-                agent.reset().await;
+                // The harness exposes no `reset()` of its own — the
+                // underlying agent's reset is enough for the TUI's
+                // "blow away in-flight state" intent.
+                harness.agent().reset().await;
             }
             Command::ReturnDoctor => {
                 let text = render_doctor_report(&workspace, &registry);
@@ -615,6 +683,59 @@ async fn run_command_loop(
                 let list = grain_ai_agent_headless::list_sessions(&sessions_dir);
                 let _ = evt_tx.send(TuiEvent::SessionsListed(list));
             }
+            Command::ResumeSession(path) => {
+                // Cancel any in-flight turn and wait for the old
+                // harness to settle so we don't get late events from
+                // the abandoned session leaking into the new one.
+                harness.abort().await;
+                harness.wait_for_idle().await;
+
+                let prior = match load_messages(&path) {
+                    Ok(msgs) => msgs,
+                    Err(e) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "resume load {} failed: {e}",
+                            path.display()
+                        )));
+                        continue;
+                    }
+                };
+                let new_writer: Option<Arc<SessionWriter>> = match SessionWriter::open(&path) {
+                    Ok(w) => Some(Arc::new(w)),
+                    Err(e) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "resume session writer open {} failed: {e}",
+                            path.display()
+                        )));
+                        None
+                    }
+                };
+                let new_harness = builder.build(prior).await;
+                install_subscriptions(
+                    &new_harness,
+                    &evt_tx,
+                    telemetry_sink.clone(),
+                    new_writer.clone(),
+                )
+                .await;
+                let prior_count = new_harness.agent().state().await.messages.len();
+                harness = new_harness;
+                session_writer = new_writer;
+                let _ = evt_tx.send(TuiEvent::Info(format!(
+                    "(resumed: {} — {prior_count} prior message(s))",
+                    path.display()
+                )));
+            }
+            Command::Compact { keep_recent } => match harness.compact(keep_recent).await {
+                Ok(entry_id) => {
+                    let _ = evt_tx
+                        .send(TuiEvent::Info(format!("(compacted — entry {entry_id})")));
+                }
+                Err(e) => {
+                    let _ = evt_tx
+                        .send(TuiEvent::AgentWorkerError(format!("compact: {e}")));
+                }
+            },
             Command::ApplyProvider(idx) => {
                 let Some(profile) = profiles.get(idx) else {
                     let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
@@ -637,7 +758,7 @@ async fn run_command_loop(
                     .unwrap_or_else(|| synthetic_model_from_profile(profile));
                 let model = override_model_provider(model, profile);
                 let cost = model.cost.clone();
-                agent.set_model(model).await;
+                harness.set_model(model).await;
                 let _ = evt_tx.send(TuiEvent::ProviderApplied {
                     profile: profile.name.clone(),
                     model: profile.model.clone(),
@@ -647,11 +768,15 @@ async fn run_command_loop(
             Command::Quit => {
                 // Make sure any in-flight turn gets cancelled before the
                 // task exits, so we don't strand a streaming HTTP req.
-                agent.abort().await;
+                harness.abort().await;
                 break;
             }
         }
     }
+    // `session_writer` only feeds the subscription closures; we hold a
+    // copy here so swaps on `/resume` release the previous file
+    // handle when the old Arc count drops to zero.
+    let _ = session_writer;
 }
 
 /// For OpenAI-compat profiles, replace `Model.provider` with the

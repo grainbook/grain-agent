@@ -66,6 +66,7 @@ pub enum UserContent {
 }
 
 impl UserContent {
+    /// Convenience constructor: `UserContent::Text(TextContent { text })`.
     pub fn text(s: impl Into<String>) -> Self {
         UserContent::Text(TextContent { text: s.into() })
     }
@@ -150,6 +151,8 @@ pub struct Model {
 }
 
 impl Model {
+    /// Fallback "unknown" model used when no model descriptor is available.
+    /// All identifying fields are set to `"unknown"` and pricing is zeroed.
     pub fn unknown() -> Self {
         Model {
             id: "unknown".into(),
@@ -252,6 +255,8 @@ pub enum Message {
 }
 
 impl Message {
+    /// Returns the serde tag for this message variant:
+    /// `"user"`, `"assistant"`, or `"toolResult"`.
     pub fn role(&self) -> &'static str {
         match self {
             Message::User(_) => "user",
@@ -274,16 +279,21 @@ pub enum AgentMessage {
 }
 
 impl AgentMessage {
+    /// Wrap a [`UserMessage`] in the `Standard` variant.
     pub fn user(message: UserMessage) -> Self {
         AgentMessage::Standard(Message::User(message))
     }
+    /// Wrap an [`AssistantMessage`] in the `Standard` variant.
     pub fn assistant(message: AssistantMessage) -> Self {
         AgentMessage::Standard(Message::Assistant(message))
     }
+    /// Wrap a [`ToolResultMessage`] in the `Standard` variant.
     pub fn tool_result(message: ToolResultMessage) -> Self {
         AgentMessage::Standard(Message::ToolResult(message))
     }
 
+    /// Role tag for this message. For `Custom` variants, reads the
+    /// `role` JSON field, defaulting to `"custom"` when absent.
     pub fn role(&self) -> &str {
         match self {
             AgentMessage::Standard(m) => m.role(),
@@ -291,6 +301,8 @@ impl AgentMessage {
         }
     }
 
+    /// Return the inner [`AssistantMessage`] when this is a `Standard`
+    /// assistant message; `None` for user / tool-result / custom entries.
     pub fn as_assistant(&self) -> Option<&AssistantMessage> {
         match self {
             AgentMessage::Standard(Message::Assistant(m)) => Some(m),
@@ -313,6 +325,7 @@ pub struct AgentToolResult {
 }
 
 impl AgentToolResult {
+    /// Success result containing a single text block.
     pub fn text(message: impl Into<String>) -> Self {
         AgentToolResult {
             content: vec![UserContent::text(message)],
@@ -321,6 +334,8 @@ impl AgentToolResult {
         }
     }
 
+    /// Error result (currently an alias for [`Self::text`]; future-proofed
+    /// so callers can switch on error semantics without renames).
     pub fn error(message: impl Into<String>) -> Self {
         AgentToolResult::text(message)
     }
@@ -373,10 +388,12 @@ pub trait AgentTool: Send + Sync {
 }
 
 impl dyn AgentTool {
+    /// Shortcut for `self.definition().name`.
     pub fn name(&self) -> &str {
         &self.definition().name
     }
 
+    /// Shortcut for `self.definition().execution_mode`.
     pub fn execution_mode(&self) -> Option<ToolExecutionMode> {
         self.definition().execution_mode
     }
@@ -401,6 +418,7 @@ pub enum AgentToolError {
 }
 
 impl AgentToolError {
+    /// Convenience constructor for a general-purpose error message.
     pub fn msg(s: impl Into<String>) -> Self {
         AgentToolError::Message(s.into())
     }
@@ -468,6 +486,9 @@ pub enum AssistantMessageEvent {
 }
 
 impl AssistantMessageEvent {
+    /// Returns a reference to the `partial` [`AssistantMessage`] snapshot
+    /// carried by this event, if any. `Done` and `Error` events use a
+    /// different field shape and return `None`.
     pub fn partial(&self) -> Option<&AssistantMessage> {
         match self {
             AssistantMessageEvent::Start { partial }
@@ -484,6 +505,7 @@ impl AssistantMessageEvent {
         }
     }
 
+    /// Returns `true` for terminal events (`Done` / `Error`).
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,

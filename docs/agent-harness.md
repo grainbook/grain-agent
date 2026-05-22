@@ -78,10 +78,37 @@ pub struct AgentHarnessOptions {
     pub session_id: Option<String>,
     pub transport: Option<String>,
     pub max_retry_delay_ms: Option<u64>,
+    /// Agent hook: gate a tool call before it executes
+    /// (storm suppression, schema repair, …).
+    pub before_tool_call: Option<BeforeToolCallFn>,
+    /// Agent hook: rewrite / inspect a tool result after
+    /// execution (error-streak terminator, result-truncation, …).
+    pub after_tool_call: Option<AfterToolCallFn>,
+    /// Agent hook: swap model / thinking level between turns
+    /// (failure-signal escalation, …).
+    pub prepare_next_turn: Option<PrepareNextTurnFn>,
+    /// Override the default projection from `AgentMessage[]`
+    /// → `Message[]`. When `None`, the harness installs its
+    /// custom-message-aware default (routes branchSummary /
+    /// compactionSummary / custom payloads correctly).
+    pub convert_to_llm: Option<ConvertToLlmFn>,
 }
 ```
 
 `AgentHarnessOptions::new(session, model, stream_fn)` gives sane defaults; you set the rest. `AgentHarness::new(opts).await` seeds the agent transcript from `session.build_context()` and installs two internal listeners (session-mirror + harness event broadcaster).
+
+### Provider-agnostic hooks (Phase 3.0)
+
+Four optional hooks pass through verbatim to the underlying `Agent`:
+
+| Hook | When | Use case |
+|------|------|----------|
+| `before_tool_call` | Before each tool executes | Storm suppression, schema repair, argument validation |
+| `after_tool_call` | After each tool completes | Error-streak terminator, result truncation, audit logging |
+| `prepare_next_turn` | Between turns (after `TurnEnd`, before next `TurnStart`) | Failure-signal escalation (swap to a smarter model on repeated errors), context injection |
+| `convert_to_llm` | Every LLM request | Custom message filtering / enrichment beyond the harness default |
+
+Each hook receives a typed context struct and a `CancellationToken`; return `None` to no-op. When `convert_to_llm` is `None`, the harness installs its own default that routes `branchSummary` / `compactionSummary` / custom payloads correctly — most callers want `None`.
 
 ---
 
@@ -209,9 +236,7 @@ let harness = AgentHarness::new(opts).await;
 
 | Item | Status |
 |------|--------|
-| Pi's `Context` event (post `transform_context`) | Needs an internal agent-loop hook; not yet exposed |
 | Pi's `BeforeProviderRequest` / `BeforeProviderPayload` / `AfterProviderResponse` | Need richer stream hooks in `LlmStream` |
-| `SessionCompact` carrying summary text | Currently emits `kept_from` only; summary lives inside the new `MessageEnd` |
 | Pending-write batching (atomic per-turn commit) | Phase 5+; current writes go through immediately |
 | Dynamic `SystemPrompt::Dynamic` re-rendering | Stored but not re-evaluated on state changes |
 | Multi-bucket queues (`steering` vs `follow_up` vs `next_turn` as separate) | `next_turn` aliased to `follow_up` for now |

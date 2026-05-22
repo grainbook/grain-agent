@@ -134,10 +134,12 @@ fn assistant_with_tool_calls_emits_tool_call_part() {
 }
 
 #[test]
-fn thinking_text_is_not_echoed_back_to_provider() {
+fn thinking_text_is_echoed_back_via_reasoning_content() {
     use grain_agent_core::ThinkingContent;
-    // genai 0.5 has no outbound reasoning_content slot; reasoning text stays
-    // in the grain transcript but does not appear on the wire.
+    // genai 0.6 added a `ReasoningContent` part on the outbound side.
+    // Providers that require the prior turn's reasoning back on the
+    // wire (notably DeepSeek-V4-pro — without it the API returns 400
+    // "missing reasoning_content") need this slot populated.
     let msg = Message::Assistant(AssistantMessage {
         content: vec![
             AssistantContent::Thinking(ThinkingContent {
@@ -158,7 +160,10 @@ fn thinking_text_is_not_echoed_back_to_provider() {
     let chat = to_chat_request(&ctx(vec![msg], vec![], ""));
     let body = serde_json::to_value(&chat.messages[0].content).unwrap();
     let body_s = body.to_string();
-    assert!(!body_s.contains("internal reasoning"), "no outbound slot for reasoning text");
+    assert!(
+        body_s.contains("internal reasoning"),
+        "ReasoningContent part should carry the prior turn's thinking: {body_s}"
+    );
     assert!(body_s.contains("final answer"));
 }
 

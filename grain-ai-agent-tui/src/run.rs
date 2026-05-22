@@ -58,7 +58,7 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
         mut evt_rx,
         handles,
         join: _,
-    } = spawn(cfg)?;
+    } = spawn(cfg).await?;
 
     // Resolve themes before grabbing the terminal so any disk-load
     // warnings get a chance to print to stderr before the alt screen

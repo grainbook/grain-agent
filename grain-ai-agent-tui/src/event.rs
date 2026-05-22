@@ -74,4 +74,8 @@ pub enum TuiEvent {
     /// Worker scanned `sessions_dir` and returns the discovered
     /// session list (newest first). Fills the `/resume` picker.
     SessionsListed(Vec<grain_ai_agent_headless::SessionMeta>),
+    /// Worker pushed an informational status line. Rendered as a
+    /// `TranscriptKind::Info` row. Used for `/resume` swap
+    /// confirmations and `/compact` summaries.
+    Info(String),
 }

@@ -30,7 +30,7 @@ PROMPT         › 这里输入
 FOOTER         快捷键提示
 ```
 
-弹层（help / doctor / skills / 主题 / provider）是定尺寸居中卡片，背景色取自主题的 `surface` slot，和主视图明显区分。
+弹层（help / doctor / skills / 主题 / provider / log / session resume）是定尺寸居中卡片，背景色取自主题的 `surface` slot，和主视图明显区分。
 
 **鼠标**：滚轮滚动 transcript（每档 3 行，跟 PgUp/PgDn 共享 follow-bottom 和追到底部即恢复跟踪的逻辑）。为了滚轮事件能到 app，鼠标 capture 是**开着**的，所以终端也会拦截左键拖选 —— 按住 **Option**（macOS）或 **Shift**（多数 Linux 终端）绕过 capture，即可用原生的拖选 / 右键复制。粘贴照常用 `⌘V` / `Ctrl-Shift-V`。
 
@@ -42,9 +42,9 @@ FOOTER         快捷键提示
 
 | 键 | 行为 |
 |----|------|
-| **Enter** | 提交。slash 弹层激活时，先把当前 highlighted 命令补齐到 input，再提交 |
+| **Enter** | 提交。slash 弹层激活时：skill → 把正文注入输入框供审阅；命令 → 补齐到输入框并提交 |
 | **Esc** | 三级优先：关闭弹层 → 清空输入 → 退出 |
-| **Tab** | slash 弹层激活时补齐当前选中命令；否则空操作（修了原来切焦点导致输入"变灰失灵"的 bug） |
+| **Tab** | slash 弹层激活时补齐当前选中的内置命令；skill 行无视。其他情况空操作 |
 | **Ctrl-C** | streaming 时中断当前 turn；空闲时直接退出（raw mode 下不会收到 SIGINT，所以这条必须手工处理） |
 | **↑ / ↓** | 弹层激活时：导航；否则：浏览历史 prompt |
 | **PgUp / PgDn** | 滚动 transcript（无论输入焦点状态） |
@@ -65,6 +65,8 @@ FOOTER         快捷键提示
 | `/skills` | 显示已加载技能 |
 | `/theme` | 主题选择器 |
 | `/provider` | provider profile 选择器（见 [providers.md](./providers.md)） |
+| `/log` | 显示最近的请求体捕获（需要 `--debug-log`） |
+| `/resume` | 打开会话恢复选择器（从 `--sessions-dir` 加载历史会话） |
 | `/exit`, `/quit`, `/q` | 退出 |
 
 ### `/doctor` 搜索
@@ -72,6 +74,25 @@ FOOTER         快捷键提示
 弹层打开后直接打字：按 case-insensitive 子串过滤每一行（章节标题 `=== … ===` 永远保留方便定位）。PgUp/PgDn/Home/End 翻页，Backspace 缩窄，Esc 关闭。
 
 常用过滤：`ANTHROPIC` / `OPENAI` / `DEEPSEEK` 查找某个 env key；`branch` / `commit` 跳到 git 块。
+
+### `/resume` 会话恢复
+
+打开居中弹层，列出 `--sessions-dir`（默认 `<workspace>/.grain/sessions/`）中的历史会话。每行显示第一条用户 prompt（标题）、模型、消息数、修改时间。↑↓ 导航；Enter 向 transcript 输出一条重启提示：
+
+```
+(to resume: relaunch with `grain-tui --session /path/to/<uuid>.jsonl` — in-place /resume coming in Phase 4)
+```
+
+Esc 关闭。会话列表按最新优先排序；无法解析的文件以 `[warn]` 跳过。
+
+### `/` skill 面板
+
+输入 `/` 后，面板中除了内置 slash 命令，还会显示 `.claude/skills/` 中加载的 skill。每个 skill 以 `skill: <名称>` 展示，附带描述。
+
+- **在 skill 上按 Enter** → 将 skill 的完整正文注入输入框，供审阅后提交给 LLM。这会替换当前输入内容。
+- **在命令上按 Enter** → 派发命令（原有行为）。
+- **Tab** 只补齐内置命令，不补齐 skill 名称。
+- `disable_model_invocation: true` 的 skill 不会出现在面板中。
 
 ---
 
@@ -127,7 +148,8 @@ surface = "#1a0033"
 | `--allow-bash` | off | Bash 工具（显式 opt-in） |
 | `--allow-web` | off | WebFetch（显式 opt-in） |
 | `--allow-semantic-search` | off | 需要 headless `--features rig` |
-| `--session <FILE>` | 无 | JSONL 会话恢复 |
+| `--session <FILE>` | 无 | JSONL 会话恢复。会覆盖 `--sessions-dir` 自动创建 |
+| `--sessions-dir <DIR>` | `<workspace>/.grain/sessions` | 不传 `--session` 时在此目录自动创建 `<uuidv7>.jsonl`，确保每次运行都可通过 `/resume` 恢复 |
 | `--skills-dir <DIR>` | `<workspace>/.claude/skills` | 技能扫描目录 |
 | `--telemetry-file <FILE>` | 无 | 一行一个 `AgentEvent` JSON |
 | `--tick-ms <MS>` | `100` | 渲染 tick 间隔 |
@@ -143,7 +165,7 @@ surface = "#1a0033"
 
 - **`AppState`** (`src/app.rs`) —— 纯 UI 状态机。每个按键 → 0 个或多个 `Command` + 状态变更。不依赖 ratatui / tokio，单元测试很轻。
 - **`TuiEvent`** (`src/event.rs`) —— 单一事件信封：键盘、tick、resize、worker 转发的 `AgentEvent`、worker 回复（`OverlayDoctor` / `OverlaySkills` / `ProviderApplied` 等）。
-- **`agent_worker`** (`src/agent_worker.rs`) —— 独立 tokio task 持有 `Agent`，通过 mpsc 桥接 `Command` 和 `TuiEvent`。`/provider` 切换走 `agent.set_model(...)`，不重启。
+- **`agent_worker`** (`src/agent_worker.rs`) —— 独立 tokio task 持有 `Agent`，通过 mpsc 桥接 `Command` 和 `TuiEvent`。`/provider` 切换走 `agent.set_model(...)`，不重启。同时通过 [`session_discovery::new_session_path`](./headless-session-discovery.md) 管理 session 自动创建，通过 [`session_discovery::list_sessions`](./headless-session-discovery.md) 支持 `/resume` 选择器。
 - **`ui`** (`src/ui.rs`) —— 纯渲染函数，输入 `&AppState`。
 - **`run`** (`src/run.rs`) —— 终端生命周期（raw mode + alt screen）+ event 轮询 + 渲染循环。
 

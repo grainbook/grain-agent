@@ -109,29 +109,49 @@ impl Inner {
 // ---------------------------------------------------------------------------
 
 pub struct AgentOptions {
+    /// System prompt prepended to every LLM request.
     pub system_prompt: String,
+    /// Default model used when starting a run.
     pub model: Model,
+    /// Starting thinking level.
     pub thinking_level: ThinkingLevel,
+    /// Tool set available to the agent.
     pub tools: Vec<Arc<dyn AgentTool>>,
+    /// Seed messages loaded into the transcript on construction.
     pub messages: Vec<AgentMessage>,
 
+    /// Custom projection from `AgentMessage[]` → `Message[]` (default: drop custom messages).
     pub convert_to_llm: Option<ConvertToLlmFn>,
+    /// Optional context transform applied before each LLM request.
     pub transform_context: Option<TransformContextFn>,
+    /// LLM streaming adapter.
     pub stream_fn: StreamFn,
+    /// Dynamic API-key provider.
     pub get_api_key: Option<GetApiKeyFn>,
+    /// Pre-tool-execution hook (e.g. storm suppression).
     pub before_tool_call: Option<BeforeToolCallFn>,
+    /// Post-tool-execution hook (e.g. result truncation).
     pub after_tool_call: Option<AfterToolCallFn>,
+    /// Between-turn hook (e.g. failure-signal escalation).
     pub prepare_next_turn: Option<PrepareNextTurnFn>,
 
+    /// Steering-queue drain policy.
     pub steering_mode: QueueMode,
+    /// Follow-up queue drain policy.
     pub follow_up_mode: QueueMode,
+    /// Opaque session id forwarded in stream requests.
     pub session_id: Option<String>,
+    /// Transport identifier forwarded in stream requests.
     pub transport: Option<String>,
+    /// Max retry backoff forwarded in stream requests.
     pub max_retry_delay_ms: Option<u64>,
+    /// Tool execution parallelism mode.
     pub tool_execution: ToolExecutionMode,
 }
 
 impl AgentOptions {
+    /// Minimal options: model + stream function. Everything else
+    /// defaults to empty / off.
     pub fn new(model: Model, stream_fn: StreamFn) -> Self {
         AgentOptions {
             system_prompt: String::new(),
@@ -200,6 +220,10 @@ pub struct Agent {
 }
 
 impl Agent {
+    /// Build an agent from [`AgentOptions`].
+    ///
+    /// If `convert_to_llm` is not set, installs a default that drops
+    /// [`AgentMessage::Custom`] entries and keeps standard LLM messages.
     pub fn new(options: AgentOptions) -> Self {
         let inner = Inner {
             system_prompt: options.system_prompt,
@@ -253,75 +277,101 @@ impl Agent {
 
     // --- state ---------------------------------------------------------------
 
+    /// Return a snapshot of the current agent state (model, messages, tools,
+    /// streaming status, …). Cheap clone of internally `Arc`-shared fields.
     pub async fn state(&self) -> AgentState {
         self.inner.lock().await.snapshot()
     }
 
+    /// Replace the system prompt for subsequent turns.
     pub async fn set_system_prompt(&self, prompt: String) {
         self.inner.lock().await.system_prompt = prompt;
     }
 
+    /// Switch the model for subsequent turns.
     pub async fn set_model(&self, model: Model) {
         self.inner.lock().await.model = model;
     }
 
+    /// Change the thinking level for subsequent turns.
     pub async fn set_thinking_level(&self, level: ThinkingLevel) {
         self.inner.lock().await.thinking_level = level;
     }
 
+    /// Replace the tool set for subsequent turns.
     pub async fn set_tools(&self, tools: Vec<Arc<dyn AgentTool>>) {
         self.inner.lock().await.tools = tools;
     }
 
+    /// Replace the full transcript (useful after compaction or branch
+    /// switching).
     pub async fn set_messages(&self, messages: Vec<AgentMessage>) {
         self.inner.lock().await.messages = messages;
     }
 
     // --- queue management ----------------------------------------------------
 
+    /// Enqueue a steering message. When the active turn finishes, the
+    /// agent loop will drain the steering queue first and run a follow-up
+    /// turn with the queued messages.
     pub async fn steer(&self, message: AgentMessage) {
         self.inner.lock().await.steering_queue.enqueue(message);
     }
 
+    /// Enqueue a follow-up message. Unlike steering messages, follow-up
+    /// messages run after the steering queue is drained and only when
+    /// the transcript ends on a non-assistant role.
     pub async fn follow_up(&self, message: AgentMessage) {
         self.inner.lock().await.follow_up_queue.enqueue(message);
     }
 
+    /// Discard all pending steering messages.
     pub async fn clear_steering_queue(&self) {
         self.inner.lock().await.steering_queue.clear();
     }
 
+    /// Discard all pending follow-up messages.
     pub async fn clear_follow_up_queue(&self) {
         self.inner.lock().await.follow_up_queue.clear();
     }
 
+    /// Discard both steering and follow-up queues.
     pub async fn clear_all_queues(&self) {
         let mut g = self.inner.lock().await;
         g.steering_queue.clear();
         g.follow_up_queue.clear();
     }
 
+    /// Returns `true` when either queue has at least one pending message.
     pub async fn has_queued_messages(&self) -> bool {
         let g = self.inner.lock().await;
         g.steering_queue.has_items() || g.follow_up_queue.has_items()
     }
 
+    /// Set the steering-queue drain mode.
     pub async fn set_steering_mode(&self, mode: QueueMode) {
         self.inner.lock().await.steering_queue.mode = mode;
     }
 
+    /// Set the follow-up queue drain mode.
     pub async fn set_follow_up_mode(&self, mode: QueueMode) {
         self.inner.lock().await.follow_up_queue.mode = mode;
     }
 
     // --- run control ---------------------------------------------------------
 
+    /// Cancel the currently active run (if any). Issuing `abort()` causes
+    /// an in-progress LLM stream to be cancelled via the shared
+    /// [`CancellationToken`].
     pub async fn abort(&self) {
         if let Some(token) = self.inner.lock().await.active_run.clone() {
             token.cancel();
         }
     }
 
+    /// Return a clone of the active run's cancellation token, or `None`
+    /// when the agent is idle. Can be used by external code to tie their
+    /// own cleanup to the agent lifecycle.
     pub async fn signal(&self) -> Option<CancellationToken> {
         self.inner.lock().await.active_run.clone()
     }
@@ -340,7 +390,13 @@ impl Agent {
 
     // --- prompt / continue ---------------------------------------------------
 
-    /// Start a new prompt from a string. Convenience wrapper.
+    /// Start a new prompt from a plain-text string. Convenience wrapper that
+    /// builds a single-turn [`UserMessage`] and calls [`Self::prompt`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError::AlreadyRunning`] when a run is already in
+    /// progress.
     pub async fn prompt_text(&self, text: impl Into<String>) -> Result<(), AgentError> {
         let msg = AgentMessage::user(UserMessage {
             content: vec![UserContent::text(text)],
@@ -349,12 +405,30 @@ impl Agent {
         self.prompt(vec![msg]).await
     }
 
-    /// Start a new prompt with a batch of messages.
+    /// Start a new prompt with a batch of [`AgentMessage`]s.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError::AlreadyRunning`] when a run is already in
+    /// progress.
     pub async fn prompt(&self, messages: Vec<AgentMessage>) -> Result<(), AgentError> {
         self.run_prompt_messages(messages, false).await
     }
 
-    /// Continue from the current transcript.
+    /// Continue from the current transcript. Behaves like the TS reference
+    /// implementation:
+    ///
+    /// - If the last message is `assistant`: drain steering queue first,
+    ///   then follow-up queue, else return
+    ///   [`AgentError::CannotContinueFromAssistant`].
+    /// - Otherwise resume from the transcript tail.
+    ///
+    /// # Errors
+    ///
+    /// - [`AgentError::AlreadyRunning`] — a run is active.
+    /// - [`AgentError::NoMessagesToContinue`] — transcript is empty.
+    /// - [`AgentError::CannotContinueFromAssistant`] — last message is
+    ///   assistant and both queues are empty.
     pub async fn continue_(&self) -> Result<(), AgentError> {
         // Decide what to do atomically under one lock so concurrent callers
         // can't sneak between the active-run guard and the queue drain.
@@ -662,6 +736,10 @@ pub struct Unsubscribe {
 }
 
 impl Unsubscribe {
+    /// Remove the listener identified by this handle. Safe to call
+    /// concurrently or after other listeners have been added/removed;
+    /// removal is keyed by a monotonic id so the wrong listener is never
+    /// accidentally dropped.
     pub async fn cancel(self) {
         self.inner.lock().await.listeners.remove(&self.id);
     }

@@ -44,6 +44,7 @@ impl TruncationOptions {
     }
 }
 
+/// Human-friendly byte count: `"512B"`, `"1.5KB"`, `"2.0MB"`.
 pub fn format_size(bytes: usize) -> String {
     if bytes < 1024 {
         format!("{bytes}B")

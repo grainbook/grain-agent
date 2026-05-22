@@ -410,6 +410,8 @@ pub struct HarnessUnsubscribe {
 }
 
 impl HarnessUnsubscribe {
+    /// Remove this listener from the harness. Safe to call concurrently;
+    /// removal is id-based so the wrong listener is never dropped.
     pub async fn cancel(self) {
         self.inner.lock().await.listeners.remove(&self.id);
     }

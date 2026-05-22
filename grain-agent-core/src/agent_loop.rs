@@ -135,6 +135,8 @@ pub struct AgentLoopConfig {
 }
 
 impl AgentLoopConfig {
+    /// Create a config with reasonable defaults: off thinking, parallel
+    /// tool execution, empty stream options. All hooks default to `None`.
     pub fn new(model: Model, convert_to_llm: ConvertToLlmFn) -> Self {
         AgentLoopConfig {
             model,

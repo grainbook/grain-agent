@@ -78,10 +78,35 @@ pub struct AgentHarnessOptions {
     pub session_id: Option<String>,
     pub transport: Option<String>,
     pub max_retry_delay_ms: Option<u64>,
+    /// Agent hook：在工具执行前拦截（风暴抑制、schema 修复等）。
+    pub before_tool_call: Option<BeforeToolCallFn>,
+    /// Agent hook：在工具执行后改写 / 检查结果
+    ///（错误连击终止、结果截断等）。
+    pub after_tool_call: Option<AfterToolCallFn>,
+    /// Agent hook：在两个 turn 之间切换模型 / thinking level
+    ///（失败信号升级等）。
+    pub prepare_next_turn: Option<PrepareNextTurnFn>,
+    /// 覆盖默认的 `AgentMessage[]` → `Message[]` 投影。
+    /// 为 `None` 时 harness 会安装自己的 custom-message-aware
+    /// 默认实现（正确路由 branchSummary / compactionSummary 等）。
+    pub convert_to_llm: Option<ConvertToLlmFn>,
 }
 ```
 
 `AgentHarnessOptions::new(session, model, stream_fn)` 给一组合理默认，剩下的字段你填。`AgentHarness::new(opts).await` 会从 `session.build_context()` 给 agent 喂初始 transcript，并装两个内部 listener（session 镜像 + harness 事件广播）。
+
+### 模型无关 Hook（Phase 3.0）
+
+四个可选 hook 会直接透传给底层 `Agent`：
+
+| Hook | 触发时机 | 典型用例 |
+|------|----------|----------|
+| `before_tool_call` | 每个工具执行前 | 风暴抑制、schema 修复、参数校验 |
+| `after_tool_call` | 每个工具执行后 | 错误连击终止、结果截断、审计日志 |
+| `prepare_next_turn` | turn 之间（`TurnEnd` 之后、下一个 `TurnStart` 之前） | 失败信号升级（错误过多时切到更强模型）、上下文注入 |
+| `convert_to_llm` | 每次 LLM 请求前 | 自定义消息过滤 / 增强（替代 harness 默认实现） |
+
+每个 hook 接收一个类型化上下文结构体和 `CancellationToken`；返回 `None` 即 no-op。`convert_to_llm` 为 `None` 时 harness 安装自己的默认实现（正确路由 branchSummary / compactionSummary / custom payload）——大部分调用方保持 `None` 即可。
 
 ---
 
@@ -209,9 +234,7 @@ let harness = AgentHarness::new(opts).await;
 
 | 项 | 进度 / Phase |
 |----|------|
-| Pi `Context` 事件（`transform_context` 之后） | 需要 agent loop 内部的 hook；未实现 |
 | Pi `BeforeProviderRequest` / `BeforeProviderPayload` / `AfterProviderResponse` | 需要 `LlmStream` 更丰富的 hook |
-| `SessionCompact` 携带 summary 文本 | 当前只 emit `kept_from`；summary 内容存在新的 `MessageEnd` 里 |
 | Pending-write 批量（per-turn 原子提交） | Phase 5+；当前写入直接落盘 |
 | 动态 `SystemPrompt::Dynamic` 重渲染 | 存储但状态变化时不会自动重新求值 |
 | 三种独立队列（`steering` / `follow_up` / `next_turn` 各自一桶） | 当前 `next_turn` 别名到 `follow_up` |

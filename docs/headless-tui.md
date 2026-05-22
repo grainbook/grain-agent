@@ -30,7 +30,7 @@ PROMPT         › type here
 FOOTER         shortcuts hint
 ```
 
-Overlays (help, doctor, skills, theme picker, provider picker) render as fixed-size centered cards on top of the layout, with a distinct background color from the theme's `surface` palette slot.
+Overlays (help, doctor, skills, theme picker, provider picker, log, session resume) render as fixed-size centered cards on top of the layout, with a distinct background color from the theme's `surface` palette slot.
 
 **Mouse:** the scroll wheel scrolls the transcript (3 rows per click, same follow-bottom / catch-up-to-tail semantics as PgUp/PgDn). Mouse capture is **on** to make the wheel work, which means terminals also intercept left-click drag for selection — hold **Option** (macOS) or **Shift** (most Linux terms) to bypass capture and use the native drag-to-select / right-click-copy. Paste still works as usual (`⌘V` / `Ctrl-Shift-V`).
 
@@ -42,9 +42,9 @@ Overlays (help, doctor, skills, theme picker, provider picker) render as fixed-s
 
 | Key | Behavior |
 |-----|----------|
-| **Enter** | Submit prompt (or, when the slash palette is open and a row is highlighted, snap input to that command and submit) |
+| **Enter** | Submit prompt (or, when the slash palette is open and a row is highlighted: skill → inject body into input for review; command → snap input to that command and submit) |
 | **Esc** | Close overlay → else clear input → else quit (three-level precedence) |
-| **Tab** | Complete the highlighted slash command (palette open); no-op otherwise (used to toggle focus and silently dropped chars — fixed) |
+| **Tab** | Complete the highlighted built-in slash command (palette open); no-op for skill rows and otherwise (used to toggle focus and silently dropped chars) |
 | **Ctrl-C** | Abort current turn while streaming; quit when idle |
 | **↑ / ↓** | Slash-palette nav (when open) · prompt-history nav otherwise |
 | **PgUp / PgDn** | Scroll transcript (always available from input focus) |
@@ -65,7 +65,28 @@ Type `/` to open the autocomplete dropdown above the input. Narrows live as you 
 | `/skills` | List discovered skills |
 | `/theme` | Open the theme picker |
 | `/provider` | Open the provider profile picker (see [providers.md](./providers.md)) |
+| `/log` | Show recent request-body capture (needs `--debug-log`) |
+| `/resume` | Open the session-resume picker (past transcripts from `--sessions-dir`) |
 | `/exit`, `/quit`, `/q` | Quit |
+
+### `/resume` picker
+
+Opens a centered overlay listing past sessions from `--sessions-dir` (default: `<workspace>/.grain/sessions/`). Each row shows the first user prompt (title), model, message count, and mtime. ↑↓ navigates; Enter prints a relaunch hint to the transcript:
+
+```
+(to resume: relaunch with `grain-tui --session /path/to/<uuid>.jsonl` — in-place /resume coming in Phase 4)
+```
+
+Esc closes the picker. The session list is sorted newest-first; files that fail to parse are skipped with a `[warn]` line.
+
+### `/` skill palette
+
+Typing `/` also shows **loaded skills** from `.claude/skills/` alongside built-in slash commands. Each skill appears as `skill: <name>` with its description.
+
+- **Enter on a skill** → injects the skill's full body content into the input for review before submitting to the LLM. This replaces the current input entirely.
+- **Enter on a command** → dispatches the command (existing behavior).
+- **Tab** completes only built-in commands, not skill names.
+- Skills with `disable_model_invocation: true` are excluded from the palette.
 
 ### `/doctor` search
 
@@ -129,7 +150,8 @@ Boot with a specific profile via `--provider <name>` and override the file path 
 | `--allow-bash` | off | Enable the Bash tool (explicit opt-in) |
 | `--allow-web` | off | Enable WebFetch (explicit opt-in) |
 | `--allow-semantic-search` | off | Requires `--features rig` on headless |
-| `--session <FILE>` | none | JSONL session: prior messages load on start, new ones append |
+| `--session <FILE>` | none | JSONL session: prior messages load on start, new ones append. Overrides `--sessions-dir` auto-create. |
+| `--sessions-dir <DIR>` | `<workspace>/.grain/sessions` | When `--session` isn't passed, auto-creates a fresh `<uuidv7>.jsonl` here so every run is recoverable via `/resume`. |
 | `--skills-dir <DIR>` | `<workspace>/.claude/skills` | Where to scan for `<name>/SKILL.md` |
 | `--telemetry-file <FILE>` | none | One JSON-serialized `AgentEvent` per line |
 | `--tick-ms <MS>` | `100` | Render tick interval |
@@ -145,7 +167,7 @@ Boot with a specific profile via `--provider <name>` and override the file path 
 
 - **`AppState`** (`src/app.rs`) — pure UI state machine; every key event maps to zero-or-more `Command`s and zero-or-more state mutations. Unit-tested without ratatui or tokio.
 - **`TuiEvent`** (`src/event.rs`) — single envelope for key presses, ticks, resizes, `AgentEvent`s from the worker, and worker replies (`OverlayDoctor`, `OverlaySkills`, `ProviderApplied`, etc.).
-- **`agent_worker`** (`src/agent_worker.rs`) — dedicated tokio task that owns the `Agent`. Bridges `Command` ↔ `TuiEvent` over `mpsc` channels. Handles runtime provider switches via `agent.set_model(...)` without restarting.
+- **`agent_worker`** (`src/agent_worker.rs`) — dedicated tokio task that owns the `Agent`. Bridges `Command` ↔ `TuiEvent` over `mpsc` channels. Handles runtime provider switches via `agent.set_model(...)` without restarting. Also manages session auto-create via [`session_discovery::new_session_path`](./headless-session-discovery.md) and the `/resume` picker via [`session_discovery::list_sessions`](./headless-session-discovery.md).
 - **`ui`** (`src/ui.rs`) — pure render functions over `&AppState`.
 - **`run`** (`src/run.rs`) — terminal lifecycle (raw mode + alt screen), event polling, render loop.
 

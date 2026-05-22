@@ -12,10 +12,13 @@ pub struct Skill {
     pub description: String,
     pub file_path: String,                  // 模型看到的 SKILL.md 绝对路径
     pub disable_model_invocation: bool,     // true → 不出现在渲染结果中
+    pub body: String,                       // frontmatter `---` 之后的完整正文
 }
 ```
 
-`serde(rename_all = "camelCase")`，所以序列化字段是 `name` / `description` / `filePath` / `disableModelInvocation`。
+`serde(rename_all = "camelCase")`，所以序列化字段是 `name` / `description` / `filePath` / `disableModelInvocation` / `body`。
+
+`body` 是 SKILL.md 中第二个 `---` 分隔符之后的全部文本。TUI 的 slash 面板 skill 注入（在 skill 上按 Enter 把正文贴到输入框）和未来的「按需读取 skill」机制都会用到它。system prompt 渲染器忽略 `body`——只有 `name`、`description`、`file_path`、`disable_model_invocation` 会出现在 `<available_skills>` 块中。
 
 ## `format_skills_for_system_prompt`
 
@@ -54,12 +57,14 @@ let skills = vec![
         description: "Runs shell commands".into(),
         file_path: "/skills/bash/SKILL.md".into(),
         disable_model_invocation: false,
+        body: String::new(),  // system prompt 渲染器忽略此字段
     },
     Skill {
         name: "Internal".into(),
         description: "Internal-only helper".into(),
         file_path: "/skills/internal/SKILL.md".into(),
         disable_model_invocation: true,  // 不进入 prompt
+        body: String::new(),
     },
 ];
 
