@@ -72,6 +72,7 @@ Rust port of [`@earendil-works/pi-agent-core`](https://github.com/earendil-works
 
 | Crate | Doc | What it is |
 |-------|-----|------------|
+| Plugin system (`lazy.gagent`) | [plugins.md](./plugins.md) | Drop `<workspace>/.grain/plugins/<name>/plugin.toml` and ship `skills/`, `themes/`, `prompts/*.md`, `scripts/*.js` — auto-discovered at startup, no rebuild |
 | `grain-script-boa` | [scripting.md](./scripting.md) | Boa-powered JS scripting layer — drop `.js` into `<workspace>/.grain/scripts/` to register agent tools at runtime |
 | `grain-pi-compat` | [pi-compat.md](./pi-compat.md) | [pi.dev-style extensions](https://pi.dev/docs/latest/extensions) running on grain — supports `registerTool` / `registerCommand` / `registerShortcut` / `on` / `ui.notify` / `ui.confirm` / `ui.input` / `ui.select` |
 
