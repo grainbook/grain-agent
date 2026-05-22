@@ -99,4 +99,9 @@ pub enum TuiEvent {
     /// runtime error, malformed return value). Carries a
     /// pre-formatted user-facing message.
     UiHandlerError(String),
+    /// Worker computed the set of plugin-contributed slash command
+    /// overrides at boot (and re-emits on `Command::ReloadRhaiScripts`).
+    /// The TUI stashes them in `AppState.plugin_slashes` and consults
+    /// them before the built-in slash table.
+    SlashCommandsRegistered(Vec<grain_ai_agent_headless::BoundPluginSlashCommand>),
 }

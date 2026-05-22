@@ -1380,6 +1380,7 @@ dependencies = [
  "grain-script-rhai",
  "notify",
  "ratatui",
+ "rhai",
  "serde",
  "serde_json",
  "tempfile",

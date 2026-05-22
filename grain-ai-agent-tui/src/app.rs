@@ -525,6 +525,11 @@ pub struct AppState {
     /// `None` — meaning the CLI `--model` flag governs and the picker
     /// shows no `✓` marker.
     pub current_provider_idx: Option<usize>,
+    /// Plugin-contributed slash command overrides. When the user
+    /// types `/<trigger>`, this list is consulted **before** the
+    /// built-in slash table; a match dispatches into the plugin's
+    /// Rhai handler via [`Command::InvokePluginUi`].
+    pub plugin_slashes: Vec<grain_ai_agent_headless::BoundPluginSlashCommand>,
     /// Skills loaded from `.claude/skills/` at startup. Used in the
     /// slash palette for prompt injection alongside built-in commands.
     pub skills: Vec<grain_agent_harness::Skill>,
@@ -701,6 +706,7 @@ impl AppState {
             current_theme_idx,
             providers,
             current_provider_idx: initial_provider_idx,
+            plugin_slashes: Vec::new(),
             skills: Vec::new(),
             palette_focused: 0,
             history: Vec::new(),
@@ -1198,6 +1204,10 @@ impl AppState {
             }
             TuiEvent::UiHandlerError(msg) => {
                 self.push(TranscriptKind::Error, msg);
+                Vec::new()
+            }
+            TuiEvent::SlashCommandsRegistered(list) => {
+                self.plugin_slashes = list;
                 Vec::new()
             }
             TuiEvent::ScrollUp { amount } => {
@@ -2067,6 +2077,17 @@ impl AppState {
 
     fn dispatch_slash(&mut self, rest: &str) -> Vec<Command> {
         let head = rest.split_whitespace().next().unwrap_or("");
+        // Plugin-contributed slash commands take precedence over
+        // built-ins — `/plugins` typed by the user goes through
+        // lazy-gagent's `ui_plugins_panel` handler (if installed),
+        // falling back to the built-in overlay otherwise.
+        if let Some(bound) = self.plugin_slashes.iter().find(|b| b.command.trigger == head) {
+            let handler = bound.command.handler.clone();
+            return vec![Command::InvokePluginUi {
+                handler,
+                args: serde_json::Value::Null,
+            }];
+        }
         match head {
             "help" | "?" => {
                 self.overlay = Some(Overlay::Help);

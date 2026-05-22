@@ -390,6 +390,11 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     for p in &discovered_plugins {
         eprintln!("[info] {}", grain_ai_agent_headless::summarize_plugin(p));
     }
+    // Plugin-contributed slash command overrides. Computed here so
+    // the boot-time send below uses the same plugin set the rest of
+    // the worker sees; recomputed on `Command::ReloadRhaiScripts`.
+    let plugin_slashes_at_boot =
+        grain_ai_agent_headless::collect_plugin_slash_commands(&discovered_plugins);
 
     // --- System prompt + skills block -------------------------------------
     // Pin the prompt for the lifetime of this session. The harness's
@@ -870,6 +875,12 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         // Send loaded skills to the UI so the slash-palette can offer
         // skill prompt injection alongside built-in commands.
         let _ = evt_tx_for_task.send(TuiEvent::SkillsLoaded(skills_for_ui));
+        // Ship plugin-contributed slash command overrides so the
+        // TUI's dispatch_slash consults them before the built-in
+        // table — that's how lazy-gagent claims `/plugins`.
+        let _ = evt_tx_for_task.send(TuiEvent::SlashCommandsRegistered(
+            plugin_slashes_at_boot,
+        ));
 
         // If we booted with a profile, tell the UI so the status line
         // and `✓` marker land correctly on first frame.
@@ -1410,6 +1421,62 @@ fn build_rhai_bundle(
             }
         },
     );
+
+    // plugins_list() → Array<Map> of {name, version, description,
+    // author, src, rev, origin, root, skills, themes, scripts,
+    // prompts}. Called by plugin Rhai scripts that build their
+    // own /plugins overlay (e.g. lazy-gagent's ui_plugins_panel).
+    let ws_list = workspace_root.to_path_buf();
+    let pdir_list = plugins_dir.to_path_buf();
+    engine.register_fn("plugins_list", move || -> rhai::Dynamic {
+        let config = grain_ai_agent_headless::ConfigFile::load(&ws_list)
+            .unwrap_or_default();
+        let (spec, _warnings) =
+            grain_ai_agent_headless::effective_spec(&ws_list, &config);
+        let spec_base = ws_list.join(".grain");
+        let discovered = grain_ai_agent_headless::discover_plugins_with_spec(
+            &pdir_list,
+            &spec,
+            &spec_base,
+        );
+        let mut arr: Vec<rhai::Dynamic> = Vec::with_capacity(discovered.len());
+        for p in discovered {
+            let info = grain_ai_agent_headless::plugin_info(&p);
+            let origin = match grain_ai_agent_headless::origin_of(&ws_list, &config, &info.name) {
+                Some(grain_ai_agent_headless::PluginOrigin::Config) => "config",
+                Some(grain_ai_agent_headless::PluginOrigin::Lock) => "lock",
+                Some(grain_ai_agent_headless::PluginOrigin::LegacySpec) => "legacy",
+                None => "manual",
+            };
+            let entry = spec.plugins.iter().find(|e| e.name == info.name);
+            let mut m = rhai::Map::new();
+            m.insert("name".into(), rhai::Dynamic::from(info.name.clone()));
+            m.insert("version".into(), rhai::Dynamic::from(info.version));
+            m.insert("description".into(), rhai::Dynamic::from(info.description));
+            m.insert("author".into(), rhai::Dynamic::from(info.author));
+            m.insert(
+                "src".into(),
+                rhai::Dynamic::from(entry.map(|e| e.src.clone()).unwrap_or_default()),
+            );
+            m.insert(
+                "rev".into(),
+                rhai::Dynamic::from(
+                    entry.and_then(|e| e.rev.clone()).unwrap_or_default(),
+                ),
+            );
+            m.insert("origin".into(), rhai::Dynamic::from(origin.to_string()));
+            m.insert(
+                "root".into(),
+                rhai::Dynamic::from(info.root.display().to_string()),
+            );
+            m.insert("skills".into(), rhai::Dynamic::from(info.skills as i64));
+            m.insert("themes".into(), rhai::Dynamic::from(info.themes as i64));
+            m.insert("scripts".into(), rhai::Dynamic::from(info.scripts as i64));
+            m.insert("prompts".into(), rhai::Dynamic::from(info.prompts as i64));
+            arr.push(rhai::Dynamic::from(m));
+        }
+        rhai::Dynamic::from(arr)
+    });
 
     // plugins_update(name) → status string. Doesn't touch any
     // spec file — just `git pull`s in <plugins_dir>/<name>/.
