@@ -25,6 +25,7 @@ pub mod context_guard;
 pub mod escalation;
 pub mod messages;
 pub mod prefix_pin;
+pub mod pruning;
 pub mod repair;
 pub mod session;
 pub mod session_jsonl;
@@ -54,6 +55,7 @@ pub use escalation::{
     failure_escalation_hook,
 };
 pub use prefix_pin::{PinnedSystemPrompt, append_only_guard};
+pub use pruning::{PruneConfig, PruneOutcome, prune_tool_outputs};
 pub use repair::{StormConfig, storm_hook};
 pub use session::{
     InMemorySessionRepo, InMemorySessionStorage, Session, SessionContext, SessionError,
