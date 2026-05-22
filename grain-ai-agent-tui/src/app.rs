@@ -648,6 +648,14 @@ pub struct AppState {
     /// the cost chip accurate. `Cost::default()` (all zeros) when
     /// pricing is unknown — the footer suppresses the chip then.
     pub model_cost: Cost,
+    /// Context window size in tokens for the active model. Drives the
+    /// `[ctx N%]` chip in the footer. `0` when unknown — the chip is
+    /// omitted in that case.
+    pub context_window: u64,
+    /// Number of compaction events in this session. Bumped when a
+    /// `TuiEvent::Info` contains "compacted". Rendered as
+    /// `[compact N]` in the footer when > 0.
+    pub compaction_count: u32,
     pub workspace_display: String,
     pub capabilities: Capabilities,
     pub show_thinking: bool,
@@ -832,6 +840,7 @@ impl AppState {
     pub fn new(
         model_id: String,
         model_cost: Cost,
+        context_window: u64,
         workspace_display: String,
         capabilities: Capabilities,
         show_thinking: bool,
@@ -864,6 +873,8 @@ impl AppState {
             pending_tool_calls: 0,
             model_id,
             model_cost,
+            context_window,
+            compaction_count: 0,
             workspace_display,
             capabilities,
             show_thinking,
@@ -1423,6 +1434,9 @@ impl AppState {
                 Vec::new()
             }
             TuiEvent::Info(text) => {
+                if text.contains("compacted") || text.contains("compact") {
+                    self.compaction_count = self.compaction_count.saturating_add(1);
+                }
                 self.push(TranscriptKind::Info, text);
                 Vec::new()
             }
@@ -3031,6 +3045,7 @@ mod tests {
         AppState::new(
             "deepseek/deepseek-chat".into(),
             Cost::default(),
+            0,
             "/tmp/proj".into(),
             Capabilities::default(),
             false,
@@ -3046,6 +3061,7 @@ mod tests {
         AppState::new(
             "deepseek/deepseek-chat".into(),
             Cost::default(),
+            0,
             "/tmp/proj".into(),
             Capabilities::default(),
             false,

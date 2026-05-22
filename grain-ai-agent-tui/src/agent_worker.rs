@@ -142,6 +142,10 @@ pub struct WorkerHandles {
     /// live cost chip. `Cost::default()` (all zeros) when pricing is
     /// unknown — the footer suppresses the chip in that case.
     pub model_cost: grain_agent_core::Cost,
+    /// Context window size in tokens for the booted model (from the
+    /// models.dev snapshot). `0` when unknown — the footer omits the
+    /// `[ctx N%]` chip in that case.
+    pub context_window: u64,
 }
 
 /// Errors that can happen *before* the worker successfully takes over.
@@ -856,6 +860,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
 
     // --- HarnessBuilder + initial harness ----------------------------------
     let model_cost = model.cost.clone();
+    let model_context_window = model.context_window;
     let deepseek = grain_ai_agent_headless::DeepSeekPack::new(&model);
     let builder = Arc::new(HarnessBuilder {
         model,
@@ -880,6 +885,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         allow_web: cfg.allow_web,
         allow_semantic_search: cfg.allow_semantic_search,
         model_cost: model_cost.clone(),
+        context_window: model_context_window,
     };
 
     // --- Telemetry sink (Arc'd; lives across `/resume` swaps) -------------

@@ -281,6 +281,7 @@ async fn event_loop(
     let mut state = AppState::new(
         handles.model_id.clone(),
         handles.model_cost.clone(),
+        handles.context_window,
         handles.workspace_display.clone(),
         Capabilities {
             allow_write: handles.allow_write,

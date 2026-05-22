@@ -769,6 +769,51 @@ fn build_footer_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
         ));
         spans.push(Span::raw("  "));
     }
+    // Context-window usage chip: [ctx N%]. Color: green <=60, yellow 60-85, red >85.
+    if state.context_window > 0 && state.tokens_in > 0 {
+        let pct = (state.tokens_in as f64 / state.context_window as f64 * 100.0)
+            .clamp(0.0, 100.0) as u64;
+        let ctx_color = if pct <= 60 {
+            palette.success
+        } else if pct <= 85 {
+            palette.warning
+        } else {
+            palette.error
+        };
+        spans.push(Span::styled(
+            format!("[ctx {pct}%]"),
+            Style::default().fg(ctx_color),
+        ));
+        spans.push(Span::raw("  "));
+    }
+    // Message count chip: [msg N].
+    {
+        let msg_count = state
+            .transcript
+            .iter()
+            .filter(|l| matches!(
+                l.kind,
+                TranscriptKind::UserPrompt
+                    | TranscriptKind::AssistantText
+                    | TranscriptKind::ToolCallEnd
+            ))
+            .count();
+        if msg_count > 0 {
+            spans.push(Span::styled(
+                format!("[msg {msg_count}]"),
+                Style::default().fg(palette.subdued),
+            ));
+            spans.push(Span::raw("  "));
+        }
+    }
+    // Compaction count chip: [compact N].
+    if state.compaction_count > 0 {
+        spans.push(Span::styled(
+            format!("[compact {}]", state.compaction_count),
+            Style::default().fg(palette.subdued),
+        ));
+        spans.push(Span::raw("  "));
+    }
     spans.push(Span::styled(
         "↑↓ history · Tab complete · PgUp/PgDn scroll · End tail · F1 help · F5 thinking · / cmds · Ctrl-C abort · Esc clear/quit",
         Style::default().fg(palette.muted),
