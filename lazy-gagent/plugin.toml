@@ -1,0 +1,4 @@
+name = "lazy-gagent"
+version = "0.1.0"
+description = "Plugin manager — bootstrap target referenced by plugin-spec.toml. Today a placeholder; Phase C-1 will ship install / update / remove tools."
+author = "grain-agent"
