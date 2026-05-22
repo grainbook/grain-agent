@@ -90,7 +90,7 @@ fn assistant_to_chat_message(msg: &AssistantMessage) -> ChatMessage {
             AssistantContent::ToolCall(tc) => parts.push(ContentPart::ToolCall(ToolCall {
                 call_id: tc.id.clone(),
                 fn_name: tc.name.clone(),
-                fn_arguments: tc.arguments.clone(),
+                fn_arguments: normalize_outbound_tool_args(&tc.arguments),
                 thought_signatures: None,
             })),
             AssistantContent::Thinking(t) => {
@@ -188,4 +188,50 @@ fn tool_def_to_genai(def: &ToolDefinition) -> Tool {
         tool = tool.with_schema(def.parameters.clone());
     }
     tool
+}
+
+/// Coerce a tool-call `arguments` value into the JSON object shape the
+/// provider expects.
+///
+/// History entries sometimes land in the session with `arguments` stored
+/// as a JSON-encoded string (a streaming chunk that finalized before
+/// `inbound::normalize_tool_args` could unwrap it, or a /resume of an
+/// older malformed entry). Sending such a string back to the provider
+/// triggers `"function.arguments must decode to a JSON object, got
+/// str"` 400s. Defensive symmetry with the inbound normalizer.
+fn normalize_outbound_tool_args(raw: &serde_json::Value) -> serde_json::Value {
+    if let serde_json::Value::String(s) = raw
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s)
+        && parsed.is_object()
+    {
+        return parsed;
+    }
+    raw.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn outbound_tool_args_unwraps_json_encoded_object_string() {
+        let raw = json!(r#"{"path": "/foo", "content": "hi"}"#);
+        let normalized = normalize_outbound_tool_args(&raw);
+        assert_eq!(normalized, json!({"path": "/foo", "content": "hi"}));
+    }
+
+    #[test]
+    fn outbound_tool_args_passes_through_object() {
+        let raw = json!({"path": "/foo"});
+        assert_eq!(normalize_outbound_tool_args(&raw), raw);
+    }
+
+    #[test]
+    fn outbound_tool_args_leaves_non_object_string_alone() {
+        // A bare string literal isn't a JSON object — keep as-is so the
+        // shape mismatch surfaces (rather than being silently masked).
+        let raw = json!("just a string");
+        assert_eq!(normalize_outbound_tool_args(&raw), raw);
+    }
 }
