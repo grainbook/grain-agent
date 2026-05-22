@@ -17,6 +17,7 @@ use grain_agent_core::{
     AgentEvent, AgentMessage, AssistantMessageEvent, Cost, Message, UserContent,
 };
 
+use crate::anim::EffectManager;
 use crate::event::TuiEvent;
 use crate::theme::Theme;
 use grain_llm_genai::ProviderProfile;
@@ -577,7 +578,7 @@ pub struct Capabilities {
 /// Everything the renderer needs to draw a frame. Pure data — no
 /// `Arc<Mutex<...>>`, no `tokio` types — so it can be cloned cheaply for
 /// snapshot testing.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AppState {
     pub transcript: Vec<TranscriptLine>,
     pub input: String,
@@ -740,6 +741,9 @@ pub struct AppState {
     /// selected. Cursor jumps via Up/Down in `on_key_transcript`;
     /// Space/Enter toggles fold of the focused block.
     pub transcript_cursor: Option<usize>,
+    /// Active tachyonfx visual effects. Processed each frame in
+    /// `ui::draw`; finished effects are auto-retired.
+    pub effects: EffectManager,
 }
 
 /// Cap on the in-memory prompt history. Old entries get truncated
@@ -884,6 +888,7 @@ impl AppState {
             fold_thinking_default: true,
             fold_overrides: HashMap::new(),
             transcript_cursor: None,
+            effects: EffectManager::new(),
         };
         s.push(
             TranscriptKind::Info,

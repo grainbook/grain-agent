@@ -315,8 +315,14 @@ async fn event_loop(
     // the choice so the next launch resumes it.
     let mut last_persisted_theme_idx = initial_theme_idx;
 
+    // Track wall-clock between frames so tachyonfx effects advance
+    // proportionally to real time.
+    let mut last_tick = std::time::Instant::now();
+
     // Initial draw.
-    terminal.draw(|f| ui::draw(f, &state))?;
+    terminal.draw(|f| {
+        ui::draw(f, &mut state, crate::anim::FxDuration::from_millis(0));
+    })?;
 
     loop {
         let event = tokio::select! {
@@ -427,7 +433,20 @@ async fn event_loop(
             apply_mouse_capture(terminal, state.mouse_capture_on)?;
             mouse_capture_applied = state.mouse_capture_on;
         }
-        terminal.draw(|f| ui::draw(f, &state))?;
+        let now = std::time::Instant::now();
+        let fx_elapsed = crate::anim::FxDuration::from_millis(
+            (now - last_tick).as_millis() as u32,
+        );
+        last_tick = now;
+        terminal.draw(|f| ui::draw(f, &mut state, fx_elapsed))?;
+
+        // When effects are animating or the agent is streaming, run
+        // at ~60 fps so transitions stay smooth. Otherwise block on
+        // the event channel as before (the ticker still fires at the
+        // configured `tick_ms` interval for time-based UI updates).
+        if state.effects.is_active() || state.streaming {
+            tokio::time::sleep(Duration::from_millis(16)).await;
+        }
     }
 }
 

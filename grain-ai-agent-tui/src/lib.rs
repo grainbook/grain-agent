@@ -18,6 +18,7 @@
 //!   that calls into it.
 
 pub mod agent_worker;
+pub mod anim;
 pub mod app;
 pub mod cli;
 pub mod config_apply;

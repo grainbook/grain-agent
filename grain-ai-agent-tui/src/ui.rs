@@ -49,7 +49,7 @@ const HEADER_MAX_ROWS: u16 = 3;
 /// it to grow more than the header before clamping.
 const FOOTER_MAX_ROWS: u16 = 5;
 
-pub fn draw(frame: &mut Frame<'_>, state: &AppState) {
+pub fn draw(frame: &mut Frame<'_>, state: &mut AppState, elapsed: crate::anim::FxDuration) {
     let area = frame.area();
     let palette = &state.theme().palette;
 
@@ -113,6 +113,9 @@ pub fn draw(frame: &mut Frame<'_>, state: &AppState) {
     if let Some(overlay) = &state.overlay {
         draw_overlay(frame, area, overlay, state, palette);
     }
+
+    // Process tachyonfx effects last so they paint on top of everything.
+    state.effects.process_frame(frame.buffer_mut(), elapsed);
 }
 
 /// Compute the input box's vertical height in rows for this frame.
