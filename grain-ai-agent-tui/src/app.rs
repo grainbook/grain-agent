@@ -1430,7 +1430,23 @@ impl AppState {
                 // Replace, don't append — the slot exists exactly so the
                 // user doesn't see a stack of "attempt 1/8, 2/8, 3/8..."
                 // rows piling up. Empty string clears the slot.
+                let prev = self.ephemeral_status.as_deref().unwrap_or("");
+                let changed = !text.is_empty() && text != prev;
                 self.ephemeral_status = if text.is_empty() { None } else { Some(text) };
+                // Flash the status row when the text is new / changed.
+                if changed {
+                    use crate::anim::{EffectKind, FxDuration, fx};
+                    let palette = &self.themes[self.current_theme_idx].palette;
+                    self.effects.clear_kind(EffectKind::StatusFlash);
+                    self.effects.push(
+                        EffectKind::StatusFlash,
+                        fx::sequence(vec![
+                            fx::paint_fg(palette.warning, FxDuration::from_millis(50)),
+                            fx::fade_to_fg(palette.muted, FxDuration::from_millis(300)),
+                        ]),
+                        self.render_metrics.get().full_area,
+                    );
+                }
                 Vec::new()
             }
             TuiEvent::PluginsListed {
@@ -2854,6 +2870,20 @@ impl AppState {
                 if let Some(err) = &message.error_message {
                     self.last_error = Some(err.clone());
                     self.push(TranscriptKind::Error, format!("[turn error] {err}"));
+                    // Flash the error row.
+                    {
+                        use crate::anim::{EffectKind, FxDuration, fx};
+                        let palette = &self.themes[self.current_theme_idx].palette;
+                        self.effects.clear_kind(EffectKind::ErrorFlash);
+                        self.effects.push(
+                            EffectKind::ErrorFlash,
+                            fx::sequence(vec![
+                                fx::paint_fg(palette.error, FxDuration::from_millis(50)),
+                                fx::fade_to_fg(palette.muted, FxDuration::from_millis(300)),
+                            ]),
+                            self.render_metrics.get().full_area,
+                        );
+                    }
                 }
             }
             AgentEvent::AgentEnd { messages } => {
