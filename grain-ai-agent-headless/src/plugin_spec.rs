@@ -199,15 +199,35 @@ pub fn sync_plugins(
             continue;
         }
         let target = plugins_dir.join(&p.name);
-        // `exists()` matches symlinks (broken or live), regular dirs,
-        // and files. All three count as "already installed — leave it".
-        if target.symlink_metadata().is_ok() {
-            report.skipped.push(p.name.clone());
-            continue;
-        }
         let outcome = match p.resolved_kind() {
-            SourceKind::Git => clone_git(&p.src, p.rev.as_deref(), &target),
-            SourceKind::Local => symlink_local(&p.src, base_dir, &target),
+            SourceKind::Git => {
+                // `exists()` matches symlinks (broken or live),
+                // regular dirs, and files. All three count as
+                // "already installed — leave it".
+                if target.symlink_metadata().is_ok() {
+                    report.skipped.push(p.name.clone());
+                    continue;
+                }
+                clone_git(&p.src, p.rev.as_deref(), &target)
+            }
+            SourceKind::Local => {
+                // No filesystem side-effect for local sources. The
+                // spec entry **is** the install — the engine reads
+                // local plugins straight from their source path via
+                // [`crate::plugins::discover_plugins_with_spec`].
+                // We still validate that the source exists + has a
+                // `plugin.toml`, so a typo in `src` surfaces here
+                // instead of as a mysterious "plugin missing" later.
+                if target.symlink_metadata().is_ok() {
+                    // Legacy: a prior version of this code created a
+                    // symlink here. Treat it as already installed so
+                    // existing workspaces keep working unchanged
+                    // until the user `rm -rf`s the stale link.
+                    report.skipped.push(p.name.clone());
+                    continue;
+                }
+                resolve_local_src(&p.src, base_dir).map(|_| ())
+            }
         };
         match outcome {
             Ok(()) => report.installed.push(p.name.clone()),
@@ -215,6 +235,31 @@ pub fn sync_plugins(
         }
     }
     report
+}
+
+/// Resolve a [`PluginSpec::src`] string treated as a local
+/// filesystem path. Mirrors the rules sync uses:
+/// - `~/...` is expanded against the home dir.
+/// - Relative paths anchor at `base_dir` (typically the spec file's
+///   parent).
+/// - Returns the canonicalized absolute path, or an error string.
+pub fn resolve_local_src(src: &str, base_dir: &Path) -> Result<PathBuf, String> {
+    let expanded = expand_tilde(src);
+    let resolved = if expanded.is_absolute() {
+        expanded
+    } else {
+        base_dir.join(expanded)
+    };
+    let canonical = resolved
+        .canonicalize()
+        .map_err(|e| format!("local path {}: {e}", resolved.display()))?;
+    if !canonical.is_dir() {
+        return Err(format!(
+            "local path is not a directory: {}",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
 }
 
 fn clone_git(src: &str, rev: Option<&str>, target: &Path) -> Result<(), String> {
@@ -257,23 +302,14 @@ fn clone_git(src: &str, rev: Option<&str>, target: &Path) -> Result<(), String> 
     Ok(())
 }
 
-fn symlink_local(src: &str, base_dir: &Path, target: &Path) -> Result<(), String> {
-    let expanded = expand_tilde(src);
-    // Relative paths in spec files are anchored at `base_dir` (the
-    // directory containing `plugin-spec.toml`) rather than the
-    // process's CWD. Absolute paths and `~/...` (already absolute
-    // after `expand_tilde`) pass through untouched.
-    let resolved = if expanded.is_absolute() {
-        expanded
-    } else {
-        base_dir.join(expanded)
-    };
-    let canonical = resolved
-        .canonicalize()
-        .map_err(|e| format!("local path {}: {e}", resolved.display()))?;
-    if !canonical.is_dir() {
-        return Err(format!("local path is not a directory: {}", canonical.display()));
-    }
+#[allow(dead_code)]
+fn _symlink_local_deprecated(src: &str, base_dir: &Path, target: &Path) -> Result<(), String> {
+    // Retained internally as documentation of the *old* local-source
+    // behavior. Not used by `sync_plugins` any more — local plugins
+    // live at their source path; the engine reads them via
+    // `discover_plugins_with_spec`. Kept here only as a reference
+    // implementation for anyone restoring symlink semantics.
+    let canonical = resolve_local_src(src, base_dir)?;
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(&canonical, target)
@@ -427,7 +463,10 @@ rev = "main"
     }
 
     #[test]
-    fn sync_symlinks_local_source() {
+    fn sync_local_source_validates_path_without_creating_fs_entry() {
+        // Local plugins live at their source path; the spec entry is
+        // the install. Sync only validates the path + manifest;
+        // `<plugins_dir>/<name>` should NOT exist after sync.
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("source");
         std::fs::create_dir_all(&source).unwrap();
@@ -445,10 +484,14 @@ rev = "main"
         let report = sync_plugins(&spec, &plugins_dir, tmp.path());
         assert_eq!(report.installed, vec!["linked".to_string()]);
         assert!(report.failed.is_empty());
-        // Target should now be a symlink resolving to the source.
+        // No `<plugins_dir>/linked` should exist — local plugins
+        // are virtual; discover reads them from `src` directly.
         let target = plugins_dir.join("linked");
-        assert!(target.symlink_metadata().unwrap().file_type().is_symlink());
-        assert!(target.join("plugin.toml").exists());
+        assert!(
+            target.symlink_metadata().is_err(),
+            "expected no fs entry at {}, got one",
+            target.display()
+        );
     }
 
     #[test]
@@ -518,9 +561,11 @@ rev = "main"
         let report = sync_plugins(&spec, &plugins_dir, &grain);
         assert_eq!(report.installed, vec!["lazy-gagent".to_string()]);
         assert!(report.failed.is_empty());
+        // No symlink — local plugins are virtual. The source path
+        // resolved correctly relative to the spec's parent dir; if
+        // it hadn't, validation would have failed.
         let target = plugins_dir.join("lazy-gagent");
-        assert!(target.symlink_metadata().unwrap().file_type().is_symlink());
-        assert!(target.join("plugin.toml").exists());
+        assert!(target.symlink_metadata().is_err());
     }
 
     #[test]

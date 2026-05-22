@@ -277,7 +277,11 @@ mod tests {
         assert!(outcome.report.installed.contains(&"source-plugin".to_string()));
         let parsed = load_plugin_spec(&spec_path).unwrap();
         assert_eq!(parsed.plugins.len(), 1);
-        assert!(plugins_dir.join("source-plugin").symlink_metadata().is_ok());
+        // Local plugins are virtual — sync validates the source path
+        // but doesn't create any entry under `plugins_dir`. The
+        // engine reads them from `src` directly via
+        // `discover_plugins_with_spec`.
+        assert!(plugins_dir.join("source-plugin").symlink_metadata().is_err());
     }
 
     #[test]
@@ -343,7 +347,10 @@ mod tests {
     }
 
     #[test]
-    fn remove_unlinks_symlink_without_touching_source() {
+    fn remove_local_drops_spec_without_touching_source() {
+        // Local plugins don't have a filesystem entry under
+        // `plugins_dir`, so `remove(.., delete_files=true)` only
+        // edits the spec. The source tree stays intact.
         let tmp = make_workspace();
         let spec_path = tmp.path().join(".grain").join("plugin-spec.toml");
         let plugins_dir = tmp.path().join(".grain").join("plugins");
@@ -351,8 +358,43 @@ mod tests {
         write_file(&source.join("plugin.toml"), "name = \"x\"\n");
         install(&spec_path, &plugins_dir, "x", source.to_str().unwrap(), None).unwrap();
         let outcome = remove(&spec_path, &plugins_dir, "x", true).unwrap();
-        assert!(outcome.files_removed);
+        // Spec entry dropped, but no files to clean (none were
+        // created for the local install in the first place).
+        assert!(outcome.spec_updated);
+        assert!(!outcome.files_removed);
         assert!(plugins_dir.join("x").symlink_metadata().is_err());
+        // Source tree intact.
+        assert!(source.join("plugin.toml").exists());
+    }
+
+    #[test]
+    fn remove_legacy_symlink_with_delete_files_unlinks_without_touching_source() {
+        // Backward-compat: an existing workspace may have a symlink
+        // from before the spec switched to virtual local installs.
+        // `remove(.., true)` should still tear that link down.
+        let tmp = make_workspace();
+        let spec_path = tmp.path().join(".grain").join("plugin-spec.toml");
+        let plugins_dir = tmp.path().join(".grain").join("plugins");
+        let source = tmp.path().join("legacy-source");
+        write_file(&source.join("plugin.toml"), "name = \"legacy\"\n");
+        write_file(
+            &spec_path,
+            &format!(
+                "[[plugin]]\nname = \"legacy\"\nsrc = \"{}\"\n",
+                source.display()
+            ),
+        );
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&source, plugins_dir.join("legacy")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&source, plugins_dir.join("legacy")).unwrap();
+
+        let outcome = remove(&spec_path, &plugins_dir, "legacy", true).unwrap();
+        assert!(outcome.spec_updated);
+        assert!(outcome.files_removed);
+        assert!(plugins_dir.join("legacy").symlink_metadata().is_err());
+        // Source tree intact.
         assert!(source.join("plugin.toml").exists());
     }
 
@@ -367,14 +409,36 @@ mod tests {
     }
 
     #[test]
-    fn update_is_noop_for_symlink_sources() {
+    fn update_local_install_returns_not_found_since_no_install_dir() {
+        // Local plugins don't have an entry under `plugins_dir`, so
+        // `update()` (which is filesystem-only) returns NotFound.
+        // The TUI's `lazy_update` host fn can layer spec-aware
+        // semantics on top if it wants a friendlier message.
         let tmp = make_workspace();
         let spec_path = tmp.path().join(".grain").join("plugin-spec.toml");
         let plugins_dir = tmp.path().join(".grain").join("plugins");
         let source = tmp.path().join("src");
         write_file(&source.join("plugin.toml"), "name = \"linked\"\n");
         install(&spec_path, &plugins_dir, "linked", source.to_str().unwrap(), None).unwrap();
-        assert_eq!(update(&plugins_dir, "linked").unwrap(), UpdateOutcome::Symlink);
+        let err = update(&plugins_dir, "linked").err().unwrap();
+        assert!(matches!(err, ManagerError::NotFound(_)));
+    }
+
+    #[test]
+    fn update_legacy_symlink_returns_symlink_outcome() {
+        // Backward-compat: pre-existing symlinks (from before local
+        // plugins went virtual) still get the "live, no pull"
+        // semantics from `update()`.
+        let tmp = make_workspace();
+        let plugins_dir = tmp.path().join(".grain").join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        let source = tmp.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&source, plugins_dir.join("legacy")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&source, plugins_dir.join("legacy")).unwrap();
+        assert_eq!(update(&plugins_dir, "legacy").unwrap(), UpdateOutcome::Symlink);
     }
 
     #[test]

@@ -73,12 +73,13 @@ pub use session_discovery::{
 pub use skills::{DEFAULT_SKILLS_DIR, SkillsError, find_skills, resolve_skills_dir};
 pub use plugins::{
     Plugin, PluginInfo, PluginManifest, PromptFragment, compose_system_prompt_with_plugins,
-    default_plugins_dir, discover_plugins, find_skills_with_plugins, parse_manifest, plugin_info,
-    plugin_script_dirs, read_plugin_prompt_fragments, summarize_plugin,
+    default_plugins_dir, discover_plugins, discover_plugins_with_spec, find_skills_with_plugins,
+    parse_manifest, plugin_info, plugin_script_dirs, read_plugin_prompt_fragments,
+    summarize_plugin,
 };
 pub use plugin_spec::{
     PluginSpec, PluginSpecFile, SourceKind, SyncReport, default_spec_path, detect_source_kind,
-    load_plugin_spec, sync_plugins,
+    load_plugin_spec, resolve_local_src, sync_plugins,
 };
 pub use plugin_manager::{
     InstallOutcome, ManagerError, RemoveOutcome, UpdateOutcome, install, remove, update,

@@ -170,6 +170,68 @@ pub fn parse_manifest(path: &Path) -> std::io::Result<PluginManifest> {
     toml::from_str(&raw).map_err(|e| std::io::Error::other(format!("manifest parse: {e}")))
 }
 
+/// Discover both:
+/// 1. Plugins installed under `plugins_dir` (the existing
+///    `discover_plugins` filesystem walk — git-cloned plugins +
+///    any hand-placed dirs + legacy symlinks).
+/// 2. Plugins declared as **local sources** in `spec` — these live
+///    at their `src` path on disk and intentionally have no entry
+///    under `plugins_dir` (no filesystem side-effect, no symlink).
+///    The engine reads them directly from `src`.
+///
+/// `base_dir` is used to anchor relative local-source paths,
+/// matching the rule [`crate::plugin_spec::sync_plugins`] uses.
+///
+/// Returns the union, sorted alphabetically by manifest name.
+/// Duplicate names (filesystem entry + spec entry) prefer the
+/// filesystem version — that lets users locally override a
+/// git-installed plugin by `rm -rf`ing the installed dir + adding
+/// a local-src entry, without losing the spec entry's intent.
+pub fn discover_plugins_with_spec(
+    plugins_dir: &Path,
+    spec: &crate::plugin_spec::PluginSpecFile,
+    base_dir: &Path,
+) -> Vec<Plugin> {
+    use crate::plugin_spec::{SourceKind, resolve_local_src};
+
+    let mut out = discover_plugins(plugins_dir);
+    for entry in &spec.plugins {
+        if !matches!(entry.resolved_kind(), SourceKind::Local) {
+            continue;
+        }
+        if out.iter().any(|p| p.manifest.name == entry.name) {
+            // Filesystem already has this name — fs wins.
+            continue;
+        }
+        let resolved = match resolve_local_src(&entry.src, base_dir) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "[warn] plugin '{}' local src {}: {e}",
+                    entry.name, entry.src
+                );
+                continue;
+            }
+        };
+        let manifest_path = resolved.join("plugin.toml");
+        match parse_manifest(&manifest_path) {
+            Ok(manifest) => out.push(Plugin {
+                manifest,
+                root: resolved,
+            }),
+            Err(e) => {
+                eprintln!(
+                    "[warn] plugin '{}' manifest at {}: {e}",
+                    entry.name,
+                    manifest_path.display()
+                );
+            }
+        }
+    }
+    out.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Summaries
 // ---------------------------------------------------------------------------

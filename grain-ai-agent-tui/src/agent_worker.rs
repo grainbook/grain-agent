@@ -360,26 +360,36 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // never sees the failure: stderr writes happen before the alt
     // screen takes over and get scrolled out of view.
     let mut deferred_warnings: Vec<String> = Vec::new();
-    match grain_ai_agent_headless::load_plugin_spec(&spec_path) {
-        Ok(spec) if !spec.plugins.is_empty() => {
-            let report = grain_ai_agent_headless::sync_plugins(&spec, &plugins_dir, &spec_base);
-            report.log_to_stderr();
-            for (name, reason) in &report.failed {
-                deferred_warnings.push(format!(
-                    "plugin '{name}' install failed: {reason}"
-                ));
+    let plugin_spec = match grain_ai_agent_headless::load_plugin_spec(&spec_path) {
+        Ok(spec) => {
+            if !spec.plugins.is_empty() {
+                let report =
+                    grain_ai_agent_headless::sync_plugins(&spec, &plugins_dir, &spec_base);
+                report.log_to_stderr();
+                for (name, reason) in &report.failed {
+                    deferred_warnings.push(format!(
+                        "plugin '{name}' install failed: {reason}"
+                    ));
+                }
             }
+            spec
         }
-        Ok(_) => {} // empty spec / file absent
         Err(e) => {
             let msg = format!("plugin-spec.toml at {}: {e}", spec_path.display());
             eprintln!("[warn] {msg}");
             deferred_warnings.push(msg);
+            grain_ai_agent_headless::PluginSpecFile::default()
         }
-    }
-    // Discover before the system prompt + skills resolution so plugin
-    // contributions land in the same pinned prefix as the built-ins.
-    let discovered_plugins = grain_ai_agent_headless::discover_plugins(&plugins_dir);
+    };
+    // Discover both filesystem-installed plugins (`plugins_dir` walk
+    // — gets git-cloned + legacy-symlinked + hand-placed dirs) and
+    // **local-source** entries from the spec (no filesystem entry
+    // under `plugins_dir`; engine reads them straight from `src`).
+    let discovered_plugins = grain_ai_agent_headless::discover_plugins_with_spec(
+        &plugins_dir,
+        &plugin_spec,
+        &spec_base,
+    );
     for p in &discovered_plugins {
         eprintln!("[info] {}", grain_ai_agent_headless::summarize_plugin(p));
     }
@@ -982,11 +992,25 @@ async fn run_command_loop(
                 let _ = evt_tx.send(TuiEvent::SessionsListed(list));
             }
             Command::ReturnPlugins => {
+                // Re-read the spec so local-source entries the user
+                // added since boot show up in the overlay.
+                let spec_path =
+                    grain_ai_agent_headless::default_spec_path(workspace.root());
+                let spec_base = spec_path
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(|| workspace.root().to_path_buf());
+                let spec = grain_ai_agent_headless::load_plugin_spec(&spec_path)
+                    .unwrap_or_default();
                 let infos: Vec<grain_ai_agent_headless::PluginInfo> =
-                    grain_ai_agent_headless::discover_plugins(&plugins_dir)
-                        .iter()
-                        .map(grain_ai_agent_headless::plugin_info)
-                        .collect();
+                    grain_ai_agent_headless::discover_plugins_with_spec(
+                        &plugins_dir,
+                        &spec,
+                        &spec_base,
+                    )
+                    .iter()
+                    .map(grain_ai_agent_headless::plugin_info)
+                    .collect();
                 let _ = evt_tx.send(TuiEvent::PluginsListed(infos));
             }
             Command::InstallPlugin { name, src, rev } => {
