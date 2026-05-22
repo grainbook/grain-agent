@@ -86,7 +86,13 @@ impl TokenEstimator {
     pub const fn approximate() -> Self {
         TokenEstimator {
             bytes_per_token: 4.0,
-            per_message_overhead: 16,
+            // 24 tokens/message covers the chatml-style wrapper
+            // (`<|im_start|>role`, `<|im_end|>`, role tokens) plus
+            // the `tool_call_id` / `tool_use_id` keys that
+            // tool-heavy transcripts repeat for every result. A
+            // lower value (16) under-counted real provider charges
+            // by ~700 tokens on a 616-message kimi-k2.6 transcript.
+            per_message_overhead: 24,
         }
     }
 

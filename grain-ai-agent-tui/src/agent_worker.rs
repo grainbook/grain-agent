@@ -637,9 +637,11 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         }
         (raw as f64 * 1.3).ceil() as u64
     };
+    let per_msg_framing = grain_agent_harness::TokenEstimator::approximate()
+        .per_message_overhead();
     let overhead_banner = format!(
         "context guard: system+tools overhead ≈ {system_overhead_tokens} tokens \
-         ({} tools, system_prompt {} bytes)",
+         ({} tools, system_prompt {} bytes, per-msg framing {per_msg_framing}t)",
         tools.len(),
         system_prompt.len(),
     );

@@ -147,9 +147,10 @@ fn estimator_messages_sums_each_entry() {
 #[test]
 fn estimator_messages_charges_per_message_framing_by_default() {
     let est = TokenEstimator::approximate();
-    // 3 messages × 1 content token + 3 × 16 framing = 51 tokens.
+    let default_framing = est.per_message_overhead();
     let msgs = vec![user_text("aaaa"), assistant_text("bbbb"), tool_result("cccc")];
-    assert_eq!(est.estimate_messages(&msgs), 3 + 3 * 16);
+    // 3 messages × 1 content token + 3 × default framing tokens.
+    assert_eq!(est.estimate_messages(&msgs), 3 + 3 * default_framing);
 }
 
 #[test]
