@@ -109,6 +109,49 @@ pub enum Overlay {
         on_yes: String,
         yes_args: serde_json::Value,
     },
+    /// Selectable list (`OverlayDescriptor::List`). Up/Down
+    /// navigates; Enter dispatches `on_select` with
+    /// `{ index, value }` if set, else dismisses.
+    DynamicList {
+        title: String,
+        items: Vec<String>,
+        on_select: Option<String>,
+        focused: usize,
+    },
+    /// Tabular display with optional row selection
+    /// (`OverlayDescriptor::Table`). Up/Down navigates; Enter
+    /// dispatches `on_select` with `{ row_index, row }` if set.
+    DynamicTable {
+        title: String,
+        columns: Vec<String>,
+        rows: Vec<Vec<String>>,
+        on_select: Option<String>,
+        focused: usize,
+    },
+    /// Display-only styled-text panel (`OverlayDescriptor::TextPanel`).
+    /// Esc dismisses.
+    DynamicTextPanel {
+        title: String,
+        lines: Vec<grain_ai_agent_headless::TextLine>,
+        footer: Option<String>,
+    },
+    /// Display-only progress bar (`OverlayDescriptor::Progress`).
+    /// Esc dismisses. Plugin re-issues to animate.
+    DynamicProgress {
+        title: String,
+        value: i64,
+        max: i64,
+        label: String,
+    },
+    /// Display-only vertical stack of widgets
+    /// (`OverlayDescriptor::Stack`). Each child renders in
+    /// declaration order; no key routing across children — Esc
+    /// dismisses the whole stack. For interactivity, the plugin
+    /// returns a single non-Stack widget.
+    DynamicStack {
+        title: String,
+        children: Vec<grain_ai_agent_headless::OverlayDescriptor>,
+    },
 }
 
 /// Per-field editor state inside [`Overlay::DynamicForm`]. The TUI
@@ -1107,6 +1150,49 @@ impl AppState {
                         on_yes,
                         yes_args,
                     },
+                    D::List {
+                        title,
+                        items,
+                        on_select,
+                    } => Overlay::DynamicList {
+                        title,
+                        items,
+                        on_select,
+                        focused: 0,
+                    },
+                    D::Table {
+                        title,
+                        columns,
+                        rows,
+                        on_select,
+                    } => Overlay::DynamicTable {
+                        title,
+                        columns,
+                        rows,
+                        on_select,
+                        focused: 0,
+                    },
+                    D::TextPanel {
+                        title,
+                        lines,
+                        footer,
+                    } => Overlay::DynamicTextPanel {
+                        title,
+                        lines,
+                        footer,
+                    },
+                    D::Progress {
+                        title,
+                        value,
+                        max,
+                        label,
+                    } => Overlay::DynamicProgress {
+                        title,
+                        value,
+                        max,
+                        label,
+                    },
+                    D::Stack { title, children } => Overlay::DynamicStack { title, children },
                 });
                 Vec::new()
             }
@@ -1276,6 +1362,25 @@ impl AppState {
             Some(Overlay::DynamicModal { .. } | Overlay::DynamicConfirm { .. })
         ) {
             return self.on_key_dynamic_modal_or_confirm(key);
+        }
+        if matches!(self.overlay, Some(Overlay::DynamicList { .. })) {
+            return self.on_key_dynamic_list(key);
+        }
+        if matches!(self.overlay, Some(Overlay::DynamicTable { .. })) {
+            return self.on_key_dynamic_table(key);
+        }
+        // DynamicTextPanel, DynamicProgress, DynamicStack are
+        // display-only; Esc (handled above) dismisses, everything
+        // else is a no-op.
+        if matches!(
+            self.overlay,
+            Some(
+                Overlay::DynamicTextPanel { .. }
+                    | Overlay::DynamicProgress { .. }
+                    | Overlay::DynamicStack { .. }
+            )
+        ) {
+            return Vec::new();
         }
         match key.code {
             KeyCode::F(1) => {
@@ -1759,6 +1864,108 @@ impl AppState {
                 }
                 _ => Vec::new(),
             },
+            _ => Vec::new(),
+        }
+    }
+
+    /// Key handler for [`Overlay::DynamicList`]. Up/Down navigates;
+    /// Enter dispatches `on_select` (if set) with
+    /// `{ index, value }` and dismisses; Esc just dismisses.
+    fn on_key_dynamic_list(&mut self, key: KeyEvent) -> Vec<Command> {
+        let Some(Overlay::DynamicList {
+            items,
+            on_select,
+            focused,
+            ..
+        }) = &mut self.overlay
+        else {
+            return Vec::new();
+        };
+        match key.code {
+            KeyCode::Up => {
+                if *focused > 0 {
+                    *focused -= 1;
+                }
+                Vec::new()
+            }
+            KeyCode::Down => {
+                if *focused + 1 < items.len() {
+                    *focused += 1;
+                }
+                Vec::new()
+            }
+            KeyCode::Home => {
+                *focused = 0;
+                Vec::new()
+            }
+            KeyCode::End => {
+                *focused = items.len().saturating_sub(1);
+                Vec::new()
+            }
+            KeyCode::Enter => {
+                let handler = on_select.clone();
+                let value = items.get(*focused).cloned().unwrap_or_default();
+                let index = *focused;
+                self.overlay = None;
+                match handler {
+                    Some(handler) => vec![Command::InvokePluginUi {
+                        handler,
+                        args: serde_json::json!({ "index": index, "value": value }),
+                    }],
+                    None => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Key handler for [`Overlay::DynamicTable`]. Same navigation
+    /// shape as DynamicList but dispatches with
+    /// `{ row_index, row: [<column>...] }`.
+    fn on_key_dynamic_table(&mut self, key: KeyEvent) -> Vec<Command> {
+        let Some(Overlay::DynamicTable {
+            rows,
+            on_select,
+            focused,
+            ..
+        }) = &mut self.overlay
+        else {
+            return Vec::new();
+        };
+        match key.code {
+            KeyCode::Up => {
+                if *focused > 0 {
+                    *focused -= 1;
+                }
+                Vec::new()
+            }
+            KeyCode::Down => {
+                if *focused + 1 < rows.len() {
+                    *focused += 1;
+                }
+                Vec::new()
+            }
+            KeyCode::Home => {
+                *focused = 0;
+                Vec::new()
+            }
+            KeyCode::End => {
+                *focused = rows.len().saturating_sub(1);
+                Vec::new()
+            }
+            KeyCode::Enter => {
+                let handler = on_select.clone();
+                let row = rows.get(*focused).cloned().unwrap_or_default();
+                let index = *focused;
+                self.overlay = None;
+                match handler {
+                    Some(handler) => vec![Command::InvokePluginUi {
+                        handler,
+                        args: serde_json::json!({ "row_index": index, "row": row }),
+                    }],
+                    None => Vec::new(),
+                }
+            }
             _ => Vec::new(),
         }
     }

@@ -727,6 +727,29 @@ fn draw_overlay(
         }
         Overlay::DynamicModal { .. } => (72, 12),
         Overlay::DynamicConfirm { .. } => (66, 11),
+        Overlay::DynamicList { items, .. } => {
+            // 4 rows chrome + 1 per item, capped.
+            let h = 5u16.saturating_add(items.len() as u16).min(24);
+            (66, h.max(8))
+        }
+        Overlay::DynamicTable { rows, .. } => {
+            // chrome (4) + header (1) + per row (1), capped.
+            let h = 6u16.saturating_add(rows.len() as u16).min(24);
+            (88, h.max(8))
+        }
+        Overlay::DynamicTextPanel { lines, footer, .. } => {
+            // chrome (3) + per line (1) + optional footer row.
+            let chrome = if footer.is_some() { 4 } else { 3 };
+            let h = (chrome + lines.len() as u16).min(28);
+            (88, h.max(6))
+        }
+        Overlay::DynamicProgress { .. } => (60, 8),
+        Overlay::DynamicStack { children, .. } => {
+            // Rough estimate: 4 chrome + 6 rows per child (most
+            // children fit). Capped at terminal height anyway.
+            let h = (4u16 + children.len() as u16 * 6).min(28);
+            (88, h.max(10))
+        }
     };
     let popup = centered_rect_fixed(target_w, target_h, area);
     // Clear so the transcript underneath doesn't bleed through; then
@@ -788,6 +811,48 @@ fn draw_overlay(
         }
         Overlay::DynamicConfirm { title, body, .. } => {
             return draw_dynamic_confirm(frame, inner, title, body, palette);
+        }
+        Overlay::DynamicList {
+            title,
+            items,
+            focused,
+            ..
+        } => {
+            return draw_dynamic_list(frame, inner, title, items, *focused, palette);
+        }
+        Overlay::DynamicTable {
+            title,
+            columns,
+            rows,
+            focused,
+            ..
+        } => {
+            return draw_dynamic_table(frame, inner, title, columns, rows, *focused, palette);
+        }
+        Overlay::DynamicTextPanel {
+            title,
+            lines,
+            footer,
+        } => {
+            return draw_dynamic_text_panel(
+                frame,
+                inner,
+                title,
+                lines,
+                footer.as_deref(),
+                palette,
+            );
+        }
+        Overlay::DynamicProgress {
+            title,
+            value,
+            max,
+            label,
+        } => {
+            return draw_dynamic_progress(frame, inner, title, *value, *max, label, palette);
+        }
+        Overlay::DynamicStack { title, children } => {
+            return draw_dynamic_stack(frame, inner, title, children, palette);
         }
     };
 
@@ -1416,6 +1481,493 @@ fn draw_dynamic_confirm(
         ))),
         chunks[3],
     );
+}
+
+/// Map the plugin-facing semantic [`grain_ai_agent_headless::TextColor`]
+/// to a concrete palette color. Keeps "success" / "error" / "accent"
+/// consistent across themes.
+fn map_text_color(c: grain_ai_agent_headless::TextColor, palette: &Palette) -> Color {
+    use grain_ai_agent_headless::TextColor as T;
+    match c {
+        T::Fg => palette.fg,
+        T::Muted => palette.muted,
+        T::Accent => palette.accent,
+        T::Secondary => palette.secondary,
+        T::Info => palette.info,
+        T::Error => palette.error,
+        T::Success => palette.info,
+        T::Warn => palette.secondary,
+    }
+}
+
+/// Convert a plugin-supplied [`grain_ai_agent_headless::TextLine`] into
+/// a ratatui `Line` with palette-mapped styling.
+fn render_text_line(
+    line: &grain_ai_agent_headless::TextLine,
+    palette: &Palette,
+) -> Line<'static> {
+    let spans: Vec<Span<'static>> = line
+        .spans
+        .iter()
+        .map(|s| {
+            let mut style = Style::default()
+                .fg(s.color.map(|c| map_text_color(c, palette)).unwrap_or(palette.fg));
+            if s.bold {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            Span::styled(s.text.clone(), style)
+        })
+        .collect();
+    Line::from(spans)
+}
+
+/// Draw [`crate::app::Overlay::DynamicList`]. Highlighted row is
+/// the focused entry; Esc / Enter footer hints below the body.
+fn draw_dynamic_list(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    title: &str,
+    items: &[String],
+    focused: usize,
+    palette: &Palette,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(popup);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        chunks[0],
+    );
+    let lines: Vec<Line> = if items.is_empty() {
+        vec![Line::from(Span::styled(
+            "(empty)",
+            Style::default().fg(palette.muted),
+        ))]
+    } else {
+        items
+            .iter()
+            .enumerate()
+            .map(|(i, it)| {
+                let style = if i == focused {
+                    Style::default()
+                        .fg(palette.surface)
+                        .bg(palette.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(palette.fg)
+                };
+                Line::from(Span::styled(format!("  {it}"), style))
+            })
+            .collect()
+    };
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "↑↓ navigate · Enter pick · Esc close",
+            Style::default().fg(palette.muted),
+        ))),
+        chunks[3],
+    );
+}
+
+/// Draw [`crate::app::Overlay::DynamicTable`]. Header row in accent
+/// color, focused row highlighted, columns padded to longest cell.
+fn draw_dynamic_table(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    title: &str,
+    columns: &[String],
+    rows: &[Vec<String>],
+    focused: usize,
+    palette: &Palette,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(popup);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        chunks[0],
+    );
+    // Per-column width = max(header, all rows).
+    let mut widths: Vec<usize> = columns
+        .iter()
+        .map(|c| UnicodeWidthStr::width(c.as_str()))
+        .collect();
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < widths.len() {
+                widths[i] = widths[i].max(UnicodeWidthStr::width(cell.as_str()));
+            }
+        }
+    }
+    let pad = |s: &str, w: usize| {
+        let cur = UnicodeWidthStr::width(s);
+        if cur >= w {
+            s.to_string()
+        } else {
+            let mut out = s.to_string();
+            out.push_str(&" ".repeat(w - cur));
+            out
+        }
+    };
+    let header_text = columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| pad(c, widths.get(i).copied().unwrap_or(0)))
+        .collect::<Vec<_>>()
+        .join("  ");
+    let header = Line::from(Span::styled(
+        header_text,
+        Style::default()
+            .fg(palette.accent)
+            .add_modifier(Modifier::BOLD),
+    ));
+    let mut body: Vec<Line> = vec![header];
+    if rows.is_empty() {
+        body.push(Line::from(Span::styled(
+            "(no rows)",
+            Style::default().fg(palette.muted),
+        )));
+    } else {
+        for (i, row) in rows.iter().enumerate() {
+            let text = row
+                .iter()
+                .enumerate()
+                .map(|(c, cell)| pad(cell, widths.get(c).copied().unwrap_or(0)))
+                .collect::<Vec<_>>()
+                .join("  ");
+            let style = if i == focused {
+                Style::default()
+                    .fg(palette.surface)
+                    .bg(palette.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.fg)
+            };
+            body.push(Line::from(Span::styled(text, style)));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(Text::from(body)).wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "↑↓ navigate · Enter pick · Esc close",
+            Style::default().fg(palette.muted),
+        ))),
+        chunks[3],
+    );
+}
+
+/// Draw [`crate::app::Overlay::DynamicTextPanel`]. Plugin owns the
+/// row contents and styling; this just maps each TextLine into a
+/// ratatui Line via the palette-aware [`render_text_line`].
+fn draw_dynamic_text_panel(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    title: &str,
+    lines: &[grain_ai_agent_headless::TextLine],
+    footer: Option<&str>,
+    palette: &Palette,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(popup);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        chunks[0],
+    );
+    let body: Vec<Line> = lines.iter().map(|l| render_text_line(l, palette)).collect();
+    frame.render_widget(
+        Paragraph::new(Text::from(body)).wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+    let footer_text = footer.unwrap_or("Esc close").to_string();
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            footer_text,
+            Style::default().fg(palette.muted),
+        ))),
+        chunks[3],
+    );
+}
+
+/// Draw [`crate::app::Overlay::DynamicProgress`]. Block-style fill
+/// bar inside the body; the title row tracks percent.
+fn draw_dynamic_progress(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    title: &str,
+    value: i64,
+    max: i64,
+    label: &str,
+    palette: &Palette,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(popup);
+    let pct = if max > 0 {
+        ((value.max(0) as f32) / (max as f32) * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                title.to_string(),
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("{pct:.0}%"),
+                Style::default().fg(palette.muted),
+            ),
+        ])),
+        chunks[0],
+    );
+    // Render a single-row fill bar. Body width drives the bar
+    // length; clamp to body width to handle tiny terminals.
+    let bar_w = chunks[2].width.max(1) as usize;
+    let filled = ((pct / 100.0) * bar_w as f32).round() as usize;
+    let mut bar = String::new();
+    for _ in 0..filled {
+        bar.push('█');
+    }
+    for _ in filled..bar_w {
+        bar.push('░');
+    }
+    let bar_line = Line::from(Span::styled(bar, Style::default().fg(palette.accent)));
+    let body: Vec<Line> = if label.is_empty() {
+        vec![bar_line]
+    } else {
+        vec![
+            Line::from(Span::styled(
+                label.to_string(),
+                Style::default().fg(palette.fg),
+            )),
+            bar_line,
+        ]
+    };
+    frame.render_widget(Paragraph::new(Text::from(body)), chunks[2]);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Esc close",
+            Style::default().fg(palette.muted),
+        ))),
+        chunks[3],
+    );
+}
+
+/// Draw [`crate::app::Overlay::DynamicStack`]. Children are
+/// rendered top-to-bottom by recursing into a small slice of the
+/// inner area per child; only TextPanel / Progress / List / Table
+/// nested children draw correctly here (other variants assume
+/// owning the full popup, so they'll truncate inside a stack).
+fn draw_dynamic_stack(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    title: &str,
+    children: &[grain_ai_agent_headless::OverlayDescriptor],
+    palette: &Palette,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(popup);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        chunks[0],
+    );
+    // Equal vertical share per child for v1; future revs may use
+    // per-child weights.
+    let n = children.len().max(1) as u16;
+    let per_h = (chunks[2].height / n).max(1);
+    let mut y = chunks[2].y;
+    for (i, child) in children.iter().enumerate() {
+        let h = if i == children.len() - 1 {
+            chunks[2].y + chunks[2].height - y // last child gets the remainder
+        } else {
+            per_h
+        };
+        let area = Rect {
+            x: chunks[2].x,
+            y,
+            width: chunks[2].width,
+            height: h,
+        };
+        draw_stack_child(frame, area, child, palette);
+        y += h;
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Esc close",
+            Style::default().fg(palette.muted),
+        ))),
+        chunks[3],
+    );
+}
+
+/// Render one stacked child inline (no chrome — title goes inline
+/// with the content). Only display-oriented children are
+/// well-supported; interactive children (Form, Confirm, List with
+/// on_select, Table with on_select) will render their visuals but
+/// keys won't route to them.
+fn draw_stack_child(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    descriptor: &grain_ai_agent_headless::OverlayDescriptor,
+    palette: &Palette,
+) {
+    use grain_ai_agent_headless::OverlayDescriptor as D;
+    match descriptor {
+        D::TextPanel { title, lines, .. } => {
+            let mut body: Vec<Line> = Vec::with_capacity(lines.len() + 1);
+            if !title.is_empty() {
+                body.push(Line::from(Span::styled(
+                    title.clone(),
+                    Style::default()
+                        .fg(palette.accent)
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
+            for line in lines {
+                body.push(render_text_line(line, palette));
+            }
+            frame.render_widget(
+                Paragraph::new(Text::from(body)).wrap(Wrap { trim: false }),
+                area,
+            );
+        }
+        D::Progress {
+            title,
+            value,
+            max,
+            label,
+        } => {
+            // Inline progress: title + bar + optional label.
+            let pct = if *max > 0 {
+                ((*value).max(0) as f32 / *max as f32 * 100.0).clamp(0.0, 100.0)
+            } else {
+                0.0
+            };
+            let bar_w = area.width.max(1) as usize;
+            let filled = ((pct / 100.0) * bar_w as f32).round() as usize;
+            let mut bar = String::new();
+            for _ in 0..filled {
+                bar.push('█');
+            }
+            for _ in filled..bar_w {
+                bar.push('░');
+            }
+            let mut body: Vec<Line> = Vec::new();
+            if !title.is_empty() {
+                body.push(Line::from(Span::styled(
+                    title.clone(),
+                    Style::default()
+                        .fg(palette.accent)
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
+            if !label.is_empty() {
+                body.push(Line::from(Span::styled(
+                    label.clone(),
+                    Style::default().fg(palette.fg),
+                )));
+            }
+            body.push(Line::from(Span::styled(
+                bar,
+                Style::default().fg(palette.accent),
+            )));
+            frame.render_widget(Paragraph::new(Text::from(body)), area);
+        }
+        D::List { title, items, .. } => {
+            let mut body: Vec<Line> = Vec::with_capacity(items.len() + 1);
+            if !title.is_empty() {
+                body.push(Line::from(Span::styled(
+                    title.clone(),
+                    Style::default()
+                        .fg(palette.accent)
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
+            for it in items {
+                body.push(Line::from(Span::styled(
+                    format!("  {it}"),
+                    Style::default().fg(palette.fg),
+                )));
+            }
+            frame.render_widget(
+                Paragraph::new(Text::from(body)).wrap(Wrap { trim: false }),
+                area,
+            );
+        }
+        _ => {
+            // For unsupported nested kinds, render a placeholder so
+            // the layout doesn't collapse silently.
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!("(nested {} not rendered)", descriptor.title()),
+                    Style::default().fg(palette.muted),
+                ))),
+                area,
+            );
+        }
+    }
 }
 
 /// Format a SystemTime as a human-friendly relative string ("3m ago",
