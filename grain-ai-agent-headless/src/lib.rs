@@ -32,6 +32,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod extensions;
 pub mod migrations;
+pub mod plugin_spec;
 pub mod plugins;
 pub mod prompt;
 pub mod runtime;
@@ -73,6 +74,10 @@ pub use plugins::{
     Plugin, PluginInfo, PluginManifest, PromptFragment, compose_system_prompt_with_plugins,
     default_plugins_dir, discover_plugins, find_skills_with_plugins, parse_manifest, plugin_info,
     plugin_script_dirs, read_plugin_prompt_fragments, summarize_plugin,
+};
+pub use plugin_spec::{
+    PluginSpec, PluginSpecFile, SourceKind, SyncReport, default_spec_path, detect_source_kind,
+    load_plugin_spec, sync_plugins,
 };
 pub use diagnostics::{SourceInfo, render_doctor_report, render_source_info_block, source_info};
 pub use slash::{HELP_TEXT, SlashCommand, parse as parse_slash_command};

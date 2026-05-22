@@ -41,6 +41,53 @@ The default directory `<workspace>/.grain/plugins/` can be overridden with `--pl
 
 ---
 
+## Declarative install: `plugin-spec.toml`
+
+Hand-installing every plugin by `cd .grain/plugins && git clone …` works but doesn't survive moving to a new machine. The engine reads an optional `<workspace>/.grain/plugin-spec.toml` at boot and **fills in any declared plugin whose directory is missing**.
+
+```toml
+# <workspace>/.grain/plugin-spec.toml
+
+[[plugin]]
+name = "rust-helper"
+src  = "https://github.com/me/rust-helper.git"
+rev  = "v1.0.0"               # optional — default branch otherwise
+
+[[plugin]]
+name = "lazy-gagent"
+src  = "git@github.com:me/lazy-gagent.git"
+
+[[plugin]]
+name = "local-dev"
+src  = "/Users/me/dev/my-plugin"  # filesystem path → symlinked in
+```
+
+`src` semantics:
+
+| Detected as | When | Action |
+|---|---|---|
+| `Git` | `src` begins with `http://`, `https://`, `git@`, `ssh://`, `git://`, or ends in `.git` | `git clone <src> <plugins_dir>/<name>` (then `git checkout <rev>` if set) |
+| `Local` | anything else (absolute, relative, `~/…` paths) | Symlink `<plugins_dir>/<name>` → resolved absolute path (live edits show up immediately — good for dev) |
+
+Add `kind = "git"` / `kind = "local"` to a `[[plugin]]` block to force a particular treatment.
+
+**Bootstrap story** — this solves the chicken-and-egg for the future `lazy-gagent` plugin manager: list it in the spec like anything else. The engine pulls it in before plugin discovery runs, so by the time the agent boots there's no difference between "the manager" and "any plugin the manager would have installed".
+
+Skip semantics: an existing directory under `<plugins_dir>/<name>/` is **never touched** — no re-clone, no overwrite. To re-install, `rm -rf` first.
+
+Failures are non-fatal: one bad src emits a `[warn]` line, every other plugin continues to install.
+
+CLI library use:
+
+```rust
+let spec_path = h::default_spec_path(workspace_root);
+let spec = h::load_plugin_spec(&spec_path).unwrap_or_default();
+let report = h::sync_plugins(&spec, &plugins_dir);
+report.log_to_stderr();
+```
+
+---
+
 ## `plugin.toml`
 
 Minimal manifest:
@@ -177,7 +224,8 @@ Inside the TUI:
 | **B-1** | Scripts merged into one Boa worker | ✓ Shipped |
 | **B-2** | `/plugins` overlay UI | ✓ Shipped |
 | **B-3** | `prompts/*.md` appended to system prompt | ✓ Shipped |
-| **C** | `lazy-gagent` manager: install / update / remove via git, `plugin-spec.toml` | Planned |
+| **C-0** | `plugin-spec.toml` declarative install (git + local symlink) | ✓ Shipped |
+| **C-1** | `lazy-gagent` manager plugin: agent-callable install / update / remove tools | Planned |
 
 ---
 

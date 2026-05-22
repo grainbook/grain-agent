@@ -334,12 +334,33 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     };
 
     // --- Plugins -----------------------------------------------------------
-    // Discover before the system prompt + skills resolution so plugin
-    // contributions land in the same pinned prefix as the built-ins.
+    // Phase C-0: read `<workspace>/.grain/plugin-spec.toml` and
+    // sync (git clone / local symlink) any plugins declared there
+    // but not yet present under `plugins_dir`. This is the
+    // bootstrap path that lets things like `lazy-gagent` (the
+    // plugin manager) come along for the ride without a chicken-
+    // and-egg problem — engine always exists, so the engine pulls
+    // the manager in like any other plugin.
     let plugins_dir = cfg
         .plugins_dir
         .clone()
         .unwrap_or_else(|| grain_ai_agent_headless::default_plugins_dir(workspace.root()));
+    let spec_path = grain_ai_agent_headless::default_spec_path(workspace.root());
+    match grain_ai_agent_headless::load_plugin_spec(&spec_path) {
+        Ok(spec) if !spec.plugins.is_empty() => {
+            let report = grain_ai_agent_headless::sync_plugins(&spec, &plugins_dir);
+            report.log_to_stderr();
+        }
+        Ok(_) => {} // empty spec / file absent
+        Err(e) => {
+            eprintln!(
+                "[warn] plugin-spec.toml at {}: {e}",
+                spec_path.display()
+            );
+        }
+    }
+    // Discover before the system prompt + skills resolution so plugin
+    // contributions land in the same pinned prefix as the built-ins.
     let discovered_plugins = grain_ai_agent_headless::discover_plugins(&plugins_dir);
     for p in &discovered_plugins {
         eprintln!("[info] {}", grain_ai_agent_headless::summarize_plugin(p));

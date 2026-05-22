@@ -42,6 +42,53 @@ English: [../plugins.md](../plugins.md).
 
 ---
 
+## 声明式安装：`plugin-spec.toml`
+
+手动 `cd .grain/plugins && git clone …` 装每个插件能用，但换机器就废了。引擎启动时会读可选的 `<workspace>/.grain/plugin-spec.toml`，**把列里没安装的插件自动拉过来**：
+
+```toml
+# <workspace>/.grain/plugin-spec.toml
+
+[[plugin]]
+name = "rust-helper"
+src  = "https://github.com/me/rust-helper.git"
+rev  = "v1.0.0"               # 可选，默认主分支
+
+[[plugin]]
+name = "lazy-gagent"
+src  = "git@github.com:me/lazy-gagent.git"
+
+[[plugin]]
+name = "local-dev"
+src  = "/Users/me/dev/my-plugin"  # 文件系统路径 → symlink 过去
+```
+
+`src` 语义：
+
+| 识别为 | 何时 | 动作 |
+|---|---|---|
+| `Git` | 以 `http://`、`https://`、`git@`、`ssh://`、`git://` 开头，或以 `.git` 结尾 | `git clone <src> <plugins_dir>/<name>`（若 `rev` 设了再 `git checkout`）|
+| `Local` | 其它（绝对路径、相对路径、`~/...`）| Symlink `<plugins_dir>/<name>` → 解析后的绝对路径（源码改动立即生效 —— 适合开发）|
+
+在 `[[plugin]]` 里加 `kind = "git"` / `kind = "local"` 可强制覆盖自动判断。
+
+**Bootstrap 妙处**：解决 `lazy-gagent` 管理器的鸡生蛋问题 —— 跟其它插件一样写进 spec 就行。引擎在 plugin discover 之前先拉好，到 agent 启动时「管理器」跟「管理器装的插件」没区别。
+
+跳过规则：`<plugins_dir>/<name>/` 已存在时**永不动**（不重新 clone、不覆盖）。要重装得自己先 `rm -rf`。
+
+失败不致命：单个 src 坏掉打 `[warn]` 行，其它插件照装。
+
+库使用方式：
+
+```rust
+let spec_path = h::default_spec_path(workspace_root);
+let spec = h::load_plugin_spec(&spec_path).unwrap_or_default();
+let report = h::sync_plugins(&spec, &plugins_dir);
+report.log_to_stderr();
+```
+
+---
+
 ## `plugin.toml`
 
 最小 manifest：
@@ -179,7 +226,8 @@ TUI 里：
 | **B-1** | scripts 合并到同一个 Boa worker | ✓ 已发布 |
 | **B-2** | `/plugins` 遮罩面板 UI | ✓ 已发布 |
 | **B-3** | `prompts/*.md` append 到系统提示 | ✓ 已发布 |
-| **C** | `lazy-gagent` 管理器：通过 git 安装 / 更新 / 删除，`plugin-spec.toml` | 计划中 |
+| **C-0** | `plugin-spec.toml` 声明式安装（git + 本地 symlink）| ✓ 已发布 |
+| **C-1** | `lazy-gagent` 管理器插件：让 agent 通过工具调用 install / update / remove | 计划中 |
 
 ---
 
