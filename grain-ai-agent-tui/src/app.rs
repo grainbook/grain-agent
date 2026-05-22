@@ -1112,6 +1112,58 @@ impl AppState {
         self.fold_overrides.insert(block.id(), next);
     }
 
+    /// Move the transcript cursor to the next foldable block in
+    /// `direction`. Direction `-1` moves toward older blocks, `+1`
+    /// toward newer ones. When the cursor is currently `None`,
+    /// initializes to the **last** foldable block (for `-1`) or
+    /// the **first** foldable block (for `+1`) — friendliest first
+    /// jump for a user who just hit the navigation key.
+    pub fn move_transcript_cursor(&mut self, direction: isize) {
+        let blocks = build_transcript_blocks(&self.transcript);
+        let foldable_ids: Vec<usize> = blocks
+            .iter()
+            .filter(|b| b.is_foldable())
+            .map(|b| b.id())
+            .collect();
+        if foldable_ids.is_empty() {
+            self.transcript_cursor = None;
+            return;
+        }
+        self.transcript_cursor = Some(match self.transcript_cursor {
+            None => {
+                if direction < 0 {
+                    *foldable_ids.last().unwrap()
+                } else {
+                    foldable_ids[0]
+                }
+            }
+            Some(current) => {
+                let idx = foldable_ids
+                    .iter()
+                    .position(|&id| id == current)
+                    .unwrap_or(foldable_ids.len() - 1);
+                if direction < 0 {
+                    foldable_ids[idx.saturating_sub(1)]
+                } else {
+                    foldable_ids[(idx + 1).min(foldable_ids.len() - 1)]
+                }
+            }
+        });
+    }
+
+    /// Toggle the fold of the block currently under the transcript
+    /// cursor (no-op when the cursor is `None` or points at a stale
+    /// block id that no longer matches any foldable block).
+    pub fn toggle_focused_block(&mut self) {
+        let Some(target) = self.transcript_cursor else {
+            return;
+        };
+        let blocks = build_transcript_blocks(&self.transcript);
+        if let Some(block) = blocks.iter().find(|b| b.id() == target) {
+            self.toggle_block_fold(block);
+        }
+    }
+
     /// Reset all per-run streaming counters. Called when the user
     /// `/resume`s into a different session so stale per-turn token
     /// counts don't bleed into the new transcript.
@@ -1513,6 +1565,34 @@ impl AppState {
         //   - otherwise → quit. macOS users in particular expect
         //     Ctrl-C to be a hard exit when the app is idle, even
         //     under raw mode where the kernel no longer raises SIGINT.
+        // Transcript-cursor controls — Ctrl-K / Ctrl-J navigate
+        // between foldable blocks (works from any focus); Space
+        // toggles the currently-focused block. Ctrl-K initializes
+        // the cursor to the last foldable block on first press.
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('k') => {
+                    self.move_transcript_cursor(-1);
+                    return Vec::new();
+                }
+                KeyCode::Char('j') => {
+                    self.move_transcript_cursor(1);
+                    return Vec::new();
+                }
+                _ => {}
+            }
+        }
+        if self.transcript_cursor.is_some()
+            && matches!(key.code, KeyCode::Char(' '))
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && self.input.is_empty()
+        {
+            // Plain Space toggles fold only when the user is in
+            // cursor mode AND the input is empty — otherwise the
+            // user is actually trying to type a space.
+            self.toggle_focused_block();
+            return Vec::new();
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             if self.streaming || self.pending_tool_calls > 0 {
                 return vec![Command::AbortCurrentTurn];
@@ -1523,6 +1603,15 @@ impl AppState {
         if key.code == KeyCode::Esc {
             if self.overlay.is_some() {
                 self.overlay = None;
+                return Vec::new();
+            }
+            // If the transcript cursor is engaged, the first Esc
+            // clears it (exits "fold-navigation" mode). Only
+            // subsequent Esc presses fall through to the input /
+            // quit logic — saves the user from accidentally
+            // quitting while they were folding.
+            if self.transcript_cursor.is_some() {
+                self.transcript_cursor = None;
                 return Vec::new();
             }
             // Esc with a non-empty input clears the buffer instead of
@@ -3468,6 +3557,95 @@ mod tests {
         };
         s.toggle_block_fold(&plain);
         assert!(s.fold_overrides.is_empty());
+    }
+
+    #[test]
+    fn cursor_navigation_initializes_and_walks_foldable_blocks() {
+        let mut s = fresh();
+        s.push(TranscriptKind::AssistantText, "intro".into());
+        s.push(TranscriptKind::ThinkingText, "t1".into());
+        s.push(TranscriptKind::ThinkingText, "t2".into());
+        s.push(TranscriptKind::ToolCallStart, "→ read".into());
+        s.push(TranscriptKind::ToolCallEnd, "← read ok".into());
+        // 3 blocks: Plain(intro), Thinking(t1/t2), ToolCall(start/end).
+        // First Ctrl-K from None lands on the *last* foldable
+        // block (ToolCall).
+        let _ = s.on_key(ctrl(KeyCode::Char('k')));
+        let cursor1 = s.transcript_cursor;
+        assert!(cursor1.is_some());
+        // Ctrl-K again steps to the previous foldable block
+        // (Thinking).
+        let _ = s.on_key(ctrl(KeyCode::Char('k')));
+        let cursor2 = s.transcript_cursor.expect("cursor still set");
+        assert_ne!(Some(cursor2), cursor1);
+        // Ctrl-J steps back forward to the ToolCall block.
+        let _ = s.on_key(ctrl(KeyCode::Char('j')));
+        assert_eq!(s.transcript_cursor, cursor1);
+    }
+
+    #[test]
+    fn space_toggles_focused_block_when_input_empty() {
+        let mut s = fresh();
+        s.push(TranscriptKind::ToolCallStart, "→ read".into());
+        s.push(TranscriptKind::ToolCallEnd, "← ok".into());
+        // Establish cursor.
+        let _ = s.on_key(ctrl(KeyCode::Char('k')));
+        let block_id = s.transcript_cursor.unwrap();
+        let blocks = build_transcript_blocks(&s.transcript);
+        let block = blocks.iter().find(|b| b.id() == block_id).unwrap();
+        let initial = s.is_block_expanded(block);
+        // Plain Space.
+        let _ = s.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let blocks = build_transcript_blocks(&s.transcript);
+        let block = blocks.iter().find(|b| b.id() == block_id).unwrap();
+        assert_ne!(s.is_block_expanded(block), initial);
+    }
+
+    #[test]
+    fn space_with_nonempty_input_inserts_into_input() {
+        let mut s = fresh();
+        s.push(TranscriptKind::ToolCallStart, "→ read".into());
+        s.push(TranscriptKind::ToolCallEnd, "← ok".into());
+        let _ = s.on_key(ctrl(KeyCode::Char('k')));
+        // User is in cursor mode but starts typing — Space lands
+        // in the input buffer, not as a fold toggle.
+        s.input = "ab".into();
+        s.cursor = s.input.len();
+        let block_id = s.transcript_cursor.unwrap();
+        let blocks = build_transcript_blocks(&s.transcript);
+        let block = blocks.iter().find(|b| b.id() == block_id).unwrap();
+        let before = s.is_block_expanded(block);
+        let _ = s.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let blocks = build_transcript_blocks(&s.transcript);
+        let block = blocks.iter().find(|b| b.id() == block_id).unwrap();
+        assert_eq!(s.is_block_expanded(block), before, "fold state untouched");
+        assert!(s.input.contains(' '), "space went into input buffer");
+    }
+
+    #[test]
+    fn esc_clears_cursor_before_clearing_input() {
+        let mut s = fresh();
+        s.push(TranscriptKind::ToolCallStart, "→ read".into());
+        s.push(TranscriptKind::ToolCallEnd, "← ok".into());
+        let _ = s.on_key(ctrl(KeyCode::Char('k')));
+        assert!(s.transcript_cursor.is_some());
+        s.input = "draft".into();
+        let _ = s.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(s.transcript_cursor.is_none(), "cursor cleared first");
+        assert_eq!(s.input, "draft", "input preserved on first Esc");
+        // Second Esc proceeds to the legacy clear-input path.
+        let _ = s.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(s.input.is_empty());
+    }
+
+    #[test]
+    fn navigation_is_safe_on_empty_transcript() {
+        let mut s = fresh();
+        // No transcript content yet.
+        let _ = s.on_key(ctrl(KeyCode::Char('k')));
+        assert!(s.transcript_cursor.is_none());
+        let _ = s.on_key(ctrl(KeyCode::Char('j')));
+        assert!(s.transcript_cursor.is_none());
     }
 
     #[test]

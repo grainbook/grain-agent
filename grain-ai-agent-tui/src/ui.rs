@@ -264,9 +264,17 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette:
         }
         let foldable = block.is_foldable();
         let expanded = state.is_block_expanded(block);
+        let focused = state.transcript_cursor == Some(block.id());
+        // Cursor mark renders as "▶" before the fold glyph so the
+        // user can see at a glance which block the next Space
+        // press will toggle.
+        let cursor_mark = if focused { "▶" } else { " " };
         if foldable && !expanded {
             // Single summary line replaces the whole block.
-            let summary = format!("▸ {}", block_summary(block, &state.transcript));
+            let summary = format!(
+                "{cursor_mark}▸ {}",
+                block_summary(block, &state.transcript)
+            );
             wrap_one_line(
                 &TranscriptLine {
                     kind: block_chrome_kind(block.kind),
@@ -281,7 +289,10 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette:
             // Header row tells the user the block is open + how
             // many child lines fall under it. Child lines follow,
             // each indented.
-            let header = format!("▾ {}", block_summary(block, &state.transcript));
+            let header = format!(
+                "{cursor_mark}▾ {}",
+                block_summary(block, &state.transcript)
+            );
             wrap_one_line(
                 &TranscriptLine {
                     kind: block_chrome_kind(block.kind),
