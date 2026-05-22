@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use grain_agent_core::{Agent, AgentEvent, AgentOptions};
+use grain_agent_core::{Agent, AgentEvent, AgentMessage, AgentOptions, Message};
 use grain_agent_harness::context_guard::{ContextGuard, ContextGuardPolicy};
 use grain_ai_agent_headless::{
     SessionWriter, TelemetrySink, Workspace, coding_agent_system_prompt, coding_bash_tools,
@@ -65,6 +65,9 @@ pub struct WorkerConfig {
     /// `None` → auto-detect from registered endpoints (the historical
     /// default; bypasses when any compat endpoint is on loopback).
     pub bypass_proxy: Option<bool>,
+    /// Capture outbound request bodies (projected `Message[]`) into a
+    /// ring buffer for the in-TUI `/log` overlay. Off → no capture.
+    pub debug_log: bool,
 }
 
 impl From<&Args> for WorkerConfig {
@@ -90,6 +93,7 @@ impl From<&Args> for WorkerConfig {
             escalate_to: a.escalate_to.clone(),
             escalate_after: a.escalate_after,
             bypass_proxy: a.bypass_proxy,
+            debug_log: a.debug_log,
         }
     }
 }
@@ -311,6 +315,13 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         .with_headroom_tokens(cfg.headroom_tokens)
         .into_transform_fn();
 
+    // --- Channels ----------------------------------------------------------
+    // Created before AgentOptions so the optional `--debug-log`
+    // `convert_to_llm` wrapper can capture `evt_tx` for the `/log`
+    // overlay forward.
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
+    let (evt_tx, evt_rx) = mpsc::unbounded_channel::<TuiEvent>();
+
     // --- AgentOptions ------------------------------------------------------
     // Snapshot the pricing table before `model` moves into AgentOptions —
     // the footer renders a live cost chip from this.
@@ -320,6 +331,48 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     opts.tools = tools;
     opts.messages = prior_messages;
     opts.transform_context = Some(guard);
+    if cfg.debug_log {
+        // Wrap the default projection (Standard kept / Custom dropped)
+        // so each turn snapshot also lands in the UI's `/log` overlay.
+        // Cheap: a serialize + a non-blocking channel send per turn.
+        let evt_tx_for_log = evt_tx.clone();
+        // Captured at startup — model / provider runtime switches
+        // (`/provider`) won't update these. Good enough for the
+        // common debug case; a header line prefixes each entry.
+        let log_model_id = active_model_id.clone();
+        let log_endpoint = match cfg
+            .initial_profile_idx
+            .and_then(|idx| cfg.profiles.get(idx))
+        {
+            Some(p) => p.base_url.clone().unwrap_or_else(|| {
+                format!("(profile '{}', native adapter)", p.name)
+            }),
+            None => "(native adapter; genai default endpoint)".to_string(),
+        };
+        opts.convert_to_llm = Some(Arc::new(move |messages: Vec<AgentMessage>| {
+            let evt_tx_for_log = evt_tx_for_log.clone();
+            let log_model_id = log_model_id.clone();
+            let log_endpoint = log_endpoint.clone();
+            Box::pin(async move {
+                let projected: Vec<Message> = messages
+                    .into_iter()
+                    .filter_map(|m| match m {
+                        AgentMessage::Standard(msg) => Some(msg),
+                        AgentMessage::Custom(_) => None,
+                    })
+                    .collect();
+                let body_json =
+                    serde_json::to_string_pretty(&projected).unwrap_or_else(|e| {
+                        format!("(serialize failed: {e})")
+                    });
+                let body = format!(
+                    "POST {log_endpoint}/chat/completions\nmodel: {log_model_id}\n\n{body_json}"
+                );
+                let _ = evt_tx_for_log.send(TuiEvent::RequestLogged { body });
+                projected
+            })
+        }));
+    }
     // Storm suppressor: blocks the 3rd identical (tool, args) call
     // within a 60s window and feeds a reflection note back to the
     // model. Provider-agnostic — defaults are tuned for coding
@@ -350,10 +403,6 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         }
     }
     let agent = Arc::new(Agent::new(opts));
-
-    // --- Channels ----------------------------------------------------------
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
-    let (evt_tx, evt_rx) = mpsc::unbounded_channel::<TuiEvent>();
 
     let handles = WorkerHandles {
         model_id: active_model_id.clone(),

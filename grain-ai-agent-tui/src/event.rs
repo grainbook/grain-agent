@@ -63,4 +63,9 @@ pub enum TuiEvent {
     /// text from the rendered rows under the selection rectangle and
     /// write it to the OS clipboard.
     MouseUp,
+    /// Captured "request body" (pretty-printed JSON of the projected
+    /// LLM messages) emitted on every turn when `--debug-log` is on.
+    /// Pushed into [`crate::AppState::request_log`] and viewable via
+    /// the `/log` overlay.
+    RequestLogged { body: String },
 }

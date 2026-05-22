@@ -147,9 +147,15 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette:
         for (seg_i, segment) in line.text.split('\n').enumerate() {
             let initial_prefix = if seg_i == 0 { prefix } else { continuation };
             // Reserve room for the prefix so wrapped chunks fit the
-            // visible column budget. `inner` must be ≥ 1 to keep
-            // textwrap from looping on a width of 0.
-            let inner = width.saturating_sub(initial_prefix.len()).max(1);
+            // visible column budget. Use *display* width (not byte
+            // length) — the prefix may contain multi-byte chars like
+            // `›` (3 bytes, 1 column) or `· ` (3 bytes, 2 columns);
+            // using `.len()` over-reserved space, which shifted wrap
+            // boundaries and misaligned selection highlights on
+            // anything past the first non-ASCII row.
+            let inner = width
+                .saturating_sub(UnicodeWidthStr::width(initial_prefix))
+                .max(1);
             let wrapped: Vec<String> = if segment.is_empty() {
                 vec![String::new()]
             } else {
@@ -581,6 +587,7 @@ fn draw_overlay(
         Overlay::Skills(_) => (66, 18),
         Overlay::ThemePicker { .. } => (60, 20),
         Overlay::ProviderPicker { .. } => (72, 18),
+        Overlay::Log { .. } => (96, 30),
     };
     let popup = centered_rect_fixed(target_w, target_h, area);
     // Clear so the transcript underneath doesn't bleed through; then
@@ -612,6 +619,9 @@ fn draw_overlay(
         }
         Overlay::ProviderPicker { focused } => {
             return draw_provider_picker(frame, inner, *focused, state, palette);
+        }
+        Overlay::Log { scroll } => {
+            return draw_log(frame, inner, *scroll, state, palette);
         }
     };
 
@@ -812,6 +822,73 @@ fn draw_doctor(
             Style::default().fg(palette.muted),
         ))),
         chunks[5],
+    );
+}
+
+/// Render the `/log` overlay: title + scrollable body containing the
+/// joined request-log entries (newest at the bottom — same as
+/// transcript). Scroll wheel handlers in `app.rs` mutate the
+/// `scroll` field directly.
+fn draw_log(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    scroll: usize,
+    state: &AppState,
+    palette: &Palette,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // title
+            Constraint::Length(1), // pad
+            Constraint::Min(1),    // body
+            Constraint::Length(1), // hint
+        ])
+        .split(popup);
+
+    let title_line = Line::from(vec![
+        Span::styled(
+            "request log",
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("({} entries)", state.request_log.len()),
+            Style::default().fg(palette.muted),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(title_line), chunks[0]);
+
+    // Join entries with a separator line, oldest → newest.
+    let mut body = String::new();
+    for (i, entry) in state.request_log.iter().enumerate() {
+        if i > 0 {
+            body.push_str("\n---\n");
+        }
+        body.push_str(&format!("# request #{}\n", i + 1));
+        body.push_str(entry);
+        body.push('\n');
+    }
+    if body.is_empty() {
+        body.push_str("(no entries; start the TUI with --debug-log)");
+    }
+
+    frame.render_widget(
+        Paragraph::new(body)
+            .style(Style::default().fg(palette.fg))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll as u16, 0)),
+        chunks[2],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "PgUp/PgDn · wheel · Esc close",
+            Style::default().fg(palette.muted),
+        ))),
+        chunks[3],
     );
 }
 

@@ -128,6 +128,14 @@ pub struct Args {
     #[arg(long)]
     pub cny_rate: Option<f64>,
 
+    /// Capture each outbound request body — the projected LLM
+    /// messages and tools list — into a ring buffer. Open the `/log`
+    /// overlay inside the TUI to view and scroll. Off by default;
+    /// when on, every turn pays a `serde_json::to_string_pretty` for
+    /// the messages array, which is cheap but non-zero.
+    #[arg(long, default_value_t = false)]
+    pub debug_log: bool,
+
     /// Whether to bypass process-wide HTTP proxies (`HTTPS_PROXY` /
     /// `ALL_PROXY` / ...) when calling LLM endpoints.
     ///

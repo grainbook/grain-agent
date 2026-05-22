@@ -6,9 +6,11 @@
 //! behavior without touching a real terminal or LLM.
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use ratatui::layout::Rect;
+use unicode_width::UnicodeWidthChar;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use grain_agent_core::{
@@ -55,6 +57,13 @@ pub enum Overlay {
     /// [`AppState::providers`]. Same key model as ThemePicker.
     ProviderPicker {
         focused: usize,
+    },
+    /// Request-body log overlay. Joins entries from
+    /// [`AppState::request_log`] with blank-line separators; `scroll`
+    /// is the rendered-row offset for paging. Opened via `/log`.
+    /// The buffer is only populated when `--debug-log` is on.
+    Log {
+        scroll: usize,
     },
 }
 
@@ -208,6 +217,10 @@ pub const SLASH_CATALOG: &[CommandCatalogItem] = &[
         description: "switch provider profile from providers.toml",
     },
     CommandCatalogItem {
+        trigger: "/log",
+        description: "show recent request bodies (needs --debug-log)",
+    },
+    CommandCatalogItem {
         trigger: "/exit",
         description: "quit grain-tui",
     },
@@ -352,12 +365,23 @@ pub struct AppState {
     /// finalized on `MouseUp` (the drag flag flips off but the
     /// highlight stays until the next event).
     pub selection: Option<Selection>,
+    /// Ring buffer of the most recent outbound request bodies
+    /// (pretty-printed JSON of the projected LLM messages). Populated
+    /// only when the worker was started with `--debug-log`; the
+    /// `/log` overlay renders them top-down most-recent-first.
+    pub request_log: VecDeque<String>,
 }
 
 /// Cap on the in-memory prompt history. Old entries get truncated
 /// from the front once we exceed this so long sessions don't grow
 /// unbounded.
 pub const MAX_HISTORY: usize = 200;
+
+/// Cap on the in-memory request-body log ring buffer (entries kept
+/// in [`AppState::request_log`]). Each entry is a pretty-printed
+/// JSON Message[] array — typically 2–20 KB. 20 entries keeps the
+/// ring well under 500 KB even on heavy turns.
+pub const MAX_REQUEST_LOG: usize = 20;
 
 /// Default USD → CNY rate when `--cny-rate` is unset but a `zh_*`
 /// locale is detected. Picked as a stable round number; users in
@@ -479,6 +503,7 @@ impl AppState {
             rendered_rows: RefCell::new(Vec::new()),
             transcript_area: Cell::new(Rect::default()),
             selection: None,
+            request_log: VecDeque::new(),
         };
         s.push(
             TranscriptKind::Info,
@@ -550,8 +575,17 @@ impl AppState {
             self.scroll_offset.min(total.saturating_sub(visible_rows))
         };
         let row_idx = skip + visible_row;
-        let row_len = rendered.get(row_idx).map(|r| r.text.len()).unwrap_or(0);
-        let col_idx = visible_col.min(row_len);
+        // `visible_col` is in **terminal display columns**, but
+        // selection coords are byte offsets into the row text.
+        // Walk the row by char, accumulating display widths, until we
+        // pass `visible_col` — that's the byte index to slice at.
+        // Without this, multi-byte (CJK / emoji) chars made the
+        // highlight rectangle slip half a glyph past where the user
+        // dragged.
+        let col_idx = rendered
+            .get(row_idx)
+            .map(|r| visual_col_to_byte_idx(&r.text, visible_col))
+            .unwrap_or(0);
         Some((row_idx, col_idx))
     }
 
@@ -689,12 +723,29 @@ impl AppState {
                 self.push(TranscriptKind::Error, msg);
                 Vec::new()
             }
+            TuiEvent::RequestLogged { body } => {
+                self.request_log.push_back(body);
+                while self.request_log.len() > MAX_REQUEST_LOG {
+                    self.request_log.pop_front();
+                }
+                Vec::new()
+            }
             TuiEvent::ScrollUp { amount } => {
-                self.scroll_up(amount as usize);
+                // Wheel routes to the overlay when one is open and
+                // scrollable; otherwise to the transcript.
+                if let Some(Overlay::Log { scroll }) = &mut self.overlay {
+                    *scroll = scroll.saturating_sub(amount as usize);
+                } else {
+                    self.scroll_up(amount as usize);
+                }
                 Vec::new()
             }
             TuiEvent::ScrollDown { amount } => {
-                self.scroll_down(amount as usize);
+                if let Some(Overlay::Log { scroll }) = &mut self.overlay {
+                    *scroll = scroll.saturating_add(amount as usize);
+                } else {
+                    self.scroll_down(amount as usize);
+                }
                 Vec::new()
             }
             TuiEvent::MouseDown { row, col } => {
@@ -823,6 +874,9 @@ impl AppState {
         // line still work to switch out or quit.
         if matches!(self.overlay, Some(Overlay::Doctor { .. })) {
             return self.on_key_doctor(key);
+        }
+        if matches!(self.overlay, Some(Overlay::Log { .. })) {
+            return self.on_key_log(key);
         }
         match key.code {
             KeyCode::F(1) => {
@@ -1133,6 +1187,40 @@ impl AppState {
         Vec::new()
     }
 
+    /// Key handler for the `/log` overlay. PgUp/PgDn page through the
+    /// joined entries; Home/End jump to ends. Esc is handled by the
+    /// outer dispatcher.
+    fn on_key_log(&mut self, key: KeyEvent) -> Vec<Command> {
+        let Some(Overlay::Log { scroll }) = &mut self.overlay else {
+            return Vec::new();
+        };
+        const PAGE: usize = 12;
+        match key.code {
+            KeyCode::PageUp => {
+                *scroll = scroll.saturating_sub(PAGE);
+            }
+            KeyCode::PageDown => {
+                *scroll = scroll.saturating_add(PAGE);
+            }
+            KeyCode::Up => {
+                *scroll = scroll.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                *scroll = scroll.saturating_add(1);
+            }
+            KeyCode::Home => {
+                *scroll = 0;
+            }
+            KeyCode::End => {
+                // Jump well past the bottom; Paragraph::scroll clamps
+                // visually so over-shoot is fine.
+                *scroll = u16::MAX as usize;
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
     fn on_key_theme_picker(&mut self, key: KeyEvent) -> Vec<Command> {
         let Some(Overlay::ThemePicker { focused }) = &mut self.overlay else {
             return Vec::new();
@@ -1237,6 +1325,19 @@ impl AppState {
                 }
                 let focused = self.current_provider_idx.unwrap_or(0);
                 self.overlay = Some(Overlay::ProviderPicker { focused });
+                Vec::new()
+            }
+            "log" | "logs" => {
+                if self.request_log.is_empty() {
+                    self.push(
+                        TranscriptKind::Info,
+                        "(no requests logged — start the TUI with --debug-log \
+                         to capture them)"
+                            .into(),
+                    );
+                    return Vec::new();
+                }
+                self.overlay = Some(Overlay::Log { scroll: 0 });
                 Vec::new()
             }
             "exit" | "quit" | "q" => {
@@ -1432,6 +1533,27 @@ fn next_char_boundary(s: &str, idx: usize) -> usize {
         i += 1;
     }
     i.min(s.len())
+}
+
+/// Translate a terminal display column into a byte index inside `s`.
+///
+/// "The char whose width interval `[acc, acc + w)` covers `target_col`
+/// is the one we return, snapping to its start." Mid-wide-char clicks
+/// (e.g. the right half of a 2-column CJK glyph) snap to the start of
+/// that glyph, so a drag-selection started inside the glyph still
+/// includes it. Clicks past the rendered width clamp to `s.len()`.
+///
+/// ASCII degenerates to `byte_idx == target_col`.
+fn visual_col_to_byte_idx(s: &str, target_col: usize) -> usize {
+    let mut acc = 0usize;
+    for (byte_idx, ch) in s.char_indices() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if target_col < acc + w {
+            return byte_idx;
+        }
+        acc = acc.saturating_add(w);
+    }
+    s.len()
 }
 
 /// Clamp a byte index to a UTF-8 char boundary inside `s`. Snaps
@@ -2302,6 +2424,48 @@ mod tests {
     }
 
     #[test]
+    fn visual_col_zero_returns_zero_byte() {
+        assert_eq!(visual_col_to_byte_idx("hello", 0), 0);
+        assert_eq!(visual_col_to_byte_idx("中文", 0), 0);
+    }
+
+    #[test]
+    fn visual_col_ascii_one_to_one() {
+        let s = "hello";
+        assert_eq!(visual_col_to_byte_idx(s, 3), 3);
+        assert_eq!(visual_col_to_byte_idx(s, 5), 5);
+        // past end clamps to len
+        assert_eq!(visual_col_to_byte_idx(s, 999), 5);
+    }
+
+    #[test]
+    fn visual_col_wide_chars_walk_two_per_glyph() {
+        // 3 Han chars: each 1 display col-pair wide (= 2), 3 bytes UTF-8 (= 3 each).
+        let s = "中文测";
+        // After 0 visual cols we're at byte 0.
+        assert_eq!(visual_col_to_byte_idx(s, 0), 0);
+        // After 2 visual cols (one full Han), we're past the first 3 bytes.
+        assert_eq!(visual_col_to_byte_idx(s, 2), 3);
+        // After 4 visual cols (two Han), byte 6.
+        assert_eq!(visual_col_to_byte_idx(s, 4), 6);
+        // After 6 visual cols (three Han = whole string), byte 9.
+        assert_eq!(visual_col_to_byte_idx(s, 6), 9);
+        // Anything past the rendered width clamps to len.
+        assert_eq!(visual_col_to_byte_idx(s, 100), 9);
+    }
+
+    #[test]
+    fn visual_col_mid_glyph_snaps_to_glyph_start() {
+        // Mouse-click landed in the middle of a wide char: snap to
+        // the start of that glyph so the selection covers it.
+        let s = "中a";
+        assert_eq!(visual_col_to_byte_idx(s, 0), 0); // left half of 中
+        assert_eq!(visual_col_to_byte_idx(s, 1), 0); // right half of 中
+        assert_eq!(visual_col_to_byte_idx(s, 2), 3); // 'a' starts
+        assert_eq!(visual_col_to_byte_idx(s, 3), 4); // past 'a' → len
+    }
+
+    #[test]
     fn extract_selection_handles_multibyte_chars() {
         // 4 Han chars × 3 bytes each = 12 bytes total.
         let rendered = rrows(&[("中文测试", TranscriptKind::AssistantText)]);
@@ -2387,6 +2551,72 @@ mod tests {
         s.on_event(TuiEvent::Key(press(KeyCode::F(6))));
         assert!(s.transcript.len() > before);
         assert_eq!(s.transcript.last().unwrap().kind, TranscriptKind::Info);
+    }
+
+    // ---- /log overlay -------------------------------------------
+
+    #[test]
+    fn request_logged_event_pushes_into_ring_and_caps_at_max() {
+        let mut s = fresh();
+        for i in 0..(MAX_REQUEST_LOG + 5) {
+            s.on_event(TuiEvent::RequestLogged {
+                body: format!("entry {i}"),
+            });
+        }
+        assert_eq!(s.request_log.len(), MAX_REQUEST_LOG);
+        // Oldest dropped → first survivor starts at index 5.
+        assert!(s.request_log.front().unwrap().contains("entry 5"));
+        // Most recent at the back.
+        assert!(s.request_log.back().unwrap().contains("entry 24"));
+    }
+
+    #[test]
+    fn slash_log_with_empty_buffer_logs_hint_not_overlay() {
+        let mut s = fresh();
+        s.input = "/log".into();
+        s.cursor = s.input.len();
+        let _ = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert!(s.overlay.is_none());
+        assert!(
+            s.transcript
+                .iter()
+                .any(|l| l.kind == TranscriptKind::Info && l.text.contains("--debug-log"))
+        );
+    }
+
+    #[test]
+    fn slash_log_opens_overlay_when_buffer_has_entries() {
+        let mut s = fresh();
+        s.on_event(TuiEvent::RequestLogged {
+            body: "{\"k\":1}".into(),
+        });
+        s.input = "/log".into();
+        s.cursor = s.input.len();
+        let _ = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert!(matches!(s.overlay, Some(Overlay::Log { .. })));
+    }
+
+    #[test]
+    fn wheel_scrolls_log_overlay_when_open() {
+        let mut s = fresh();
+        s.overlay = Some(Overlay::Log { scroll: 5 });
+        s.on_event(TuiEvent::ScrollUp { amount: 3 });
+        if let Some(Overlay::Log { scroll }) = s.overlay {
+            assert_eq!(scroll, 2);
+        } else {
+            panic!("overlay should still be Log");
+        }
+        s.on_event(TuiEvent::ScrollDown { amount: 10 });
+        if let Some(Overlay::Log { scroll }) = s.overlay {
+            assert_eq!(scroll, 12);
+        } else {
+            panic!("overlay should still be Log");
+        }
+    }
+
+    #[test]
+    fn slash_log_appears_in_catalog() {
+        assert!(SLASH_CATALOG.iter().any(|c| c.trigger == "/log"));
     }
 
     #[test]

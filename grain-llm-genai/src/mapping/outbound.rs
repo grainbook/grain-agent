@@ -97,9 +97,24 @@ fn assistant_to_chat_message(msg: &AssistantMessage) -> ChatMessage {
                 if let Some(sig) = &t.signature {
                     signatures.push(sig.clone());
                 }
-                // `t.thinking` and `t.provider_metadata` are preserved in the
-                // grain transcript but not echoed back; genai 0.5 has no
-                // outbound slot for plain reasoning text.
+                // Plain reasoning text travels via genai 0.6's
+                // `ContentPart::ReasoningContent`. The adapter rehydrates
+                // it into the provider-native wire field
+                // (`reasoning_content` for DeepSeek / OpenAI-compat
+                // thinking models). Required for DeepSeek-v4-pro
+                // thinking mode — the API rejects requests that
+                // include an assistant turn whose `reasoning_content`
+                // is missing.
+                //
+                // For Anthropic the `signatures` path above is what
+                // round-trips signed thinking blocks; the
+                // ReasoningContent variant is informational on that
+                // adapter and won't conflict.
+                if !t.thinking.is_empty() {
+                    parts.push(ContentPart::ReasoningContent(t.thinking.clone()));
+                }
+                // `t.provider_metadata` stays in the transcript only —
+                // none of our supported providers ask for it back.
             }
             AssistantContent::Image(_) => {}
         }
