@@ -15,6 +15,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::plugins::Plugin;
+
 /// One declarative UI extension entry from `plugin.toml`.
 ///
 /// ```toml
@@ -112,6 +114,33 @@ impl OverlayDescriptor {
             }
         }
     }
+}
+
+/// A [`UiCommand`] paired with the plugin that contributed it. The
+/// TUI uses `plugin_name` for footer attribution ("Install [i]
+/// — lazy-gagent") and for "which script defines this handler"
+/// lookups in `grain-script-rhai`-land.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoundUiCommand {
+    pub plugin_name: String,
+    pub command: UiCommand,
+}
+
+/// Collect every `[[ui_command]]` block declared by `plugins`, paired
+/// with its source plugin name. Stable order: alphabetical by
+/// plugin name (matches [`crate::plugins::discover_plugins`]'s sort),
+/// then declaration order within each manifest.
+pub fn collect_ui_commands(plugins: &[Plugin]) -> Vec<BoundUiCommand> {
+    let mut out = Vec::new();
+    for p in plugins {
+        for cmd in &p.manifest.ui_commands {
+            out.push(BoundUiCommand {
+                plugin_name: p.manifest.name.clone(),
+                command: cmd.clone(),
+            });
+        }
+    }
+    out
 }
 
 #[cfg(test)]

@@ -157,6 +157,15 @@ impl ScriptHandle {
         // Rhai's AST exposes `iter_functions()` returning ScriptFnMetadata.
         self.ast.iter_functions().any(|f| f.name == fn_name)
     }
+
+    /// Every top-level function name defined by this script.
+    /// Convenient for building "function → script" dispatch tables
+    /// without iterating `iter_functions()` directly outside this
+    /// crate (Rhai's metadata types aren't re-exported as easily as
+    /// strings).
+    pub fn ast_function_names(&self) -> Vec<String> {
+        self.ast.iter_functions().map(|f| f.name.to_string()).collect()
+    }
 }
 
 impl RhaiExtension {

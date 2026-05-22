@@ -717,7 +717,7 @@ fn draw_overlay(
         Overlay::ProviderPicker { .. } => (72, 18),
         Overlay::Log { .. } => (96, 30),
         Overlay::SessionResume { .. } => (88, 24),
-        Overlay::Plugins(_) => (78, 22),
+        Overlay::Plugins { .. } => (78, 22),
     };
     let popup = centered_rect_fixed(target_w, target_h, area);
     // Clear so the transcript underneath doesn't bleed through; then
@@ -756,7 +756,10 @@ fn draw_overlay(
         Overlay::SessionResume { focused, sessions } => {
             return draw_session_resume(frame, inner, *focused, sessions, palette);
         }
-        Overlay::Plugins(plugins) => ("plugins", OverlayBody::Plugins(plugins)),
+        Overlay::Plugins {
+            plugins,
+            ui_commands: _,
+        } => ("plugins", OverlayBody::Plugins(plugins)),
     };
 
     let chunks = Layout::default()

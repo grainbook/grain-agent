@@ -581,21 +581,22 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     let base_tools: Vec<Arc<dyn AgentTool>> = tools.clone();
 
     #[cfg(feature = "scripts-rhai")]
-    {
-        let rhai_tools = build_rhai_tools(
+    let rhai_bundle: RhaiBundle = {
+        let bundle = build_rhai_bundle(
             &spec_path_for_rhai,
             &plugins_dir,
             &rhai_dirs,
         );
-        if !rhai_tools.is_empty() {
+        if !bundle.tools.is_empty() {
             eprintln!(
                 "[info] loaded {} Rhai tool(s) from {} dir(s)",
-                rhai_tools.len(),
+                bundle.tools.len(),
                 rhai_dirs.len()
             );
         }
-        tools.extend(rhai_tools);
-    }
+        tools.extend(bundle.tools.clone());
+        bundle
+    };
 
     // --- Context guard -----------------------------------------------------
     let guard = ContextGuard::new(registry.clone(), active_model_id.clone())
@@ -761,6 +762,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         plugins_dir: plugins_dir.clone(),
         script_dirs: rhai_dirs.clone(),
         base_tools,
+        ui_handlers: Arc::new(build_ui_handler_map(&rhai_bundle.handles)),
     };
 
     // Hot-reload: install a notify watcher on every Rhai script dir
@@ -930,6 +932,40 @@ pub struct RhaiReloadCtx {
     /// built-in read/write/bash/web, Boa-scripted tools, etc. On
     /// reload we set `agent.tools = base_tools + fresh_rhai_tools`.
     pub base_tools: Vec<Arc<dyn AgentTool>>,
+    /// Handler-name → ScriptHandle map. Built from currently-loaded
+    /// scripts + manifest `[[ui_command]]` declarations. Looked up
+    /// on `Command::InvokePluginUi`.
+    pub ui_handlers: Arc<std::collections::HashMap<String, grain_script_rhai::ScriptHandle>>,
+}
+
+/// Build the handler→ScriptHandle map. Registers **every** function
+/// defined in any loaded plugin script — UI handlers declared via
+/// `[[ui_command]]` and their downstream `on_submit` / `on_yes`
+/// callbacks both live in plugin scripts and reference each other
+/// by string name, so we can't tell ahead of time which functions
+/// are reachable. The cost is negligible (one Arc-clone per
+/// function). First match wins on collision; later duplicates emit
+/// a warning so the conflict is visible in the startup log.
+#[cfg(feature = "scripts-rhai")]
+fn build_ui_handler_map(
+    handles: &[grain_script_rhai::ScriptHandle],
+) -> std::collections::HashMap<String, grain_script_rhai::ScriptHandle> {
+    use std::collections::HashMap;
+    let mut out: HashMap<String, grain_script_rhai::ScriptHandle> = HashMap::new();
+    for handle in handles {
+        for fn_name in handle.ast_function_names() {
+            if out.contains_key(&fn_name) {
+                eprintln!(
+                    "[warn] ui handler '{fn_name}' defined by multiple scripts; \
+                     keeping first ({})",
+                    out[&fn_name].label
+                );
+                continue;
+            }
+            out.insert(fn_name, handle.clone());
+        }
+    }
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -946,7 +982,7 @@ async fn run_command_loop(
     profiles: Vec<ProviderProfile>,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     evt_tx: mpsc::UnboundedSender<TuiEvent>,
-    #[cfg(feature = "scripts-rhai")] rhai_ctx: RhaiReloadCtx,
+    #[cfg(feature = "scripts-rhai")] mut rhai_ctx: RhaiReloadCtx,
 ) {
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
@@ -1002,16 +1038,21 @@ async fn run_command_loop(
                     .unwrap_or_else(|| workspace.root().to_path_buf());
                 let spec = grain_ai_agent_headless::load_plugin_spec(&spec_path)
                     .unwrap_or_default();
-                let infos: Vec<grain_ai_agent_headless::PluginInfo> =
-                    grain_ai_agent_headless::discover_plugins_with_spec(
-                        &plugins_dir,
-                        &spec,
-                        &spec_base,
-                    )
+                let discovered = grain_ai_agent_headless::discover_plugins_with_spec(
+                    &plugins_dir,
+                    &spec,
+                    &spec_base,
+                );
+                let infos: Vec<grain_ai_agent_headless::PluginInfo> = discovered
                     .iter()
                     .map(grain_ai_agent_headless::plugin_info)
                     .collect();
-                let _ = evt_tx.send(TuiEvent::PluginsListed(infos));
+                let ui_commands =
+                    grain_ai_agent_headless::collect_ui_commands(&discovered);
+                let _ = evt_tx.send(TuiEvent::PluginsListed {
+                    plugins: infos,
+                    ui_commands,
+                });
             }
             Command::InstallPlugin { name, src, rev } => {
                 let spec_path =
@@ -1096,18 +1137,63 @@ async fn run_command_loop(
                 // Rebuild from the captured ingredients. Each tool
                 // is `Arc<dyn AgentTool>` so the swap is just a
                 // pointer move on the agent side — no in-flight turn
-                // gets disturbed.
-                let fresh_rhai = build_rhai_tools(
+                // gets disturbed. Also refresh the UI handler map so
+                // freshly-defined `[[ui_command]]` handlers become
+                // dispatchable without restart.
+                let fresh = build_rhai_bundle(
                     &rhai_ctx.spec_path,
                     &rhai_ctx.plugins_dir,
                     &rhai_ctx.script_dirs,
                 );
                 let mut combined = rhai_ctx.base_tools.clone();
-                let count = fresh_rhai.len();
-                combined.extend(fresh_rhai);
+                let count = fresh.tools.len();
+                combined.extend(fresh.tools);
                 harness.agent().set_tools(combined).await;
+                rhai_ctx.ui_handlers = Arc::new(build_ui_handler_map(&fresh.handles));
                 let _ = evt_tx.send(TuiEvent::Info(format!(
                     "(reloaded — {count} Rhai tool(s) active)"
+                )));
+            }
+            #[cfg(feature = "scripts-rhai")]
+            Command::InvokePluginUi { handler, args } => {
+                let handle = match rhai_ctx.ui_handlers.get(&handler) {
+                    Some(h) => h.clone(),
+                    None => {
+                        let _ = evt_tx.send(TuiEvent::UiHandlerError(format!(
+                            "ui handler '{handler}' not found in any loaded plugin script"
+                        )));
+                        continue;
+                    }
+                };
+                let evt_tx_for_call = evt_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let result = handle.call_fn_json(&handler, args);
+                    match result {
+                        Ok(value) => match serde_json::from_value::<
+                            grain_ai_agent_headless::OverlayDescriptor,
+                        >(value.clone())
+                        {
+                            Ok(desc) => {
+                                let _ = evt_tx_for_call.send(TuiEvent::UiOverlay(desc));
+                            }
+                            Err(e) => {
+                                let _ = evt_tx_for_call.send(TuiEvent::UiHandlerError(format!(
+                                    "ui handler '{handler}' returned invalid descriptor: {e} (got {value})"
+                                )));
+                            }
+                        },
+                        Err(e) => {
+                            let _ = evt_tx_for_call.send(TuiEvent::UiHandlerError(format!(
+                                "ui handler '{handler}' failed: {e}"
+                            )));
+                        }
+                    }
+                });
+            }
+            #[cfg(not(feature = "scripts-rhai"))]
+            Command::InvokePluginUi { handler, .. } => {
+                let _ = evt_tx.send(TuiEvent::UiHandlerError(format!(
+                    "ui handler '{handler}': TUI was built without --features scripts-rhai"
                 )));
             }
             #[cfg(not(feature = "scripts-rhai"))]
@@ -1233,14 +1319,20 @@ async fn run_command_loop(
 /// initial tool list and the hot-reload tool list — the agent never
 /// sees inconsistency between "fresh boot" and "after reload".
 ///
-/// Failures emit a `[warn]` and return an empty vec — one bad
+/// Failures emit a `[warn]` and return an empty bundle — one bad
 /// script never breaks the rest of the agent.
 #[cfg(feature = "scripts-rhai")]
-fn build_rhai_tools(
+pub struct RhaiBundle {
+    pub tools: Vec<Arc<dyn AgentTool>>,
+    pub handles: Vec<grain_script_rhai::ScriptHandle>,
+}
+
+#[cfg(feature = "scripts-rhai")]
+fn build_rhai_bundle(
     spec_path: &std::path::Path,
     plugins_dir: &std::path::Path,
     script_dirs: &[PathBuf],
-) -> Vec<Arc<dyn AgentTool>> {
+) -> RhaiBundle {
     use grain_script_rhai::RhaiExtension;
     let mut engine = RhaiExtension::default_engine();
 
@@ -1307,10 +1399,16 @@ fn build_rhai_tools(
     );
 
     match RhaiExtension::from_scripts_dirs_with_engine(engine, script_dirs) {
-        Ok(ext) => ext.tools(),
+        Ok(ext) => RhaiBundle {
+            tools: ext.tools(),
+            handles: ext.script_handles(),
+        },
         Err(e) => {
             eprintln!("[warn] rhai scripts: {e}");
-            Vec::new()
+            RhaiBundle {
+                tools: Vec::new(),
+                handles: Vec::new(),
+            }
         }
     }
 }

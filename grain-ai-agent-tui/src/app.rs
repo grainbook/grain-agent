@@ -75,10 +75,14 @@ pub enum Overlay {
         sessions: Vec<grain_ai_agent_headless::SessionMeta>,
     },
     /// `lazy.gagent` plugin overlay (`/plugins`). Read-only listing
-    /// of plugins discovered under `<workspace>/.grain/plugins/`.
-    /// Phase B-2: viewing only — install / enable / disable land in
-    /// later phases when there's a plugin registry to mutate.
-    Plugins(Vec<grain_ai_agent_headless::PluginInfo>),
+    /// of plugins discovered under `<workspace>/.grain/plugins/`,
+    /// plus any `[[ui_command]]` entries plugins contributed —
+    /// rendered as footer hints + key bindings that dispatch into
+    /// the plugin's Rhai handler.
+    Plugins {
+        plugins: Vec<grain_ai_agent_headless::PluginInfo>,
+        ui_commands: Vec<grain_ai_agent_headless::BoundUiCommand>,
+    },
 }
 
 /// One row in the transcript. Kept as plain strings so the renderer can
@@ -151,6 +155,17 @@ pub enum Command {
     RemovePlugin {
         name: String,
         delete_files: bool,
+    },
+    /// Dispatch a plugin-contributed UI handler. Sent from the
+    /// `/plugins` overlay when the user presses a key registered
+    /// via `[[ui_command]]`, or from inside a Form / Confirm widget
+    /// to invoke the `on_submit` / `on_yes` follow-up. Worker calls
+    /// the named Rhai function via `ScriptHandle::call_fn_json`,
+    /// parses the return value as `OverlayDescriptor`, and emits
+    /// either [`TuiEvent::UiOverlay`] or [`TuiEvent::UiHandlerError`].
+    InvokePluginUi {
+        handler: String,
+        args: serde_json::Value,
     },
     /// Reload the Rhai script catalog without restarting the TUI:
     /// rebuilds the Rhai engine, re-loads every `*.rhai` from the
@@ -996,12 +1011,31 @@ impl AppState {
                 self.push(TranscriptKind::Info, text);
                 Vec::new()
             }
-            TuiEvent::PluginsListed(list) => {
+            TuiEvent::PluginsListed {
+                plugins: list,
+                ui_commands: cmds,
+            } => {
                 // Only swap when the overlay is still open (user may
                 // have hit Esc while the scan was in flight).
-                if let Some(Overlay::Plugins(plugins)) = &mut self.overlay {
+                if let Some(Overlay::Plugins {
+                    plugins,
+                    ui_commands,
+                }) = &mut self.overlay
+                {
                     *plugins = list;
+                    *ui_commands = cmds;
                 }
+                Vec::new()
+            }
+            TuiEvent::UiOverlay(_descriptor) => {
+                // Slice 4 renders Form / Modal / Confirm overlays.
+                // For now drop the descriptor — slice 3 only proves
+                // the dispatch path: worker successfully called the
+                // handler and converted the result.
+                Vec::new()
+            }
+            TuiEvent::UiHandlerError(msg) => {
+                self.push(TranscriptKind::Error, msg);
                 Vec::new()
             }
             TuiEvent::ScrollUp { amount } => {
@@ -1702,7 +1736,10 @@ impl AppState {
                 // Open the overlay immediately with an empty list;
                 // the worker scans disk and replies via
                 // `TuiEvent::PluginsListed`, which swaps the list in.
-                self.overlay = Some(Overlay::Plugins(Vec::new()));
+                self.overlay = Some(Overlay::Plugins {
+                    plugins: Vec::new(),
+                    ui_commands: Vec::new(),
+                });
                 vec![Command::ReturnPlugins]
             }
             "install" => {

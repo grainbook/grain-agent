@@ -82,7 +82,9 @@ pub use plugin_spec::{
     PluginSpec, PluginSpecFile, SourceKind, SyncReport, default_spec_path, detect_source_kind,
     load_plugin_spec, resolve_local_src, sync_plugins,
 };
-pub use plugin_ui::{FormField, ModalSeverity, OverlayDescriptor, UiCommand};
+pub use plugin_ui::{
+    BoundUiCommand, FormField, ModalSeverity, OverlayDescriptor, UiCommand, collect_ui_commands,
+};
 pub use plugin_manager::{
     InstallOutcome, ManagerError, RemoveOutcome, UpdateOutcome, install, remove, update,
 };

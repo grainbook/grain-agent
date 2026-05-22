@@ -83,6 +83,20 @@ pub enum TuiEvent {
     /// confirmations and `/compact` summaries.
     Info(String),
     /// Worker scanned `plugins_dir` and returns the discovered
-    /// `lazy.gagent` plugin set. Populates the `/plugins` overlay.
-    PluginsListed(Vec<grain_ai_agent_headless::PluginInfo>),
+    /// `lazy.gagent` plugin set. Populates the `/plugins` overlay
+    /// with both the plugin list and any plugin-contributed footer
+    /// hint commands (`[[ui_command]]`).
+    PluginsListed {
+        plugins: Vec<grain_ai_agent_headless::PluginInfo>,
+        ui_commands: Vec<grain_ai_agent_headless::BoundUiCommand>,
+    },
+    /// Worker successfully dispatched a plugin UI handler and got
+    /// back an [`OverlayDescriptor`]. The TUI pushes the
+    /// corresponding [`crate::app::Overlay`] variant (Form / Modal
+    /// / Confirm) onto the overlay stack.
+    UiOverlay(grain_ai_agent_headless::OverlayDescriptor),
+    /// Plugin UI handler dispatch failed (missing handler, Rhai
+    /// runtime error, malformed return value). Carries a
+    /// pre-formatted user-facing message.
+    UiHandlerError(String),
 }
