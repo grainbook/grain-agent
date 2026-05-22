@@ -2,6 +2,8 @@
 
 A Neovim/lazy.nvim-style plugin layer for the grain agent. Drop a directory under `<workspace>/.grain/plugins/<name>/` and it can ship skills, themes, system-prompt fragments, and JS-scripted tools — all auto-discovered at startup, no rebuild required.
 
+中文版：[zh/plugins.md](./zh/plugins.md)。
+
 ---
 
 ## Mental model

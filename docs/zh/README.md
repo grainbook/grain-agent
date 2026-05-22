@@ -72,6 +72,7 @@
 
 | Crate | 文档 | 简介 |
 |-------|------|------|
+| 插件系统（`lazy.gagent`）| [plugins.md](./plugins.md) | `<workspace>/.grain/plugins/<name>/plugin.toml` 下扔目录，携带 `skills/` / `themes/` / `prompts/*.md` / `scripts/*.js` —— 启动自动发现，无需重新编译 |
 | `grain-script-boa` | [scripting.md](./scripting.md) | 基于 Boa 的 JS 脚本层 —— `<workspace>/.grain/scripts/` 丢 `.js` 即可运行时注册 agent 工具 |
 | `grain-pi-compat` | [pi-compat.md](./pi-compat.md) | [pi.dev 风格扩展](https://pi.dev/docs/latest/extensions)的兼容层 —— 支持 `registerTool` / `registerCommand` / `registerShortcut` / `on` / `ui.notify` / `ui.confirm` / `ui.input` / `ui.select` |
 
