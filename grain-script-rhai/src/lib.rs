@@ -764,6 +764,53 @@ mod tests {
             names.contains(&"lazy_remove".to_string()),
             "tools: {names:?}"
         );
+
+        // The same script now exposes UI handlers reachable via
+        // ScriptHandle. Smoke-test each prompt/confirm/submit
+        // returns the kind the TUI expects.
+        let handles = ext.script_handles();
+        assert_eq!(handles.len(), 1);
+        let h = &handles[0];
+
+        let prompt = h.call_fn_json("ui_install_prompt", serde_json::Value::Null).unwrap();
+        assert_eq!(prompt["kind"], "form");
+        assert_eq!(prompt["on_submit"], "ui_install_submit");
+        assert_eq!(prompt["fields"].as_array().unwrap().len(), 2);
+
+        let submit_err = h
+            .call_fn_json(
+                "ui_install_submit",
+                serde_json::json!({ "name": "", "src": "" }),
+            )
+            .unwrap();
+        assert_eq!(submit_err["kind"], "modal");
+        assert_eq!(submit_err["severity"], "error");
+
+        let submit_ok = h
+            .call_fn_json(
+                "ui_install_submit",
+                serde_json::json!({ "name": "demo", "src": "../demo" }),
+            )
+            .unwrap();
+        // Our stub `plugins_install` returns "ok" which doesn't
+        // include "error" or "failed", so the script picks the
+        // success severity.
+        assert_eq!(submit_ok["kind"], "modal");
+        assert_eq!(submit_ok["severity"], "success");
+
+        let remove_prompt = h.call_fn_json("ui_remove_prompt", serde_json::Value::Null).unwrap();
+        assert_eq!(remove_prompt["kind"], "form");
+        assert_eq!(remove_prompt["on_submit"], "ui_remove_confirm");
+
+        let confirm = h
+            .call_fn_json(
+                "ui_remove_confirm",
+                serde_json::json!({ "name": "demo" }),
+            )
+            .unwrap();
+        assert_eq!(confirm["kind"], "confirm");
+        assert_eq!(confirm["on_yes"], "ui_remove_submit");
+        assert_eq!(confirm["yes_args"]["name"], "demo");
     }
 
     #[test]

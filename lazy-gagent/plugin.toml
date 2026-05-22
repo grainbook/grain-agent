@@ -1,4 +1,26 @@
 name = "lazy-gagent"
 version = "0.1.0"
-description = "Plugin manager — bootstrap target referenced by plugin-spec.toml. Today a placeholder; Phase C-1 will ship install / update / remove tools."
+description = "Plugin manager — bootstrap target referenced by plugin-spec.toml. Ships install / update / remove tools and extends the /plugins overlay with interactive management."
 author = "grain-agent"
+
+# Plugin-contributed UI extensions for the `/plugins` overlay.
+# Each entry adds a footer chip + key binding; pressing the key
+# dispatches to the named Rhai handler in `scripts/install.rhai`.
+
+[[ui_command]]
+target = "plugins"
+key = "i"
+label = "Install"
+handler = "ui_install_prompt"
+
+[[ui_command]]
+target = "plugins"
+key = "u"
+label = "Update"
+handler = "ui_update_prompt"
+
+[[ui_command]]
+target = "plugins"
+key = "r"
+label = "Remove"
+handler = "ui_remove_prompt"
