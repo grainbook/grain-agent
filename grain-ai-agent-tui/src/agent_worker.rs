@@ -501,6 +501,17 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             .build(),
     );
 
+    // Wrap with reactive retry-on-overflow so provider-side 400s for
+    // context-window overshoot are handled by trimming + retrying
+    // rather than surfacing as a fatal error to the user.
+    let retry_cfg = grain_agent_harness::RetryOnOverflowConfig::default();
+    let max_retries = retry_cfg.max_retries;
+    let stream: StreamFn =
+        Arc::new(grain_agent_harness::RetryOnOverflowStream::with_config(stream, retry_cfg));
+    eprintln!(
+        "[info] retry-on-overflow active: \u{2264} {max_retries} retries before surfacing error"
+    );
+
     // --- Tools -------------------------------------------------------------
     let mut tools: Vec<Arc<dyn AgentTool>> = coding_read_tools(workspace.clone());
     if cfg.allow_write {
