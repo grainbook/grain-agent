@@ -773,6 +773,99 @@ impl AppState {
         }
     }
 
+    /// Reset all per-run streaming counters. Called when the user
+    /// `/resume`s into a different session so stale per-turn token
+    /// counts don't bleed into the new transcript.
+    fn reset_streaming_state(&mut self) {
+        self.streaming = false;
+        self.streaming_started_at = None;
+        self.pending_tool_calls = 0;
+        self.tokens_in = 0;
+        self.tokens_out = 0;
+        self.tokens_cache_read = 0;
+        self.cache_high_streak = 0;
+        self.cache_dropped = false;
+    }
+
+    /// Push a single historical [`AgentMessage`] into the transcript
+    /// as one or more lines. Used by [`Self::on_event`] for
+    /// `TuiEvent::SessionResumed` so the user sees the loaded
+    /// conversation in the scrollback.
+    fn push_agent_message(&mut self, msg: &AgentMessage) {
+        use grain_agent_core::AssistantContent;
+        let AgentMessage::Standard(msg) = msg else { return };
+        match msg {
+            Message::User(u) => {
+                let text: String = u
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::Text(t) => Some(t.text.as_str()),
+                        UserContent::Image(_) => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                self.push(TranscriptKind::UserPrompt, text);
+            }
+            Message::Assistant(a) => {
+                for c in &a.content {
+                    match c {
+                        AssistantContent::Text(t) => {
+                            // Multi-line assistant text: split into
+                            // lines so soft-wrap and scroll work.
+                            for line in t.text.lines() {
+                                self.push(
+                                    TranscriptKind::AssistantText,
+                                    line.to_string(),
+                                );
+                            }
+                        }
+                        AssistantContent::Thinking(t) => {
+                            for line in t.thinking.lines() {
+                                self.push(
+                                    TranscriptKind::ThinkingText,
+                                    line.to_string(),
+                                );
+                            }
+                        }
+                        AssistantContent::ToolCall(tc) => {
+                            let args_preview = preview_json(&tc.arguments, 120);
+                            self.push(
+                                TranscriptKind::ToolCallStart,
+                                format!("→ {}({args_preview})", tc.name),
+                            );
+                            self.push(
+                                TranscriptKind::ToolCallEnd,
+                                format!("  [tool call id: {}]", tc.id),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Message::ToolResult(tr) => {
+                let text: String = tr
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::Text(t) => Some(t.text.as_str()),
+                        UserContent::Image(_) => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let label = if tr.is_error { "✖" } else { "✓" };
+                let tool_name = &tr.tool_name;
+                // Truncate for readability — tool results can be
+                // very large.
+                let preview = truncate(&text, 500);
+                self.push(
+                    TranscriptKind::Info,
+                    format!("{label} {tool_name}: {preview}"),
+                );
+            }
+        }
+    }
+
     /// React to one [`TuiEvent`]. Returns commands for the worker.
     pub fn on_event(&mut self, ev: TuiEvent) -> Vec<Command> {
         match ev {
@@ -833,6 +926,14 @@ impl AppState {
                     if *focused >= sessions.len() {
                         *focused = sessions.len().saturating_sub(1);
                     }
+                }
+                Vec::new()
+            }
+            TuiEvent::SessionResumed { path: _, messages } => {
+                self.transcript.clear();
+                self.reset_streaming_state();
+                for msg in &messages {
+                    self.push_agent_message(msg);
                 }
                 Vec::new()
             }
@@ -2924,6 +3025,59 @@ mod tests {
             cmds.as_slice(),
             [Command::Compact { keep_recent: 4 }]
         ));
+    }
+
+    #[test]
+    fn session_resumed_event_clears_transcript_and_shows_history() {
+        let mut s = fresh();
+        // Populate some existing transcript lines.
+        s.push(TranscriptKind::UserPrompt, "old prompt".into());
+        s.push(TranscriptKind::AssistantText, "old answer".into());
+        let old_len = s.transcript.len();
+        assert!(old_len >= 2, "expected at least 2 old lines, got {old_len}");
+
+        // Simulate a /resume that loads a session with one user
+        // message and one assistant message.
+        let prior_user = AgentMessage::user(grain_agent_core::UserMessage {
+            content: vec![UserContent::Text(grain_agent_core::TextContent {
+                text: "how do I read a file?".into(),
+            })],
+            timestamp: 0,
+        });
+        let prior_assistant = AgentMessage::assistant(grain_agent_core::AssistantMessage {
+            content: vec![grain_agent_core::AssistantContent::Text(
+                grain_agent_core::TextContent {
+                    text: "Use the read tool".into(),
+                },
+            )],
+            api: "openai".into(),
+            provider: "openai".into(),
+            model: "gpt-4o".into(),
+            usage: Default::default(),
+            stop_reason: grain_agent_core::StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+        });
+
+        s.on_event(TuiEvent::SessionResumed {
+            path: "/tmp/test.jsonl".into(),
+            messages: vec![prior_user, prior_assistant],
+        });
+
+        // Old transcript is gone; new history is rendered.
+        // The assistant text "Use the read tool" is a single line,
+        // so we expect one UserPrompt + one AssistantText = 2 lines.
+        let kinds: Vec<_> = s.transcript.iter().map(|l| l.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![TranscriptKind::UserPrompt, TranscriptKind::AssistantText],
+            "transcript lines after session resume: {:#?}",
+            s.transcript.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+
+        // Streaming state is reset.
+        assert!(!s.streaming);
+        assert!(s.streaming_started_at.is_none());
     }
 
     #[test]

@@ -726,6 +726,7 @@ async fn run_command_loop(
                         continue;
                     }
                 };
+                let prior_for_ui = prior.clone();
                 let new_writer: Option<Arc<SessionWriter>> = match SessionWriter::open(&path) {
                     Ok(w) => Some(Arc::new(w)),
                     Err(e) => {
@@ -744,9 +745,14 @@ async fn run_command_loop(
                     new_writer.clone(),
                 )
                 .await;
-                let prior_count = new_harness.agent().state().await.messages.len();
+                let prior_count = prior_for_ui.len();
                 harness = new_harness;
                 session_writer = new_writer;
+                let path_display = path.display().to_string();
+                let _ = evt_tx.send(TuiEvent::SessionResumed {
+                    path: path_display,
+                    messages: prior_for_ui,
+                });
                 let _ = evt_tx.send(TuiEvent::Info(format!(
                     "(resumed: {} — {prior_count} prior message(s))",
                     path.display()

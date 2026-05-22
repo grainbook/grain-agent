@@ -74,6 +74,10 @@ pub enum TuiEvent {
     /// Worker scanned `sessions_dir` and returns the discovered
     /// session list (newest first). Fills the `/resume` picker.
     SessionsListed(Vec<grain_ai_agent_headless::SessionMeta>),
+    /// Worker completed a `/resume` in-place session swap. Carries the
+    /// full set of prior messages so the UI can clear the current
+    /// transcript and repopulate with the loaded history.
+    SessionResumed { path: String, messages: Vec<grain_agent_core::AgentMessage> },
     /// Worker pushed an informational status line. Rendered as a
     /// `TranscriptKind::Info` row. Used for `/resume` swap
     /// confirmations and `/compact` summaries.
