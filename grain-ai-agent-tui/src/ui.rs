@@ -712,8 +712,9 @@ fn build_footer_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
         } else {
             String::new()
         };
+        let spinner = spinning_char(elapsed);
         spans.push(Span::styled(
-            format!("✻ {verb}… ({elapsed_str}{token_str}{cache_str})"),
+            format!("{spinner} {verb}… ({elapsed_str}{token_str}{cache_str})"),
             Style::default()
                 .fg(if state.cache_dropped {
                     palette.error
@@ -767,6 +768,17 @@ fn build_footer_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
         Style::default().fg(palette.muted),
     ));
     Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false })
+}
+
+/// Braille-dot spinner glyph rotating at ~10 fps.
+fn spinning_char(elapsed: std::time::Duration) -> char {
+    const SPINNER: &[char] = &[
+        '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}',
+        '\u{283C}', '\u{2834}', '\u{2826}', '\u{2827}',
+        '\u{2807}', '\u{280F}',
+    ];
+    let idx = (elapsed.as_millis() / 100) as usize % SPINNER.len();
+    SPINNER[idx]
 }
 
 /// Pick a "thinking" word that rotates every 5 seconds. Variety
