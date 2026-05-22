@@ -78,7 +78,7 @@ pub enum Overlay {
     /// of plugins discovered under `<workspace>/.grain/plugins/`.
     /// Phase B-2: viewing only — install / enable / disable land in
     /// later phases when there's a plugin registry to mutate.
-    Plugins(Vec<lazy_gagent::PluginInfo>),
+    Plugins(Vec<grain_ai_agent_headless::PluginInfo>),
 }
 
 /// One row in the transcript. Kept as plain strings so the renderer can

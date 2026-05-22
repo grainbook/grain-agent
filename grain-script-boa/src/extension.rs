@@ -152,19 +152,41 @@ impl BoaExtension {
     /// underlying boa diagnostic; the worker is still torn down
     /// cleanly via `Drop`.
     pub fn from_scripts_dir(dir: impl AsRef<Path>) -> Result<Self, BoaExtensionError> {
-        let dir = dir.as_ref();
+        Self::from_scripts_dirs(&[dir])
+    }
+
+    /// Like [`Self::from_scripts_dir`] but loads scripts from multiple
+    /// directories into the **same** worker (one shared JS realm).
+    /// Used by `lazy.gagent` to fold each plugin's `scripts/` folder
+    /// into the same Boa instance as the workspace's primary scripts
+    /// dir, so all registered tools end up exposed to one Agent.
+    ///
+    /// Iteration order: directories are walked in the order supplied;
+    /// `*.js` files within each directory are sorted alphabetically.
+    /// Tool registration order matters when two scripts register the
+    /// same name (last one wins) — keep this in mind when stacking
+    /// plugin scripts over a base set.
+    pub fn from_scripts_dirs(
+        dirs: &[impl AsRef<Path>],
+    ) -> Result<Self, BoaExtensionError> {
         let worker = Arc::new(spawn_worker());
 
-        let mut script_files: Vec<PathBuf> = match std::fs::read_dir(dir) {
-            Ok(rd) => rd
+        let mut script_files: Vec<PathBuf> = Vec::new();
+        for dir in dirs {
+            let dir = dir.as_ref();
+            let entries = match std::fs::read_dir(dir) {
+                Ok(rd) => rd,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            let mut here: Vec<PathBuf> = entries
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
                 .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("js"))
-                .collect(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(e.into()),
-        };
-        script_files.sort();
+                .collect();
+            here.sort();
+            script_files.extend(here);
+        }
 
         for path in &script_files {
             let code = std::fs::read_to_string(path)?;

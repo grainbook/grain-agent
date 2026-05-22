@@ -1303,7 +1303,6 @@ dependencies = [
  "grain-llm-genai",
  "grain-llm-models",
  "grain-script-boa",
- "lazy-gagent",
  "ratatui",
  "serde",
  "serde_json",
@@ -1898,9 +1897,7 @@ dependencies = [
 name = "lazy-gagent"
 version = "0.1.0"
 dependencies = [
- "serde",
- "tempfile",
- "toml",
+ "grain-ai-agent-headless",
 ]
 
 [[package]]

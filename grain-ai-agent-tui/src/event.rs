@@ -84,5 +84,5 @@ pub enum TuiEvent {
     Info(String),
     /// Worker scanned `plugins_dir` and returns the discovered
     /// `lazy.gagent` plugin set. Populates the `/plugins` overlay.
-    PluginsListed(Vec<lazy_gagent::PluginInfo>),
+    PluginsListed(Vec<grain_ai_agent_headless::PluginInfo>),
 }

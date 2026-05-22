@@ -32,6 +32,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod extensions;
 pub mod migrations;
+pub mod plugins;
 pub mod prompt;
 pub mod runtime;
 pub mod session;
@@ -68,6 +69,11 @@ pub use session_discovery::{
     SessionMeta, TITLE_PREVIEW_MAX, list_sessions, new_session_path, parse_session_meta,
 };
 pub use skills::{DEFAULT_SKILLS_DIR, SkillsError, find_skills, resolve_skills_dir};
+pub use plugins::{
+    Plugin, PluginInfo, PluginManifest, PromptFragment, compose_system_prompt_with_plugins,
+    default_plugins_dir, discover_plugins, find_skills_with_plugins, parse_manifest, plugin_info,
+    plugin_script_dirs, read_plugin_prompt_fragments, summarize_plugin,
+};
 pub use diagnostics::{SourceInfo, render_doctor_report, render_source_info_block, source_info};
 pub use slash::{HELP_TEXT, SlashCommand, parse as parse_slash_command};
 pub use tools::{

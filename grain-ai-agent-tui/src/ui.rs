@@ -888,7 +888,7 @@ fn draw_overlay(
 enum OverlayBody<'a> {
     Text(String),
     Skills(&'a [(String, String, bool)]),
-    Plugins(&'a [lazy_gagent::PluginInfo]),
+    Plugins(&'a [grain_ai_agent_headless::PluginInfo]),
 }
 
 fn draw_doctor(

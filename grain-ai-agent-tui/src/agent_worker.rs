@@ -333,43 +333,44 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         (m, cfg.model.clone(), None)
     };
 
+    // --- Plugins -----------------------------------------------------------
+    // Discover before the system prompt + skills resolution so plugin
+    // contributions land in the same pinned prefix as the built-ins.
+    let plugins_dir = cfg
+        .plugins_dir
+        .clone()
+        .unwrap_or_else(|| grain_ai_agent_headless::default_plugins_dir(workspace.root()));
+    let discovered_plugins = grain_ai_agent_headless::discover_plugins(&plugins_dir);
+    for p in &discovered_plugins {
+        eprintln!("[info] {}", grain_ai_agent_headless::summarize_plugin(p));
+    }
+
     // --- System prompt + skills block -------------------------------------
     // Pin the prompt for the lifetime of this session. The harness's
     // `PinnedSystemPrompt` freezes `base + <available_skills>` at
     // session start; never re-render in the hot path so the upstream
     // prefix cache (Anthropic, OpenAI, DeepSeek …) stays warm.
-    let base_prompt = match &cfg.system_prompt_file {
+    //
+    // Phase B-3: plugins can ship `prompts/*.md` files that get
+    // appended (with a `## Plugin: <name>` banner) onto the base
+    // prompt before pinning. This lets a plugin contribute domain
+    // rules ("always run clippy") without forking the base prompt.
+    let raw_base = match &cfg.system_prompt_file {
         Some(path) => std::fs::read_to_string(path).map_err(|e| WorkerInitError::SystemPrompt {
             path: path.clone(),
             source: e,
         })?,
         None => coding_agent_system_prompt(cfg.allow_write, cfg.allow_bash).to_string(),
     };
+    let base_prompt = grain_ai_agent_headless::compose_system_prompt_with_plugins(
+        &raw_base,
+        &discovered_plugins,
+    );
     let skills_dir = resolve_skills_dir(workspace.root(), cfg.skills_dir.as_deref());
-    // Phase A plugin discovery: each `<plugins_dir>/<name>/skills/`
-    // is treated as an extra skills dir and concatenated onto the
-    // primary `find_skills` result. Same load semantics — plugins
-    // just unify where related skills live.
-    let plugins_dir = cfg
-        .plugins_dir
-        .clone()
-        .unwrap_or_else(|| lazy_gagent::default_plugins_dir(workspace.root()));
-    let discovered_plugins = lazy_gagent::discover_plugins(&plugins_dir);
-    for p in &discovered_plugins {
-        eprintln!("[info] {}", lazy_gagent::summarize_plugin(p));
-    }
-    let mut skills = find_skills(&skills_dir).unwrap_or_default();
-    for p in &discovered_plugins {
-        if let Some(d) = p.skills_dir() {
-            match find_skills(&d) {
-                Ok(extra) => skills.extend(extra),
-                Err(e) => eprintln!(
-                    "[warn] plugin '{}' skills scan: {e}",
-                    p.manifest.name
-                ),
-            }
-        }
-    }
+    // Phase A/B: `find_skills_with_plugins` walks the primary skills
+    // dir, then folds in each plugin's `<plugin>/skills/`.
+    let skills = grain_ai_agent_headless::find_skills_with_plugins(&skills_dir, &discovered_plugins)
+        .unwrap_or_default();
     // Clone for the UI's slash-palette skill injection — the original
     // moves into `PinnedSystemPrompt::build` below.
     let skills_for_ui = skills.clone();
@@ -455,36 +456,50 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     }
 
     // --- JS scripted tools (optional, behind `scripts-boa` feature) ------
+    // Phase B-1: plugins contribute their own `<plugin>/scripts/` dirs
+    // alongside the workspace's primary scripts dir. All `.js` files
+    // get loaded into one shared Boa worker via `from_scripts_dirs`
+    // so plugin-registered tools end up exposed to the same agent.
     let scripts_path = cfg
         .scripts_dir
         .clone()
         .unwrap_or_else(|| workspace.root().join(".grain").join("scripts"));
     #[cfg(feature = "scripts-boa")]
-    let scripts_extension = match grain_script_boa::BoaExtension::from_scripts_dir(&scripts_path) {
-        Ok(ext) => {
-            let scripted = ext.tools();
-            if !scripted.is_empty() {
-                eprintln!(
-                    "[info] loaded {} JS tool(s) from {}",
-                    scripted.len(),
-                    scripts_path.display()
-                );
+    let scripts_extension = {
+        let mut all_dirs: Vec<PathBuf> = vec![scripts_path.clone()];
+        all_dirs.extend(grain_ai_agent_headless::plugin_script_dirs(
+            &discovered_plugins,
+        ));
+        match grain_script_boa::BoaExtension::from_scripts_dirs(&all_dirs) {
+            Ok(ext) => {
+                let scripted = ext.tools();
+                if !scripted.is_empty() {
+                    eprintln!(
+                        "[info] loaded {} JS tool(s) from {} dir(s) ({} from plugins)",
+                        scripted.len(),
+                        all_dirs.len(),
+                        all_dirs.len().saturating_sub(1)
+                    );
+                }
+                tools.extend(scripted);
+                Some(ext)
             }
-            tools.extend(scripted);
-            Some(ext)
-        }
-        Err(e) => {
-            eprintln!("[warn] boa scripts: {e}");
-            None
+            Err(e) => {
+                eprintln!("[warn] boa scripts: {e}");
+                None
+            }
         }
     };
     #[cfg(not(feature = "scripts-boa"))]
     {
-        if cfg.scripts_dir.is_some() || scripts_path.exists() {
+        let any_plugin_scripts = !grain_ai_agent_headless::plugin_script_dirs(
+            &discovered_plugins,
+        )
+        .is_empty();
+        if cfg.scripts_dir.is_some() || scripts_path.exists() || any_plugin_scripts {
             eprintln!(
-                "[warn] --scripts-dir / .grain/scripts/ present at {} but binary was \
-                 built without --features scripts-boa; ignoring",
-                scripts_path.display()
+                "[warn] scripts/ present (workspace or plugin) but binary was \
+                 built without --features scripts-boa; ignoring"
             );
         }
     }
@@ -742,10 +757,10 @@ async fn run_command_loop(
                 let _ = evt_tx.send(TuiEvent::SessionsListed(list));
             }
             Command::ReturnPlugins => {
-                let infos: Vec<lazy_gagent::PluginInfo> =
-                    lazy_gagent::discover_plugins(&plugins_dir)
+                let infos: Vec<grain_ai_agent_headless::PluginInfo> =
+                    grain_ai_agent_headless::discover_plugins(&plugins_dir)
                         .iter()
-                        .map(lazy_gagent::plugin_info)
+                        .map(grain_ai_agent_headless::plugin_info)
                         .collect();
                 let _ = evt_tx.send(TuiEvent::PluginsListed(infos));
             }
