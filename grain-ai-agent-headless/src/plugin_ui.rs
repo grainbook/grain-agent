@@ -225,6 +225,40 @@ pub struct BoundUiCommand {
     pub command: UiCommand,
 }
 
+/// One declarative slash command from `plugin.toml`. Lets a plugin
+/// own a `/<trigger>` slash entry — when the user types it, the
+/// TUI dispatches into the plugin's Rhai `handler` instead of
+/// falling through to the built-in slash table.
+///
+/// ```toml
+/// [[slash_command]]
+/// trigger     = "plugins"
+/// description = "Plugin manager (lazy.gagent)"
+/// handler     = "ui_plugins_panel"
+/// ```
+///
+/// Plugin-contributed slash commands **override** built-in ones
+/// with the same trigger. That's how lazy-gagent ships a richer
+/// `/plugins` panel without the engine knowing about lazy-gagent
+/// specifically.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SlashCommand {
+    /// Slash trigger sans the leading `/`. E.g. `"plugins"`.
+    pub trigger: String,
+    /// Description shown in the slash palette.
+    pub description: String,
+    /// Rhai function name to invoke. Same `OverlayDescriptor`
+    /// return contract as `[[ui_command]]` handlers.
+    pub handler: String,
+}
+
+/// A [`SlashCommand`] paired with the plugin that contributed it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoundSlashCommand {
+    pub plugin_name: String,
+    pub command: SlashCommand,
+}
+
 /// Collect every `[[ui_command]]` block declared by `plugins`, paired
 /// with its source plugin name. Stable order: alphabetical by
 /// plugin name (matches [`crate::plugins::discover_plugins`]'s sort),
@@ -234,6 +268,24 @@ pub fn collect_ui_commands(plugins: &[Plugin]) -> Vec<BoundUiCommand> {
     for p in plugins {
         for cmd in &p.manifest.ui_commands {
             out.push(BoundUiCommand {
+                plugin_name: p.manifest.name.clone(),
+                command: cmd.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// Collect every `[[slash_command]]` block declared by `plugins`,
+/// paired with its source plugin name. If multiple plugins claim
+/// the same trigger, all are returned; the TUI's lookup picks the
+/// first match (which is the alphabetically-first plugin under
+/// `.grain/plugins/`).
+pub fn collect_slash_commands(plugins: &[Plugin]) -> Vec<BoundSlashCommand> {
+    let mut out = Vec::new();
+    for p in plugins {
+        for cmd in &p.manifest.slash_commands {
+            out.push(BoundSlashCommand {
                 plugin_name: p.manifest.name.clone(),
                 command: cmd.clone(),
             });

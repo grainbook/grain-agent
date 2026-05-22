@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::plugin_ui::UiCommand;
+use crate::plugin_ui::{SlashCommand, UiCommand};
 use crate::skills::{SkillsError, find_skills};
 use grain_agent_harness::Skill;
 
@@ -77,6 +77,20 @@ pub struct PluginManifest {
     /// ```
     #[serde(default, rename = "ui_command")]
     pub ui_commands: Vec<UiCommand>,
+    /// Declarative slash-command takeovers. Each entry binds a
+    /// `/<trigger>` slash to a Rhai handler — when the user types
+    /// it, the TUI dispatches into the plugin instead of the
+    /// built-in slash table. Plugin entries override built-ins
+    /// with the same trigger.
+    ///
+    /// ```toml
+    /// [[slash_command]]
+    /// trigger     = "plugins"
+    /// description = "Plugin manager (lazy.gagent)"
+    /// handler     = "ui_plugins_panel"
+    /// ```
+    #[serde(default, rename = "slash_command")]
+    pub slash_commands: Vec<SlashCommand>,
 }
 
 /// One discovered plugin: parsed manifest + the directory it lives in.
@@ -692,6 +706,67 @@ handler = "ui_remove_prompt"
         write_plugin(tmp.path(), "noui");
         let plugins = discover_plugins(tmp.path());
         assert!(plugins[0].manifest.ui_commands.is_empty());
+    }
+
+    #[test]
+    fn manifest_parses_slash_command_blocks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_root = tmp.path().join("slashhost");
+        write_manifest(
+            &plugin_root,
+            "slashhost",
+            r#"
+[[slash_command]]
+trigger     = "plugins"
+description = "Plugin manager"
+handler     = "ui_plugins_panel"
+
+[[slash_command]]
+trigger     = "lazy"
+description = "Lazy debug panel"
+handler     = "ui_lazy_panel"
+"#,
+        );
+        let plugins = discover_plugins(tmp.path());
+        let slashes = &plugins[0].manifest.slash_commands;
+        assert_eq!(slashes.len(), 2);
+        assert_eq!(slashes[0].trigger, "plugins");
+        assert_eq!(slashes[0].handler, "ui_plugins_panel");
+        assert_eq!(slashes[1].trigger, "lazy");
+    }
+
+    #[test]
+    fn collect_slash_commands_walks_every_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pa = tmp.path().join("alpha");
+        write_manifest(
+            &pa,
+            "alpha",
+            r#"
+[[slash_command]]
+trigger     = "a"
+description = "alpha"
+handler     = "h_a"
+"#,
+        );
+        let pb = tmp.path().join("beta");
+        write_manifest(
+            &pb,
+            "beta",
+            r#"
+[[slash_command]]
+trigger     = "b"
+description = "beta"
+handler     = "h_b"
+"#,
+        );
+        let plugins = discover_plugins(tmp.path());
+        let collected =
+            crate::plugin_ui::collect_slash_commands(&plugins);
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0].plugin_name, "alpha");
+        assert_eq!(collected[0].command.trigger, "a");
+        assert_eq!(collected[1].plugin_name, "beta");
     }
 
     #[test]
