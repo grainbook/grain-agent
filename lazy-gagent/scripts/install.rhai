@@ -181,3 +181,100 @@ fn ui_remove_submit(args) {
         severity: if is_err { "error" } else { "success" }
     }
 }
+
+// --- /plugins takeover ---------------------------------------------------
+//
+// Replaces the built-in `/plugins` read-only overlay with a richer
+// Table view. Each row is one effective plugin (config-declared,
+// lock-installed, or legacy-spec). Up/Down navigates, Enter pops
+// a Modal with full details. The title carries a one-line
+// breakdown of how many plugins come from each origin so the user
+// can see at a glance what state the workspace is in.
+
+fn ui_plugins_panel() {
+    let plugins = plugins_list();
+    let n_config = 0;
+    let n_lock = 0;
+    let n_legacy = 0;
+    let n_manual = 0;
+    for p in plugins {
+        if p.origin == "config" { n_config += 1; }
+        else if p.origin == "lock" { n_lock += 1; }
+        else if p.origin == "legacy" { n_legacy += 1; }
+        else { n_manual += 1; }
+    }
+    let rows = [];
+    for p in plugins {
+        let stats = `${p.skills}s · ${p.themes}t · ${p.scripts}sc · ${p.prompts}p`;
+        let src_short = if p.src.len() > 40 { p.src.sub_string(0, 37) + "..." } else { p.src };
+        rows.push([
+            p.name,
+            if p.version == "" { "—" } else { p.version },
+            p.origin,
+            src_short,
+            stats
+        ]);
+    }
+    let total = plugins.len();
+    let summary_parts = [];
+    if n_config > 0 { summary_parts.push(`${n_config} config`); }
+    if n_lock > 0 { summary_parts.push(`${n_lock} lock`); }
+    if n_legacy > 0 { summary_parts.push(`${n_legacy} legacy`); }
+    if n_manual > 0 { summary_parts.push(`${n_manual} manual`); }
+    let summary = if summary_parts.len() > 0 {
+        " · " + summary_parts.join(" · ")
+    } else {
+        ""
+    };
+    #{
+        kind: "table",
+        title: `Plugins (${total}${summary})`,
+        columns: ["Name", "Version", "Origin", "Source", "Stats"],
+        rows: rows,
+        on_select: "ui_plugin_details"
+    }
+}
+
+fn ui_plugin_details(args) {
+    let plugins = plugins_list();
+    if args.row_index < 0 || args.row_index >= plugins.len() {
+        return #{
+            kind: "modal",
+            title: "Plugin details",
+            body: "(row out of range)",
+            severity: "error"
+        };
+    }
+    let p = plugins[args.row_index];
+    let origin_explain = if p.origin == "config" {
+        "declared in config.toml (immutable from runtime)"
+    } else if p.origin == "lock" {
+        "added by lazy_install (writable via lazy_remove)"
+    } else if p.origin == "legacy" {
+        "in legacy plugin-spec.toml (deprecated — consider migrating to config.toml)"
+    } else {
+        "discovered on disk only (no spec entry)"
+    };
+    let body = `Name:        ${p.name}
+Version:     ${if p.version == "" { "—" } else { p.version }}
+Author:      ${if p.author == "" { "—" } else { p.author }}
+Origin:      ${p.origin}  (${origin_explain})
+Source:      ${if p.src == "" { "—" } else { p.src }}
+Rev:         ${if p.rev == "" { "—" } else { p.rev }}
+Root:        ${p.root}
+
+Contributions:
+  Skills:    ${p.skills}
+  Themes:    ${p.themes}
+  Scripts:   ${p.scripts}
+  Prompts:   ${p.prompts}
+
+Description:
+${if p.description == "" { "  (none)" } else { "  " + p.description }}`;
+    #{
+        kind: "modal",
+        title: `Plugin: ${p.name}`,
+        body: body,
+        severity: "info"
+    }
+}

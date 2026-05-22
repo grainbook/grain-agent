@@ -24,3 +24,14 @@ target = "plugins"
 key = "r"
 label = "Remove"
 handler = "ui_remove_prompt"
+
+# Slash-command claim — lazy.gagent takes over `/plugins`, replacing
+# the built-in read-only overlay with a richer Table-based panel.
+# Enter on a row pops a details Modal; the `[i] / [u] / [r]` chips
+# on the underlying built-in overlay still work as a fallback if
+# lazy-gagent is uninstalled.
+
+[[slash_command]]
+trigger = "plugins"
+description = "Plugin manager — overview, install, update, remove"
+handler = "ui_plugins_panel"
