@@ -715,6 +715,7 @@ fn draw_overlay(
         Overlay::Skills(_) => (66, 18),
         Overlay::ThemePicker { .. } => (60, 20),
         Overlay::ProviderPicker { .. } => (72, 18),
+        Overlay::ModelPicker { .. } => (72, 22),
         Overlay::Log { .. } => (96, 30),
         Overlay::SessionResume { .. } => (88, 24),
         Overlay::Plugins { .. } => (78, 22),
@@ -781,6 +782,9 @@ fn draw_overlay(
         }
         Overlay::ProviderPicker { focused } => {
             return draw_provider_picker(frame, inner, *focused, state, palette);
+        }
+        Overlay::ModelPicker { focused, models } => {
+            return draw_model_picker(frame, inner, *focused, models, state, palette);
         }
         Overlay::Log { scroll } => {
             return draw_log(frame, inner, *scroll, state, palette);
@@ -2118,6 +2122,103 @@ fn provider_picker_row(
         Span::styled(profile.model.clone(), Style::default().fg(palette.muted)),
         Span::raw("  "),
         Span::styled(status_tag, Style::default().fg(status_color)),
+    ])
+}
+
+fn draw_model_picker(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    focused: usize,
+    models: &[(String, String)],
+    state: &AppState,
+    palette: &Palette,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // title
+            Constraint::Length(1), // pad
+            Constraint::Min(1),    // list
+            Constraint::Length(1), // hint
+        ])
+        .split(popup);
+
+    let title_line = Line::from(vec![
+        Span::styled(
+            "model",
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("({} models)", models.len()),
+            Style::default().fg(palette.muted),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(title_line), chunks[0]);
+
+    let body_area = chunks[2];
+    if models.is_empty() {
+        let line = Line::from(Span::styled(
+            "(loading models…)",
+            Style::default().fg(palette.muted),
+        ));
+        frame.render_widget(Paragraph::new(line), body_area);
+    } else {
+        let lines: Vec<Line> = models
+            .iter()
+            .enumerate()
+            .map(|(i, (id, name))| {
+                model_picker_row(i, id, name, focused, &state.model_id, palette)
+            })
+            .collect();
+        let visible = body_area.height as usize;
+        let total = lines.len();
+        let start = if total > visible {
+            focused.saturating_sub(visible / 2).min(total - visible)
+        } else {
+            0
+        };
+        let end = (start + visible).min(total);
+        let slice: Vec<Line> = lines[start..end].to_vec();
+        frame.render_widget(
+            Paragraph::new(Text::from(slice)).wrap(Wrap { trim: false }),
+            body_area,
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "↑↓ navigate · Enter apply · Esc cancel",
+            Style::default().fg(palette.muted),
+        ))),
+        chunks[3],
+    );
+}
+
+fn model_picker_row(
+    i: usize,
+    id: &str,
+    name: &str,
+    focused: usize,
+    current_model_id: &str,
+    palette: &Palette,
+) -> Line<'static> {
+    let cursor = if i == focused { "▶ " } else { "  " };
+    let mark = if id == current_model_id { "✓ " } else { "  " };
+    let row_style = if i == focused {
+        Style::default()
+            .fg(palette.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(palette.fg)
+    };
+    Line::from(vec![
+        Span::styled(format!("{cursor}{mark}"), row_style),
+        Span::styled(name.to_string(), row_style),
+        Span::raw("  "),
+        Span::styled(id.to_string(), Style::default().fg(palette.muted)),
     ])
 }
 

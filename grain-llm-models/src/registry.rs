@@ -76,6 +76,18 @@ impl Registry {
         self.models.get(id)
     }
 
+    /// Return every model whose canonical provider id matches `provider`.
+    /// E.g. `provider = "anthropic"` yields all ids starting with
+    /// `"anthropic/"`.
+    pub fn models_for_provider(&self, provider: &str) -> Vec<ModelDescriptor> {
+        let prefix = format!("{provider}/");
+        self.models
+            .values()
+            .filter(|d| d.id.starts_with(&prefix))
+            .cloned()
+            .collect()
+    }
+
     /// Iterate over all registered descriptors.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &ModelDescriptor)> {
         self.models.iter().map(|(k, v)| (k.as_str(), v))

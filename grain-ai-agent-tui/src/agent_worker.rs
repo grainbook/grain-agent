@@ -1420,6 +1420,49 @@ async fn run_command_loop(
                     cost,
                 });
             }
+            Command::ListModels(provider_name) => {
+                // Filter the registry by the provider's vendor
+                // family. For native vendors (Anthropic / OpenAI /
+                // Gemini) we filter by id prefix; for openai-compat
+                // profiles we return the full registry so the user
+                // can pick any model — the endpoint decides whether
+                // the request is honored.
+                let profile = profiles.iter().find(|p| p.name == provider_name);
+                let prefix = match profile.map(|p| p.kind) {
+                    Some(ProviderKind::Anthropic) => Some("anthropic/"),
+                    Some(ProviderKind::OpenAi) => Some("openai/"),
+                    Some(ProviderKind::Gemini) => Some("google/"),
+                    Some(ProviderKind::OpenAiCompat) | None => None,
+                };
+                let mut pairs: Vec<(String, String)> = registry
+                    .iter()
+                    .filter(|(id, _)| prefix.is_none_or(|p| id.starts_with(p)))
+                    .map(|(id, desc)| (id.to_string(), desc.name.clone()))
+                    .collect();
+                pairs.sort_by(|a, b| a.0.cmp(&b.0));
+                pairs.dedup_by(|a, b| a.0 == b.0);
+                let _ = evt_tx.send(TuiEvent::ModelsListed(pairs));
+            }
+            Command::SetModel(model_id) => {
+                // Resolve via registry; fall back to a clone of the
+                // current model with just the id swapped so
+                // openai-compat endpoints can drive arbitrary
+                // server-side ids (e.g. opencode-zen's "kimi-k2.6"
+                // which isn't in models.dev).
+                let model = registry.to_core_model(&model_id).unwrap_or_else(|| {
+                    let mut m = current_model.clone();
+                    m.id = model_id.clone();
+                    m.name = model_id.clone();
+                    m
+                });
+                let cost = model.cost.clone();
+                harness.set_model(model.clone()).await;
+                current_model = model;
+                let _ = evt_tx.send(TuiEvent::ModelApplied {
+                    model: model_id,
+                    cost,
+                });
+            }
             Command::Quit => {
                 // Make sure any in-flight turn gets cancelled before the
                 // task exits, so we don't strand a streaming HTTP req.

@@ -58,6 +58,13 @@ pub enum Overlay {
     ProviderPicker {
         focused: usize,
     },
+    /// Model picker — `focused` is the index into the list of models
+    /// returned by the worker for the current provider. Same key model
+    /// as ThemePicker / ProviderPicker.
+    ModelPicker {
+        focused: usize,
+        models: Vec<(String, String)>, // (id, name)
+    },
     /// Request-body log overlay. Joins entries from
     /// [`AppState::request_log`] with blank-line separators; `scroll`
     /// is the rendered-row offset for paging. Opened via `/log`.
@@ -201,6 +208,15 @@ pub enum Command {
     /// and calls `Agent::set_model(...)` then replies with
     /// [`TuiEvent::ProviderApplied`].
     ApplyProvider(usize),
+    /// Request the list of models for the current provider. Worker
+    /// replies via [`TuiEvent::ModelsListed`], which populates the
+    /// `/model` overlay.
+    ListModels(String),
+    /// Switch to a specific model id (e.g. `deepseek/deepseek-v4-pro`).
+    /// Worker resolves the model via [`Registry::to_core_model`] and
+    /// calls `Agent::set_model(...)` then replies with
+    /// [`TuiEvent::ModelApplied`].
+    SetModel(String),
     /// Scan `sessions_dir` for past `<uuidv7>.jsonl` files. Worker
     /// returns the list via [`TuiEvent::SessionsListed`], which
     /// populates the `/resume` overlay.
@@ -391,6 +407,10 @@ pub const SLASH_CATALOG: &[CommandCatalogItem] = &[
     CommandCatalogItem {
         trigger: "/provider",
         description: "switch provider profile from providers.toml",
+    },
+    CommandCatalogItem {
+        trigger: "/model",
+        description: "switch model for the current provider",
     },
     CommandCatalogItem {
         trigger: "/log",
@@ -1303,6 +1323,26 @@ impl AppState {
                 );
                 Vec::new()
             }
+            TuiEvent::ModelApplied { model, cost } => {
+                self.model_id = model.clone();
+                self.model_cost = cost;
+                self.push(
+                    TranscriptKind::Info,
+                    format!("(model: {model})"),
+                );
+                Vec::new()
+            }
+            TuiEvent::ModelsListed(list) => {
+                // Only swap when the overlay is still open (user may
+                // have hit Esc while the scan was in flight).
+                if let Some(Overlay::ModelPicker { models, focused }) = &mut self.overlay {
+                    *models = list;
+                    if *focused >= models.len() {
+                        *focused = models.len().saturating_sub(1);
+                    }
+                }
+                Vec::new()
+            }
         }
     }
 
@@ -1351,6 +1391,9 @@ impl AppState {
         }
         if matches!(self.overlay, Some(Overlay::ProviderPicker { .. })) {
             return self.on_key_provider_picker(key);
+        }
+        if matches!(self.overlay, Some(Overlay::ModelPicker { .. })) {
+            return self.on_key_model_picker(key);
         }
         // Doctor overlay owns its own input: typed chars edit a search
         // query that filters the report; arrows/PgUp/PgDn scroll the
@@ -1683,6 +1726,55 @@ impl AppState {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Key handler for the `/model` picker overlay. Same navigation
+    /// shape as the provider picker.
+    fn on_key_model_picker(&mut self, key: KeyEvent) -> Vec<Command> {
+        let Some(Overlay::ModelPicker { focused, models }) = &mut self.overlay else {
+            return Vec::new();
+        };
+        let last = models.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Up => {
+                *focused = focused.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                if !models.is_empty() {
+                    *focused = (*focused + 1).min(last);
+                }
+            }
+            KeyCode::PageUp => {
+                *focused = focused.saturating_sub(5);
+            }
+            KeyCode::PageDown => {
+                *focused = (*focused + 5).min(last);
+            }
+            KeyCode::Home => {
+                *focused = 0;
+            }
+            KeyCode::End => {
+                *focused = last;
+            }
+            KeyCode::Enter => {
+                if let Some((model_id, _)) = models.get(*focused) {
+                    let model_id = model_id.clone();
+                    self.overlay = None;
+                    return vec![Command::SetModel(model_id)];
+                }
+                self.overlay = None;
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// Return the current provider name, inferring from either the
+    /// active profile index or the `model_id` prefix.
+    fn current_provider_name(&self) -> Option<String> {
+        self.current_provider_idx
+            .map(|i| self.providers[i].name.clone())
+            .or_else(|| self.model_id.split('/').next().map(|s| s.to_string()))
     }
 
     fn on_key_doctor(&mut self, key: KeyEvent) -> Vec<Command> {
@@ -2134,6 +2226,22 @@ impl AppState {
                 let focused = self.current_provider_idx.unwrap_or(0);
                 self.overlay = Some(Overlay::ProviderPicker { focused });
                 Vec::new()
+            }
+            "model" | "models" => {
+                let provider = self.current_provider_name();
+                let Some(provider) = provider else {
+                    self.push(
+                        TranscriptKind::Info,
+                        "(no provider selected — use /provider first, or pass --model)"
+                            .into(),
+                    );
+                    return Vec::new();
+                };
+                self.overlay = Some(Overlay::ModelPicker {
+                    focused: 0,
+                    models: Vec::new(),
+                });
+                vec![Command::ListModels(provider)]
             }
             "resume" => {
                 // Open the picker immediately with an empty list;

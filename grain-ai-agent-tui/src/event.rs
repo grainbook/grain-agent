@@ -49,6 +49,13 @@ pub enum TuiEvent {
         model: String,
         cost: Cost,
     },
+    /// Worker successfully switched to a new model via `/model`. Carries
+    /// the model id + pricing so the UI can refresh the status line
+    /// ("(model: deepseek/deepseek-v4-pro)") and cost chip.
+    ModelApplied {
+        model: String,
+        cost: Cost,
+    },
     /// Mouse wheel rolled up — translated into transcript scroll-up by
     /// `amount` rows. Same follow-bottom semantics as PgUp.
     ScrollUp { amount: u16 },
@@ -78,6 +85,9 @@ pub enum TuiEvent {
     /// full set of prior messages so the UI can clear the current
     /// transcript and repopulate with the loaded history.
     SessionResumed { path: String, messages: Vec<grain_agent_core::AgentMessage> },
+    /// Worker returned the list of models for the current provider
+    /// (id + display name pairs). Fills the `/model` picker.
+    ModelsListed(Vec<(String, String)>),
     /// Worker pushed an informational status line. Rendered as a
     /// `TranscriptKind::Info` row. Used for `/resume` swap
     /// confirmations and `/compact` summaries.

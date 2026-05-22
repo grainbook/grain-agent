@@ -20,6 +20,15 @@ pub struct PersistedState {
     /// when nothing was saved yet → caller falls back to CLI default.
     #[serde(default)]
     pub last_theme: Option<String>,
+    /// Last-applied provider profile name. Survives restarts so the
+    /// user doesn't have to re-select via `/provider` every time.
+    #[serde(default)]
+    pub last_provider: Option<String>,
+    /// Last-applied model id (e.g. `deepseek/deepseek-chat`). Set
+    /// when the user picks a model via `/model`; restored on next
+    /// launch when no explicit `--model` flag is passed.
+    #[serde(default)]
+    pub last_model: Option<String>,
 }
 
 impl PersistedState {
@@ -81,6 +90,7 @@ mod tests {
         let path = tmp.path().join("tui-state.toml");
         let original = PersistedState {
             last_theme: Some("dracula".into()),
+            ..PersistedState::default()
         };
         original.save(&path).unwrap();
         let loaded = PersistedState::load(&path);
@@ -93,6 +103,7 @@ mod tests {
         let path = tmp.path().join("deep").join("subdir").join("state.toml");
         let s = PersistedState {
             last_theme: Some("nord".into()),
+            ..PersistedState::default()
         };
         s.save(&path).unwrap();
         assert!(path.exists());
