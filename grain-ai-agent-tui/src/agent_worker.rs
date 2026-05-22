@@ -18,13 +18,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use grain_agent_core::{
-    AgentEvent, AgentMessage, AgentTool, BeforeToolCallFn, ConvertToLlmFn, Message, Model,
-    PrepareNextTurnFn, StreamFn, TransformContextFn,
+    AgentEvent, AgentLoopTurnUpdate, AgentMessage, AgentTool, BeforeToolCallFn, ConvertToLlmFn,
+    Message, Model, PrepareNextTurnFn, StreamFn, TransformContextFn,
 };
 use grain_agent_harness::{
     AgentHarness, AgentHarnessOptions, InMemorySessionStorage, Session, SessionMetadata,
     SystemPrompt,
-    context_guard::{ContextGuard, ContextGuardPolicy},
+    context_guard::{ActiveModelHandle, ContextGuard, ContextGuardPolicy},
 };
 use grain_ai_agent_headless::{
     SessionWriter, TelemetrySink, Workspace, coding_agent_system_prompt, coding_bash_tools,
@@ -609,11 +609,21 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         bundle
     };
 
+    // --- Shared active-model handle -----------------------------------------
+    // Both ContextGuard and TokenBudgetPolicy read from the same handle
+    // so a mid-session model switch immediately updates context-window
+    // enforcement and compaction thresholds.
+    let active_model_handle: ActiveModelHandle =
+        Arc::new(std::sync::RwLock::new(active_model_id.clone()));
+
     // --- Context guard -----------------------------------------------------
-    let guard = ContextGuard::new(registry.clone(), active_model_id.clone())
-        .with_policy(ContextGuardPolicy::DropOldest)
-        .with_headroom_tokens(cfg.headroom_tokens)
-        .into_transform_fn();
+    let guard = ContextGuard::with_active_model_handle(
+        registry.clone(),
+        active_model_handle.clone(),
+    )
+    .with_policy(ContextGuardPolicy::DropOldest)
+    .with_headroom_tokens(cfg.headroom_tokens)
+    .into_transform_fn();
 
     // --- Channels ----------------------------------------------------------
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
@@ -633,7 +643,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     let before_tool_call: Option<BeforeToolCallFn> = Some(grain_agent_harness::storm_hook(
         grain_agent_harness::StormConfig::default(),
     ));
-    let prepare_next_turn: Option<PrepareNextTurnFn> = match &cfg.escalate_to {
+    let escalation_hook: Option<PrepareNextTurnFn> = match &cfg.escalate_to {
         Some(target_id) => match registry.to_core_model(target_id) {
             Some(target) => {
                 eprintln!(
@@ -654,6 +664,27 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         },
         None => None,
     };
+
+    // --- Compaction hook (TokenBudgetPolicy) ------------------------------
+    let compaction_policy = Arc::new(grain_agent_harness::TokenBudgetPolicy::new(
+        registry.clone(),
+        active_model_handle.clone(),
+        grain_agent_harness::DEFAULT_COMPACTION_SETTINGS,
+        grain_agent_harness::TokenEstimator::approximate(),
+    ));
+    let compaction_hook: Option<PrepareNextTurnFn> = Some(
+        grain_agent_harness::compaction_prepare_next_turn(
+            stream.clone(),
+            compaction_policy,
+            grain_agent_harness::DEFAULT_COMPACTION_PROMPT.to_string(),
+        ),
+    );
+
+    // Chain compaction (A) with escalation (B). Compaction rewrites the
+    // context; escalation may override the model. B's model/thinking_level
+    // wins because escalation needs authority to swap models on failure.
+    let prepare_next_turn: Option<PrepareNextTurnFn> =
+        chain_prepare_next_turn(compaction_hook, escalation_hook);
 
     // --- Debug-log `convert_to_llm` wrapper --------------------------------
     let convert_to_llm: Option<ConvertToLlmFn> = if cfg.debug_log {
@@ -958,6 +989,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             deepseek,
             workspace_for_task,
             registry_for_task,
+            active_model_handle,
             skills_dir_for_task,
             sessions_dir_for_task,
             plugins_dir_for_task,
@@ -1034,6 +1066,54 @@ fn build_ui_handler_map(
     out
 }
 
+/// Chain two optional [`PrepareNextTurnFn`] hooks: run `a` first, then
+/// `b`. If `a` produces a context update, `b` sees it. `b`'s `model`
+/// and `thinking_level` override `a`'s (escalation wins over compaction
+/// for model swaps). Returns `None` when both inputs are `None`.
+fn chain_prepare_next_turn(
+    a: Option<PrepareNextTurnFn>,
+    b: Option<PrepareNextTurnFn>,
+) -> Option<PrepareNextTurnFn> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(f), None) | (None, Some(f)) => Some(f),
+        (Some(first), Some(second)) => Some(Arc::new(move |ctx| {
+            let first = first.clone();
+            let second = second.clone();
+            Box::pin(async move {
+                let update_a = first(ctx.clone()).await;
+
+                // If A produced a context rewrite, build a new
+                // PrepareNextTurnContext with that context so B
+                // operates on the compacted transcript.
+                let ctx_for_b = if let Some(ref upd) = update_a
+                    && let Some(ref new_ctx) = upd.context
+                {
+                    grain_agent_core::PrepareNextTurnContext {
+                        context: Arc::new(new_ctx.clone()),
+                        ..ctx
+                    }
+                } else {
+                    ctx
+                };
+
+                let update_b = second(ctx_for_b).await;
+
+                // Merge: B's fields override A's where present.
+                match (update_a, update_b) {
+                    (None, None) => None,
+                    (Some(u), None) | (None, Some(u)) => Some(u),
+                    (Some(a), Some(b)) => Some(AgentLoopTurnUpdate {
+                        context: b.context.or(a.context),
+                        model: b.model.or(a.model),
+                        thinking_level: b.thinking_level.or(a.thinking_level),
+                    }),
+                }
+            })
+        })),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_command_loop(
     mut harness: Arc<AgentHarness>,
@@ -1043,6 +1123,7 @@ async fn run_command_loop(
     deepseek: grain_ai_agent_headless::DeepSeekPack,
     workspace: Arc<Workspace>,
     registry: Arc<Registry>,
+    active_model_handle: ActiveModelHandle,
     skills_dir: PathBuf,
     sessions_dir: PathBuf,
     plugins_dir: PathBuf,
@@ -1411,6 +1492,11 @@ async fn run_command_loop(
                 let model = override_model_provider(model, profile);
                 let cost = model.cost.clone();
                 harness.set_model(model.clone()).await;
+                // Update the shared handle so ContextGuard and
+                // TokenBudgetPolicy see the new model immediately.
+                if let Ok(mut w) = active_model_handle.write() {
+                    *w = profile.model.clone();
+                }
                 // Keep `current_model` in sync so a later /resume
                 // hands the resumed harness the right model.
                 current_model = model;
@@ -1457,6 +1543,11 @@ async fn run_command_loop(
                 });
                 let cost = model.cost.clone();
                 harness.set_model(model.clone()).await;
+                // Update the shared handle so ContextGuard and
+                // TokenBudgetPolicy see the new model immediately.
+                if let Ok(mut w) = active_model_handle.write() {
+                    *w = model_id.clone();
+                }
                 current_model = model;
                 let _ = evt_tx.send(TuiEvent::ModelApplied {
                     model: model_id,
