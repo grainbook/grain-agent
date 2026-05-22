@@ -33,7 +33,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// One named provider configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,21 +110,26 @@ struct ProvidersFile {
     profile: Vec<ProfileEntry>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ProfileEntry {
-    name: String,
-    kind: String,
+/// One profile entry as it appears on disk (raw TOML). Public so
+/// other crates (notably `grain-ai-agent-headless::config`) can
+/// embed a `Vec<ProfileEntry>` inside their own configs and reuse
+/// [`profile_from_entry`] to do the validated conversion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileEntry {
+    pub name: String,
+    pub kind: String,
     #[serde(default)]
-    base_url: Option<String>,
-    model: String,
-    auth: AuthEntry,
+    pub base_url: Option<String>,
+    pub model: String,
+    pub auth: AuthEntry,
 }
 
-#[derive(Debug, Deserialize)]
-struct AuthEntry {
-    kind: String,
+/// Auth block inside a [`ProfileEntry`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthEntry {
+    pub kind: String,
     #[serde(default)]
-    env: Option<String>,
+    pub env: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +191,14 @@ pub fn load_profiles(path: &Path) -> (Vec<ProviderProfile>, Vec<String>) {
     (profiles, warnings)
 }
 
-fn profile_from_entry(entry: ProfileEntry) -> Result<ProviderProfile, String> {
+/// Validate a raw [`ProfileEntry`] into a [`ProviderProfile`].
+///
+/// Returns an `Err(message)` for unknown `kind`, missing `base_url`
+/// on `openai-compat`, or unknown `auth.kind`. Loader callers
+/// aggregate these errors per-file; in-config callers (the
+/// `grain-ai-agent-headless::config` consolidated TOML) bubble them
+/// up the same way.
+pub fn profile_from_entry(entry: ProfileEntry) -> Result<ProviderProfile, String> {
     let kind = match entry.kind.as_str() {
         "anthropic" => ProviderKind::Anthropic,
         "openai" => ProviderKind::OpenAi,

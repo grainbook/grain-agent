@@ -19,12 +19,34 @@
 //! allow_semantic_search = false
 //! skills_dir = ".claude/skills"
 //! session_dir = ".grain/sessions" # base dir for JSONL sessions; --session overrides
+//!
+//! # Declarative plugin set. Equivalent to a hand-edited
+//! # plugin-spec.toml entry. The runtime plugin manager
+//! # (lazy_install / lazy_remove) writes to .grain/plugin-lock.toml
+//! # instead so it never has to rewrite this file (no comment-loss /
+//! # ordering churn). Boot-time spec = union(config.plugin,
+//! # plugin-lock.plugin, legacy plugin-spec.toml).
+//! [[plugin]]
+//! name = "lazy-gagent"
+//! src  = "../lazy-gagent"
+//!
+//! # Declarative provider profile. Equivalent to a [[profile]] block
+//! # in the legacy .grain/providers.toml. Both files are read; if a
+//! # name appears in both, config.toml wins.
+//! [[provider]]
+//! name     = "anthropic"
+//! kind     = "anthropic"
+//! model    = "anthropic/claude-sonnet-4-5"
+//! auth     = { kind = "api_key", env = "ANTHROPIC_API_KEY" }
 //! ```
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::plugin_spec::PluginSpec;
+use grain_llm_genai::ProfileEntry;
 
 /// User-overridable defaults, deserialized from TOML. Every field is
 /// optional; a missing field falls through to the next layer.
@@ -46,6 +68,20 @@ pub struct ConfigFile {
     /// configured OpenAI-compat endpoint is on loopback). `Some(true)`
     /// always bypasses; `Some(false)` always respects proxy env vars.
     pub bypass_proxy: Option<bool>,
+    /// Declarative plugin entries — same shape as
+    /// `plugin-spec.toml`'s `[[plugin]]` blocks. Authoritative when
+    /// the same `name` appears in both files; the runtime plugin
+    /// manager writes to `plugin-lock.toml` (a separate file) to
+    /// keep this one's comments / ordering intact.
+    #[serde(default, rename = "plugin")]
+    pub plugins: Vec<PluginSpec>,
+    /// Declarative provider entries — same shape as the legacy
+    /// `providers.toml` `[[profile]]` blocks but renamed to
+    /// `[[provider]]` so the section reads naturally. If both
+    /// `providers.toml` and this list set the same `name`, this
+    /// list wins.
+    #[serde(default, rename = "provider")]
+    pub providers: Vec<ProfileEntry>,
 }
 
 #[derive(Debug, Error)]
@@ -209,6 +245,24 @@ fn merge_into(dst: &mut ConfigFile, src: ConfigFile) {
     if src.bypass_proxy.is_some() {
         dst.bypass_proxy = src.bypass_proxy;
     }
+    // Plugin and provider lists: layered merge. Workspace entries
+    // win on `name` collision with user-XDG entries; otherwise
+    // both are kept. Order: dst (existing) first, then any new
+    // entries from src.
+    for p in src.plugins {
+        if let Some(slot) = dst.plugins.iter_mut().find(|e| e.name == p.name) {
+            *slot = p;
+        } else {
+            dst.plugins.push(p);
+        }
+    }
+    for p in src.providers {
+        if let Some(slot) = dst.providers.iter_mut().find(|e| e.name == p.name) {
+            *slot = p;
+        } else {
+            dst.providers.push(p);
+        }
+    }
 }
 
 fn load_from(path: &Path) -> Result<ConfigFile, ConfigError> {
@@ -326,6 +380,95 @@ mod tests {
         );
         let err = ConfigFile::load(dir.path()).unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+
+    #[test]
+    fn config_parses_plugin_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        write_toml(
+            &workspace_config_path(dir.path()),
+            r#"
+model = "anthropic/claude-sonnet-4-5"
+
+[[plugin]]
+name = "lazy-gagent"
+src  = "../lazy-gagent"
+
+[[plugin]]
+name = "rust-helper"
+src  = "https://github.com/me/rust-helper.git"
+rev  = "v1.0.0"
+"#,
+        );
+        let cfg = ConfigFile::load(dir.path()).unwrap();
+        assert_eq!(cfg.plugins.len(), 2);
+        assert_eq!(cfg.plugins[0].name, "lazy-gagent");
+        assert_eq!(cfg.plugins[0].src, "../lazy-gagent");
+        assert_eq!(cfg.plugins[1].name, "rust-helper");
+        assert_eq!(cfg.plugins[1].rev.as_deref(), Some("v1.0.0"));
+    }
+
+    #[test]
+    fn config_parses_provider_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        write_toml(
+            &workspace_config_path(dir.path()),
+            r#"
+[[provider]]
+name  = "anthropic"
+kind  = "anthropic"
+model = "anthropic/claude-sonnet-4-5"
+auth  = { kind = "api_key", env = "ANTHROPIC_API_KEY" }
+"#,
+        );
+        let cfg = ConfigFile::load(dir.path()).unwrap();
+        assert_eq!(cfg.providers.len(), 1);
+        assert_eq!(cfg.providers[0].name, "anthropic");
+        assert_eq!(cfg.providers[0].kind, "anthropic");
+        assert_eq!(cfg.providers[0].auth.kind, "api_key");
+        assert_eq!(cfg.providers[0].auth.env.as_deref(), Some("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn plugin_and_provider_blocks_are_optional() {
+        let dir = tempfile::tempdir().unwrap();
+        write_toml(
+            &workspace_config_path(dir.path()),
+            "model = \"openai/gpt-4o\"\n",
+        );
+        let cfg = ConfigFile::load(dir.path()).unwrap();
+        assert!(cfg.plugins.is_empty());
+        assert!(cfg.providers.is_empty());
+    }
+
+    #[test]
+    fn workspace_plugin_overrides_user_plugin_by_name() {
+        // User-XDG config declares one plugin; workspace config
+        // overrides its src. The merged list keeps the workspace
+        // entry and adds non-overlapping ones.
+        let dir = tempfile::tempdir().unwrap();
+        // Layout: we simulate the user-XDG file by writing to a temp
+        // home and shimming via `dirs::config_dir()`... easier: just
+        // exercise merge_into directly.
+        let mut dst = ConfigFile::default();
+        dst.plugins.push(PluginSpec {
+            name: "shared".into(),
+            src: "user-src".into(),
+            rev: None,
+            kind: None,
+        });
+        let src = ConfigFile {
+            plugins: vec![PluginSpec {
+                name: "shared".into(),
+                src: "ws-src".into(),
+                rev: None,
+                kind: None,
+            }],
+            ..Default::default()
+        };
+        merge_into(&mut dst, src);
+        assert_eq!(dst.plugins.len(), 1);
+        assert_eq!(dst.plugins[0].src, "ws-src");
     }
 
     #[test]

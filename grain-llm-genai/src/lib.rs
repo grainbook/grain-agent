@@ -27,6 +27,7 @@ pub use mapping::inbound::InboundState;
 pub use mapping::outbound::{baseline_chat_options, to_chat_request};
 pub use mapping::usage::map_usage;
 pub use provider::{
-    ProviderAuth, ProviderKind, ProviderProfile, load_profiles, resolve_providers_file,
+    AuthEntry, ProfileEntry, ProviderAuth, ProviderKind, ProviderProfile, load_profiles,
+    profile_from_entry, resolve_providers_file,
 };
 pub use stream::GenaiStream;
