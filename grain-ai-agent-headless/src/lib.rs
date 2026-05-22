@@ -84,7 +84,8 @@ pub use plugin_spec::{
     load_plugin_spec, resolve_local_src, sync_plugins,
 };
 pub use plugin_ui::{
-    BoundUiCommand, FormField, ModalSeverity, OverlayDescriptor, UiCommand, collect_ui_commands,
+    BoundUiCommand, FormField, ModalSeverity, OverlayDescriptor, TextColor, TextLine, TextSpan,
+    UiCommand, collect_ui_commands,
 };
 pub use plugin_lock::{
     PluginOrigin, default_lock_path, effective_spec, load_plugin_lock, origin_of, save_plugin_lock,
