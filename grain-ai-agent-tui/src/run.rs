@@ -25,6 +25,7 @@ use crate::agent_worker::{Worker, WorkerConfig, WorkerInitError, spawn};
 use crate::app::{AppState, Capabilities};
 use crate::cli::Args;
 use crate::event::TuiEvent;
+use crate::persist::{self, PersistedState};
 use crate::theme::{Theme, builtin_themes, load_user_themes};
 use crate::ui;
 use grain_llm_genai::{ProviderProfile, load_profiles, resolve_providers_file};
@@ -67,7 +68,21 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
         .themes_dir
         .clone()
         .unwrap_or_else(|| args.workspace.join(".grain").join("themes"));
-    let (themes, initial_idx) = resolve_themes(&themes_dir, &args.theme);
+    // Load persisted preferences (last theme). When the user passed
+    // `--theme` explicitly (i.e. not the literal default `"default"`),
+    // the CLI wins; otherwise we honor the persisted choice so the
+    // theme survives restarts.
+    let persist_path = persist::default_path(&args.workspace);
+    let persisted = PersistedState::load(&persist_path);
+    let requested_theme: String = if args.theme != "default" {
+        args.theme.clone()
+    } else {
+        persisted
+            .last_theme
+            .clone()
+            .unwrap_or_else(|| "default".into())
+    };
+    let (themes, initial_idx) = resolve_themes(&themes_dir, &requested_theme);
 
     let mut terminal = init_terminal()?;
     let result = event_loop(
@@ -80,6 +95,8 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
         initial_idx,
         profiles,
         initial_profile_idx,
+        persist_path,
+        persisted,
     )
     .await;
     restore_terminal(&mut terminal)?;
@@ -175,6 +192,8 @@ async fn event_loop(
     initial_theme_idx: usize,
     providers: Vec<ProviderProfile>,
     initial_provider_idx: Option<usize>,
+    persist_path: std::path::PathBuf,
+    mut persisted: PersistedState,
 ) -> Result<(), TuiError> {
     // Resolve CNY rate once at startup: explicit `--cny-rate` wins,
     // otherwise auto-detect from `$LANG`. Pure: see
@@ -212,6 +231,12 @@ async fn event_loop(
     // `init_terminal` started capture ON, so we mirror that here.
     let mut mouse_capture_applied = true;
 
+    // Tracks the theme idx that's currently reflected in
+    // `persisted.last_theme`. After each `on_event`, divergence here
+    // means the user just picked a new theme via the picker — save
+    // the choice so the next launch resumes it.
+    let mut last_persisted_theme_idx = initial_theme_idx;
+
     // Initial draw.
     terminal.draw(|f| ui::draw(f, &state))?;
 
@@ -234,6 +259,15 @@ async fn event_loop(
             if cmd_tx.send(cmd).is_err() {
                 // worker is gone — wind down gracefully.
                 return Ok(());
+            }
+        }
+        if state.current_theme_idx != last_persisted_theme_idx {
+            last_persisted_theme_idx = state.current_theme_idx;
+            if let Some(theme) = state.themes.get(state.current_theme_idx) {
+                persisted.last_theme = Some(theme.name.clone());
+                if let Err(e) = persisted.save(&persist_path) {
+                    eprintln!("[warn] tui-state save {}: {e}", persist_path.display());
+                }
             }
         }
         if state.should_quit {

@@ -22,6 +22,7 @@ pub mod app;
 pub mod cli;
 pub mod config_apply;
 pub mod event;
+pub mod persist;
 pub mod run;
 pub mod theme;
 pub mod ui;

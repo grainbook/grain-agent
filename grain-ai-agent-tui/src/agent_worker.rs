@@ -83,6 +83,12 @@ pub struct WorkerConfig {
     /// Directory for auto-created session files when `session` is
     /// unset. `None` → `<workspace>/.grain/sessions/`.
     pub sessions_dir: Option<PathBuf>,
+    /// When `true`, ignore any existing transcripts in `sessions_dir`
+    /// and mint a fresh `<uuidv7>.jsonl` — even if `session` is unset.
+    /// When `false` (default), the worker auto-resumes the
+    /// most-recently-modified session in `sessions_dir` so users
+    /// return to where they left off across launches.
+    pub new_session: bool,
 }
 
 impl From<&Args> for WorkerConfig {
@@ -110,6 +116,7 @@ impl From<&Args> for WorkerConfig {
             bypass_proxy: a.bypass_proxy,
             debug_log: a.debug_log,
             sessions_dir: a.sessions_dir.clone(),
+            new_session: a.new_session,
         }
     }
 }
@@ -351,18 +358,37 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         .clone()
         .unwrap_or_else(|| workspace.root().join(".grain").join("sessions"));
     if cfg.session.is_none() {
-        match std::fs::create_dir_all(&sessions_dir) {
-            Ok(()) => {
-                let path = grain_ai_agent_headless::new_session_path(&sessions_dir);
-                eprintln!("[info] session: {}", path.display());
-                cfg.session = Some(path);
-            }
-            Err(e) => {
-                eprintln!(
-                    "[warn] could not create sessions dir {}: {e} \
-                     (session won't be persisted this run)",
-                    sessions_dir.display()
-                );
+        // Two-step resolution: auto-resume the most-recently-modified
+        // transcript in `sessions_dir` when `--new-session` is off
+        // (the default — users expect to return to the conversation
+        // they had open). Falls back to minting a fresh `<uuidv7>.jsonl`
+        // when no prior session exists, or when the caller forced
+        // `--new-session`.
+        let resumed = if !cfg.new_session {
+            grain_ai_agent_headless::list_sessions(&sessions_dir)
+                .into_iter()
+                .next()
+                .map(|m| m.path)
+        } else {
+            None
+        };
+        if let Some(path) = resumed {
+            eprintln!("[info] auto-resume: {}", path.display());
+            cfg.session = Some(path);
+        } else {
+            match std::fs::create_dir_all(&sessions_dir) {
+                Ok(()) => {
+                    let path = grain_ai_agent_headless::new_session_path(&sessions_dir);
+                    eprintln!("[info] session: {}", path.display());
+                    cfg.session = Some(path);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[warn] could not create sessions dir {}: {e} \
+                         (session won't be persisted this run)",
+                        sessions_dir.display()
+                    );
+                }
             }
         }
     }

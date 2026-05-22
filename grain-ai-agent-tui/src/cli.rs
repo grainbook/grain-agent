@@ -69,6 +69,14 @@ pub struct Args {
     #[arg(long)]
     pub sessions_dir: Option<PathBuf>,
 
+    /// Force a fresh session at startup. Without this flag, the TUI
+    /// auto-resumes the most-recently-modified session found in
+    /// `--sessions-dir`. Pair with `--session <path>` to pick a
+    /// specific transcript explicitly; pass this flag to ignore both
+    /// auto-resume and any existing transcripts and start clean.
+    #[arg(long, default_value_t = false)]
+    pub new_session: bool,
+
     /// Directory scanned for `<name>/SKILL.md` skill files. Defaults to
     /// `<workspace>/.claude/skills`.
     #[arg(long)]
