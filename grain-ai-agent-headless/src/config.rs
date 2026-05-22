@@ -68,6 +68,15 @@ pub struct ConfigFile {
     /// configured OpenAI-compat endpoint is on loopback). `Some(true)`
     /// always bypasses; `Some(false)` always respects proxy env vars.
     pub bypass_proxy: Option<bool>,
+    /// Default fold state for **tool-call blocks** in the TUI
+    /// transcript. `Some(true)` (the default) collapses each
+    /// tool-call block to a one-line summary; user expands
+    /// individually with the transcript cursor. `Some(false)` keeps
+    /// them expanded inline like the legacy renderer.
+    pub fold_tool_calls: Option<bool>,
+    /// Default fold state for **thinking blocks** in the TUI
+    /// transcript. Same shape as [`Self::fold_tool_calls`].
+    pub fold_thinking: Option<bool>,
     /// Declarative plugin entries — same shape as
     /// `plugin-spec.toml`'s `[[plugin]]` blocks. Authoritative when
     /// the same `name` appears in both files; the runtime plugin
@@ -244,6 +253,12 @@ fn merge_into(dst: &mut ConfigFile, src: ConfigFile) {
     }
     if src.bypass_proxy.is_some() {
         dst.bypass_proxy = src.bypass_proxy;
+    }
+    if src.fold_tool_calls.is_some() {
+        dst.fold_tool_calls = src.fold_tool_calls;
+    }
+    if src.fold_thinking.is_some() {
+        dst.fold_thinking = src.fold_thinking;
     }
     // Plugin and provider lists: layered merge. Workspace entries
     // win on `name` collision with user-XDG entries; otherwise

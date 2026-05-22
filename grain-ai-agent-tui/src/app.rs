@@ -6,7 +6,7 @@
 //! behavior without touching a real terminal or LLM.
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 use ratatui::layout::Rect;
@@ -191,6 +191,114 @@ pub enum TranscriptKind {
     ToolCallEnd,
     Info,
     Error,
+}
+
+/// A logical group of consecutive [`TranscriptLine`]s that the
+/// renderer treats as one foldable unit.
+///
+/// - `Plain` blocks are always single lines; they're never folded.
+/// - `Thinking` blocks aggregate consecutive `ThinkingText` lines.
+/// - `ToolCall` blocks span from a `ToolCallStart` line through its
+///   matching `ToolCallEnd` (or the buffer tail if the call is
+///   still in-flight). Any lines in between (e.g. AssistantText
+///   that arrived mid-call) come along for the ride so the visual
+///   group reads as one chunk.
+///
+/// Block IDs are stable across re-renders because they're derived
+/// from `first_line`, which never shifts (transcript is append-only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptBlock {
+    pub first_line: usize,
+    pub last_line: usize,
+    pub kind: BlockKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockKind {
+    Plain,
+    Thinking,
+    ToolCall,
+}
+
+impl TranscriptBlock {
+    pub fn line_count(&self) -> usize {
+        self.last_line.saturating_sub(self.first_line) + 1
+    }
+
+    /// Stable id usable as a HashMap key for fold overrides.
+    pub fn id(&self) -> usize {
+        self.first_line
+    }
+
+    /// `true` when this block kind participates in fold/unfold.
+    /// `Plain` blocks always render their single line; folding
+    /// them adds no value.
+    pub fn is_foldable(&self) -> bool {
+        !matches!(self.kind, BlockKind::Plain)
+    }
+}
+
+/// Walk `transcript` and group consecutive lines into
+/// [`TranscriptBlock`]s. Append-only safety: existing block
+/// `first_line` values stay stable as new lines are appended to
+/// the buffer, so fold-state stored against those ids survives
+/// every subsequent render.
+pub fn build_transcript_blocks(transcript: &[TranscriptLine]) -> Vec<TranscriptBlock> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < transcript.len() {
+        let line = &transcript[i];
+        match line.kind {
+            TranscriptKind::ThinkingText => {
+                let start = i;
+                let mut end = i;
+                while end + 1 < transcript.len()
+                    && transcript[end + 1].kind == TranscriptKind::ThinkingText
+                {
+                    end += 1;
+                }
+                out.push(TranscriptBlock {
+                    first_line: start,
+                    last_line: end,
+                    kind: BlockKind::Thinking,
+                });
+                i = end + 1;
+            }
+            TranscriptKind::ToolCallStart => {
+                let start = i;
+                let mut end = i;
+                let mut k = i + 1;
+                while k < transcript.len() {
+                    end = k;
+                    if transcript[k].kind == TranscriptKind::ToolCallEnd {
+                        break;
+                    }
+                    k += 1;
+                }
+                // If we walked off the end without finding the
+                // matching `End`, the call is still in-flight;
+                // `end` already points at the last line we have.
+                if k == transcript.len() {
+                    end = transcript.len().saturating_sub(1);
+                }
+                out.push(TranscriptBlock {
+                    first_line: start,
+                    last_line: end,
+                    kind: BlockKind::ToolCall,
+                });
+                i = end + 1;
+            }
+            _ => {
+                out.push(TranscriptBlock {
+                    first_line: i,
+                    last_line: i,
+                    kind: BlockKind::Plain,
+                });
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// Commands the agent worker should execute on behalf of the UI.
@@ -602,6 +710,23 @@ pub struct AppState {
     /// only when the worker was started with `--debug-log`; the
     /// `/log` overlay renders them top-down most-recent-first.
     pub request_log: VecDeque<String>,
+    /// Default fold state for tool-call blocks. From
+    /// `config.toml::fold_tool_calls` (defaults `true`).
+    pub fold_tool_calls_default: bool,
+    /// Default fold state for thinking blocks. From
+    /// `config.toml::fold_thinking` (defaults `true`).
+    pub fold_thinking_default: bool,
+    /// Per-block fold override. Key = block id (first line index);
+    /// value = `true` to force-expand a block that would normally
+    /// be collapsed by default, `false` to force-collapse a block
+    /// that would normally be expanded. Absent = use the default
+    /// for the block's kind.
+    pub fold_overrides: HashMap<usize, bool>,
+    /// Currently focused transcript block (block id = first_line
+    /// index). `None` when the input pane has focus or no block is
+    /// selected. Cursor jumps via Up/Down in `on_key_transcript`;
+    /// Space/Enter toggles fold of the focused block.
+    pub transcript_cursor: Option<usize>,
 }
 
 /// Cap on the in-memory prompt history. Old entries get truncated
@@ -738,6 +863,13 @@ impl AppState {
             transcript_area: Cell::new(Rect::default()),
             selection: None,
             request_log: VecDeque::new(),
+            // Defaults match the prevailing UX preference of
+            // "fold the noisy bits, keep the conversation
+            // foreground"; users can flip via config.toml.
+            fold_tool_calls_default: true,
+            fold_thinking_default: true,
+            fold_overrides: HashMap::new(),
+            transcript_cursor: None,
         };
         s.push(
             TranscriptKind::Info,
@@ -953,6 +1085,31 @@ impl AppState {
         // their `scroll_offset` is the anchor row index — leaving
         // it alone is exactly what keeps the visible window stable
         // as new lines append at the end.
+    }
+
+    /// Whether `block` should currently render expanded. Combines
+    /// per-block overrides (`fold_overrides`) with the kind-keyed
+    /// defaults (`fold_*_default`). Plain blocks are always
+    /// expanded — folding them adds no value.
+    pub fn is_block_expanded(&self, block: &TranscriptBlock) -> bool {
+        if let Some(&v) = self.fold_overrides.get(&block.id()) {
+            return v;
+        }
+        match block.kind {
+            BlockKind::Plain => true,
+            BlockKind::ToolCall => !self.fold_tool_calls_default,
+            BlockKind::Thinking => !self.fold_thinking_default,
+        }
+    }
+
+    /// Toggle the fold state of `block`. If no override existed,
+    /// the new value flips the current effective state.
+    pub fn toggle_block_fold(&mut self, block: &TranscriptBlock) {
+        if !block.is_foldable() {
+            return;
+        }
+        let next = !self.is_block_expanded(block);
+        self.fold_overrides.insert(block.id(), next);
     }
 
     /// Reset all per-run streaming counters. Called when the user
@@ -3204,6 +3361,113 @@ mod tests {
         assert!(s.follow_bottom, "default is tail follow");
         s.push(TranscriptKind::Info, "ok".into());
         assert!(s.follow_bottom);
+    }
+
+    fn mk_line(kind: TranscriptKind, text: &str) -> TranscriptLine {
+        TranscriptLine {
+            kind,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn build_blocks_groups_consecutive_thinking_lines() {
+        let lines = vec![
+            mk_line(TranscriptKind::UserPrompt, "hi"),
+            mk_line(TranscriptKind::ThinkingText, "a"),
+            mk_line(TranscriptKind::ThinkingText, "b"),
+            mk_line(TranscriptKind::ThinkingText, "c"),
+            mk_line(TranscriptKind::AssistantText, "ok"),
+        ];
+        let blocks = build_transcript_blocks(&lines);
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].kind, BlockKind::Plain);
+        assert_eq!(blocks[1].kind, BlockKind::Thinking);
+        assert_eq!(blocks[1].first_line, 1);
+        assert_eq!(blocks[1].last_line, 3);
+        assert_eq!(blocks[1].line_count(), 3);
+        assert_eq!(blocks[2].kind, BlockKind::Plain);
+    }
+
+    #[test]
+    fn build_blocks_pairs_tool_call_start_and_end() {
+        let lines = vec![
+            mk_line(TranscriptKind::AssistantText, "I'll read"),
+            mk_line(TranscriptKind::ToolCallStart, "→ read(...)"),
+            mk_line(TranscriptKind::ToolCallEnd, "← read ok"),
+            mk_line(TranscriptKind::AssistantText, "done"),
+        ];
+        let blocks = build_transcript_blocks(&lines);
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[1].kind, BlockKind::ToolCall);
+        assert_eq!(blocks[1].first_line, 1);
+        assert_eq!(blocks[1].last_line, 2);
+    }
+
+    #[test]
+    fn build_blocks_in_flight_tool_call_runs_to_buffer_tail() {
+        // Worker hasn't emitted ToolCallEnd yet — the block
+        // stretches to the last available line so the user sees
+        // the call's pending state as a coherent group.
+        let lines = vec![
+            mk_line(TranscriptKind::ToolCallStart, "→ bash(...)"),
+            mk_line(TranscriptKind::Info, "(running...)"),
+        ];
+        let blocks = build_transcript_blocks(&lines);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, BlockKind::ToolCall);
+        assert_eq!(blocks[0].first_line, 0);
+        assert_eq!(blocks[0].last_line, 1);
+    }
+
+    #[test]
+    fn fold_defaults_collapse_tool_calls_and_thinking() {
+        let s = fresh();
+        let tool_block = TranscriptBlock {
+            first_line: 0,
+            last_line: 1,
+            kind: BlockKind::ToolCall,
+        };
+        let thinking_block = TranscriptBlock {
+            first_line: 5,
+            last_line: 9,
+            kind: BlockKind::Thinking,
+        };
+        let plain_block = TranscriptBlock {
+            first_line: 3,
+            last_line: 3,
+            kind: BlockKind::Plain,
+        };
+        assert!(!s.is_block_expanded(&tool_block));
+        assert!(!s.is_block_expanded(&thinking_block));
+        assert!(s.is_block_expanded(&plain_block));
+    }
+
+    #[test]
+    fn toggle_fold_round_trips() {
+        let mut s = fresh();
+        let block = TranscriptBlock {
+            first_line: 0,
+            last_line: 1,
+            kind: BlockKind::ToolCall,
+        };
+        assert!(!s.is_block_expanded(&block));
+        s.toggle_block_fold(&block);
+        assert!(s.is_block_expanded(&block));
+        s.toggle_block_fold(&block);
+        assert!(!s.is_block_expanded(&block));
+    }
+
+    #[test]
+    fn toggle_is_noop_on_plain_blocks() {
+        let mut s = fresh();
+        let plain = TranscriptBlock {
+            first_line: 0,
+            last_line: 0,
+            kind: BlockKind::Plain,
+        };
+        s.toggle_block_fold(&plain);
+        assert!(s.fold_overrides.is_empty());
     }
 
     #[test]
