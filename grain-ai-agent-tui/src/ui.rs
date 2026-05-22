@@ -65,12 +65,8 @@ pub fn draw(frame: &mut Frame<'_>, state: &AppState) {
     // sliced off; the transcript shrinks to compensate.
     let header_para = build_header_paragraph(state, palette);
     let footer_para = build_footer_paragraph(state, palette);
-    let header_rows = (header_para.line_count(area.width) as u16)
-        .max(1)
-        .min(HEADER_MAX_ROWS);
-    let footer_rows = (footer_para.line_count(area.width) as u16)
-        .max(1)
-        .min(FOOTER_MAX_ROWS);
+    let header_rows = (header_para.line_count(area.width) as u16).clamp(1, HEADER_MAX_ROWS);
+    let footer_rows = (footer_para.line_count(area.width) as u16).clamp(1, FOOTER_MAX_ROWS);
     let input_rows = input_height(state, area.width);
     let constraints: Vec<Constraint> = if palette_rows > 0 {
         vec![
@@ -115,7 +111,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &AppState) {
 /// growing with char-wrapped content, capped at [`INPUT_MAX_ROWS`].
 fn input_height(state: &AppState, area_width: u16) -> u16 {
     let lines = wrap_input_to_lines(&state.input, area_width).len() as u16;
-    lines.max(1).min(INPUT_MAX_ROWS)
+    lines.clamp(1, INPUT_MAX_ROWS)
 }
 
 /// Char-wrap (not word-wrap) `input` to a column budget so the cursor
@@ -1625,7 +1621,7 @@ mod ui_format_tests {
         let rows = wrap_input_to_lines(&long, 20).len() as u16;
         assert!(rows > INPUT_MAX_ROWS);
         // Cap kicks in on the consumer side.
-        assert_eq!(rows.max(1).min(INPUT_MAX_ROWS), INPUT_MAX_ROWS);
+        assert_eq!(rows.clamp(1, INPUT_MAX_ROWS), INPUT_MAX_ROWS);
     }
 
     #[test]
