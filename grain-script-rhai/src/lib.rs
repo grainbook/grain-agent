@@ -88,6 +88,75 @@ pub enum RhaiExtensionError {
 pub struct RhaiExtension {
     pub name: &'static str,
     tools: Vec<Arc<dyn AgentTool>>,
+    handles: Vec<ScriptHandle>,
+}
+
+/// Cloneable handle on one loaded `*.rhai` script. Lets the host
+/// invoke any function defined in the script, not just the ones
+/// registered via the `tools()` manifest — this is what UI handlers
+/// (`OverlayDescriptor`-producing functions) hook into.
+///
+/// Cheap to clone (two `Arc`s + a label).
+#[derive(Clone)]
+pub struct ScriptHandle {
+    /// Display label for the script, usually its path. Useful in
+    /// error messages.
+    pub label: String,
+    engine: Arc<Engine>,
+    ast: Arc<AST>,
+}
+
+impl ScriptHandle {
+    /// Call `fn_name` and return its result as JSON. **Synchronous**
+    /// — wrap in `tokio::task::spawn_blocking` from an async context.
+    ///
+    /// Adaptive arity: looks up `fn_name` in the script's function
+    /// table and dispatches with **zero** args if the script declared
+    /// it as `fn foo()`, or with **one** arg (`args` as a JSON map)
+    /// if declared as `fn foo(x)`. This lets plugin authors write
+    /// `fn ui_install_prompt()` for prompts that need no input *and*
+    /// `fn ui_install_submit(args)` for submit handlers that consume
+    /// form data, without a separate convention for each kind.
+    ///
+    /// Returns `Err` for missing functions, arity mismatch (3+
+    /// parameters), or Rhai runtime errors. The boundary uses
+    /// `serde_json::Value` so callers don't depend on `Dynamic`.
+    pub fn call_fn_json(
+        &self,
+        fn_name: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let arity = self
+            .ast
+            .iter_functions()
+            .find(|f| f.name == fn_name)
+            .map(|f| f.params.len())
+            .ok_or_else(|| format!("function `{fn_name}` not defined in {}", self.label))?;
+        let mut scope = Scope::new();
+        let result: Dynamic = match arity {
+            0 => self
+                .engine
+                .call_fn(&mut scope, &self.ast, fn_name, ())
+                .map_err(|e| e.to_string())?,
+            1 => self
+                .engine
+                .call_fn(&mut scope, &self.ast, fn_name, (json_to_dyn(args),))
+                .map_err(|e| e.to_string())?,
+            n => {
+                return Err(format!(
+                    "function `{fn_name}` takes {n} params; UI handlers must take 0 or 1"
+                ));
+            }
+        };
+        Ok(dyn_to_json(result))
+    }
+
+    /// `true` if this script defines `fn_name` at the top level.
+    /// Cheap (consults the AST's function table).
+    pub fn has_fn(&self, fn_name: &str) -> bool {
+        // Rhai's AST exposes `iter_functions()` returning ScriptFnMetadata.
+        self.ast.iter_functions().any(|f| f.name == fn_name)
+    }
 }
 
 impl RhaiExtension {
@@ -160,6 +229,7 @@ impl RhaiExtension {
         }
 
         let mut tools: Vec<Arc<dyn AgentTool>> = Vec::new();
+        let mut handles: Vec<ScriptHandle> = Vec::new();
         for path in &script_files {
             let label = path.display().to_string();
             let ast = engine.compile_file(path.clone()).map_err(|e| {
@@ -169,6 +239,11 @@ impl RhaiExtension {
                 }
             })?;
             let ast = Arc::new(ast);
+            handles.push(ScriptHandle {
+                label: label.clone(),
+                engine: engine.clone(),
+                ast: ast.clone(),
+            });
 
             // Module-level statements run; functions get declared.
             // Some scripts may not have top-level statements at all,
@@ -216,6 +291,7 @@ impl RhaiExtension {
         Ok(RhaiExtension {
             name: "grain-script-rhai",
             tools,
+            handles,
         })
     }
 
@@ -223,6 +299,14 @@ impl RhaiExtension {
     /// into the agent's tool catalog.
     pub fn tools(&self) -> Vec<Arc<dyn AgentTool>> {
         self.tools.clone()
+    }
+
+    /// One [`ScriptHandle`] per loaded `*.rhai` file, in load order
+    /// (alphabetical within each scripts dir). Used by hosts that
+    /// need to call functions outside the `tools()` manifest — UI
+    /// handlers, custom hooks, etc.
+    pub fn script_handles(&self) -> Vec<ScriptHandle> {
+        self.handles.clone()
     }
 }
 
@@ -407,6 +491,63 @@ mod tests {
         let ext =
             RhaiExtension::from_scripts_dir("/tmp/grain-nonexistent-rhai-dir-xyz-12345").unwrap();
         assert!(ext.tools().is_empty());
+        assert!(ext.script_handles().is_empty());
+    }
+
+    #[test]
+    fn script_handle_calls_arbitrary_function_outside_tools_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_script(
+            tmp.path(),
+            "ui",
+            r#"
+                fn tools() { [] }
+
+                fn ui_install_prompt() {
+                    #{
+                        kind: "form",
+                        title: "Install plugin",
+                        fields: [
+                            #{ name: "name", label: "Name", placeholder: "", initial: "" },
+                            #{ name: "src",  label: "Source", placeholder: "", initial: "" }
+                        ],
+                        on_submit: "ui_install_submit"
+                    }
+                }
+            "#,
+        );
+        let ext = RhaiExtension::from_scripts_dir(tmp.path()).unwrap();
+        let handles = ext.script_handles();
+        assert_eq!(handles.len(), 1);
+        assert!(handles[0].has_fn("ui_install_prompt"));
+        assert!(!handles[0].has_fn("nonexistent"));
+        let out = handles[0]
+            .call_fn_json("ui_install_prompt", serde_json::Value::Null)
+            .unwrap();
+        assert_eq!(out["kind"], "form");
+        assert_eq!(out["title"], "Install plugin");
+        assert_eq!(out["on_submit"], "ui_install_submit");
+        assert_eq!(out["fields"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn script_handle_call_fn_json_propagates_rhai_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_script(
+            tmp.path(),
+            "ui2",
+            r#"
+                fn tools() { [] }
+                fn always_panics() { throw "boom"; }
+            "#,
+        );
+        let ext = RhaiExtension::from_scripts_dir(tmp.path()).unwrap();
+        let handles = ext.script_handles();
+        let err = handles[0]
+            .call_fn_json("always_panics", serde_json::Value::Null)
+            .err()
+            .expect("expected error");
+        assert!(err.contains("boom"), "{err}");
     }
 
     #[test]
