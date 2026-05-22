@@ -3063,6 +3063,42 @@ mod tests {
     }
 
     #[test]
+    fn push_does_not_drift_scroll_when_view_is_frozen() {
+        // Regression: `push()` used to reset `scroll_offset = 0`
+        // whenever `focus == Input`, which yanked the user's
+        // viewport to the top of the buffer every time a new
+        // assistant chunk / tool result / info line arrived. The
+        // fix is to leave `scroll_offset` alone — `follow_bottom`
+        // already does the auto-scroll work when needed.
+        let mut s = fresh();
+        s.render_metrics.set(RenderMetrics {
+            total_rows: 100,
+            visible_rows: 20,
+        });
+        s.on_event(TuiEvent::Key(press(KeyCode::PageUp)));
+        let frozen = s.scroll_offset;
+        assert!(!s.follow_bottom);
+        // Now exercise the path that used to corrupt the anchor:
+        // various callers funnel through `push`.
+        s.push(TranscriptKind::Info, "(some chrome line)".into());
+        s.push(TranscriptKind::AssistantText, "fresh chunk".into());
+        s.push(TranscriptKind::ToolCallStart, "(tool: read)".into());
+        assert_eq!(s.scroll_offset, frozen, "frozen view drifted on push");
+        assert!(!s.follow_bottom, "push must not re-engage tail follow");
+    }
+
+    #[test]
+    fn push_while_following_bottom_keeps_follow_bottom_engaged() {
+        // Sister of the prior test: when the user *is* at the tail,
+        // pushing must NOT flip them off tail-follow either. (push
+        // never touches follow_bottom in either direction.)
+        let mut s = fresh();
+        assert!(s.follow_bottom, "default is tail follow");
+        s.push(TranscriptKind::Info, "ok".into());
+        assert!(s.follow_bottom);
+    }
+
+    #[test]
     fn text_delta_appends_to_last_assistant_line() {
         let mut s = fresh();
         use grain_agent_core::{AssistantMessage, StopReason, Usage};
