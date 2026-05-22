@@ -1329,8 +1329,28 @@ impl AppState {
             TuiEvent::SessionResumed { path: _, messages } => {
                 self.transcript.clear();
                 self.reset_streaming_state();
+                // Replace the input-history ring buffer with the
+                // resumed session's user prompts so Up/Down in the
+                // input box walks through the *new* session's past
+                // inputs — not the prior session's, which become
+                // meaningless after the swap.
+                self.history.clear();
+                self.history_cursor = None;
+                self.history_draft.clear();
                 for msg in &messages {
                     self.push_agent_message(msg);
+                    if let AgentMessage::Standard(Message::User(u)) = msg {
+                        let text: String = u
+                            .content
+                            .iter()
+                            .filter_map(|c| match c {
+                                UserContent::Text(t) => Some(t.text.as_str()),
+                                UserContent::Image(_) => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        self.push_history(&text);
+                    }
                 }
                 Vec::new()
             }
@@ -4374,6 +4394,67 @@ mod tests {
         // Streaming state is reset.
         assert!(!s.streaming);
         assert!(s.streaming_started_at.is_none());
+    }
+
+    #[test]
+    fn resume_populates_input_history_from_user_messages() {
+        let mut s = fresh();
+        // Pre-resume history that should be wiped.
+        s.push_history("stale draft 1");
+        s.push_history("stale draft 2");
+
+        let user1 = AgentMessage::user(grain_agent_core::UserMessage {
+            content: vec![UserContent::Text(grain_agent_core::TextContent {
+                text: "first prompt from prior session".into(),
+            })],
+            timestamp: 0,
+        });
+        let assistant1 = AgentMessage::assistant(grain_agent_core::AssistantMessage {
+            content: vec![grain_agent_core::AssistantContent::Text(
+                grain_agent_core::TextContent {
+                    text: "ok".into(),
+                },
+            )],
+            api: "openai".into(),
+            provider: "openai".into(),
+            model: "gpt-4o".into(),
+            usage: Default::default(),
+            stop_reason: grain_agent_core::StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+        });
+        let user2 = AgentMessage::user(grain_agent_core::UserMessage {
+            content: vec![UserContent::Text(grain_agent_core::TextContent {
+                text: "second prompt".into(),
+            })],
+            timestamp: 0,
+        });
+
+        s.on_event(TuiEvent::SessionResumed {
+            path: "/tmp/test.jsonl".into(),
+            messages: vec![user1, assistant1, user2],
+        });
+
+        assert_eq!(
+            s.history,
+            vec![
+                "first prompt from prior session".to_string(),
+                "second prompt".to_string(),
+            ],
+            "history should reflect the resumed session's user prompts only"
+        );
+        assert!(
+            s.history_cursor.is_none(),
+            "history cursor reset so first Up lands on the newest entry"
+        );
+
+        // Up arrow walks the new history.
+        s.input = String::new();
+        s.cursor = 0;
+        s.history_up();
+        assert_eq!(s.input, "second prompt");
+        s.history_up();
+        assert_eq!(s.input, "first prompt from prior session");
     }
 
     #[test]
