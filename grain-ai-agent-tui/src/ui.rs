@@ -718,6 +718,15 @@ fn draw_overlay(
         Overlay::Log { .. } => (96, 30),
         Overlay::SessionResume { .. } => (88, 24),
         Overlay::Plugins { .. } => (78, 22),
+        Overlay::DynamicForm { fields, .. } => {
+            // Grow vertically with field count: 4 chrome rows
+            // (title + pad + footer + hint) plus 2 rows per field
+            // (label + input).
+            let h = 6u16.saturating_add((fields.len() as u16).saturating_mul(2)).min(24);
+            (72, h.max(8))
+        }
+        Overlay::DynamicModal { .. } => (72, 12),
+        Overlay::DynamicConfirm { .. } => (66, 11),
     };
     let popup = centered_rect_fixed(target_w, target_h, area);
     // Clear so the transcript underneath doesn't bleed through; then
@@ -758,8 +767,28 @@ fn draw_overlay(
         }
         Overlay::Plugins {
             plugins,
-            ui_commands: _,
-        } => ("plugins", OverlayBody::Plugins(plugins)),
+            ui_commands,
+        } => {
+            return draw_plugins(frame, inner, plugins, ui_commands, palette);
+        }
+        Overlay::DynamicForm {
+            title,
+            fields,
+            focused,
+            ..
+        } => {
+            return draw_dynamic_form(frame, inner, title, fields, *focused, palette);
+        }
+        Overlay::DynamicModal {
+            title,
+            body,
+            severity,
+        } => {
+            return draw_dynamic_modal(frame, inner, title, body, *severity, palette);
+        }
+        Overlay::DynamicConfirm { title, body, .. } => {
+            return draw_dynamic_confirm(frame, inner, title, body, palette);
+        }
     };
 
     let chunks = Layout::default()
@@ -823,56 +852,6 @@ fn draw_overlay(
                 chunks[2],
             );
         }
-        OverlayBody::Plugins(plugins) => {
-            let lines: Vec<Line> = if plugins.is_empty() {
-                vec![Line::from(Span::styled(
-                    "(loading or no plugins found under .grain/plugins/)",
-                    Style::default().fg(palette.muted),
-                ))]
-            } else {
-                plugins
-                    .iter()
-                    .flat_map(|p| {
-                        // Header row: bullet + name + version + counts chip.
-                        let mut header = vec![Span::styled(
-                            format!("• {}", p.name),
-                            Style::default().fg(palette.fg).add_modifier(Modifier::BOLD),
-                        )];
-                        if !p.version.is_empty() {
-                            header.push(Span::styled(
-                                format!(" v{}", p.version),
-                                Style::default().fg(palette.secondary),
-                            ));
-                        }
-                        header.push(Span::raw("  "));
-                        header.push(Span::styled(
-                            format!(
-                                "[skills: {} · themes: {} · scripts: {}]",
-                                p.skills, p.themes, p.scripts
-                            ),
-                            Style::default().fg(palette.info),
-                        ));
-                        // Detail row: description (muted), indented.
-                        let detail = if p.description.is_empty() {
-                            Line::from(Span::styled(
-                                "    (no description)",
-                                Style::default().fg(palette.muted),
-                            ))
-                        } else {
-                            Line::from(Span::styled(
-                                format!("    {}", p.description),
-                                Style::default().fg(palette.muted),
-                            ))
-                        };
-                        vec![Line::from(header), detail]
-                    })
-                    .collect()
-            };
-            frame.render_widget(
-                Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
-                chunks[2],
-            );
-        }
     }
 
     frame.render_widget(
@@ -887,7 +866,6 @@ fn draw_overlay(
 enum OverlayBody<'a> {
     Text(String),
     Skills(&'a [(String, String, bool)]),
-    Plugins(&'a [grain_ai_agent_headless::PluginInfo]),
 }
 
 fn draw_doctor(
@@ -1161,6 +1139,279 @@ fn draw_session_resume(
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             hint,
+            Style::default().fg(palette.muted),
+        ))),
+        chunks[3],
+    );
+}
+
+/// Draw the `/plugins` overlay. Body lists every discovered plugin
+/// (manifest metadata + content counts); footer mixes `Esc close`
+/// with one chip per plugin-contributed `[[ui_command]]` so the
+/// user can see at a glance what dynamic actions lazy-gagent (or
+/// any other plugin) adds.
+fn draw_plugins(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    plugins: &[grain_ai_agent_headless::PluginInfo],
+    ui_commands: &[grain_ai_agent_headless::BoundUiCommand],
+    palette: &Palette,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // title
+            Constraint::Length(1), // pad
+            Constraint::Min(1),    // body
+            Constraint::Length(1), // footer
+        ])
+        .split(popup);
+
+    let title_line = Line::from(Span::styled(
+        "plugins",
+        Style::default()
+            .fg(palette.accent)
+            .add_modifier(Modifier::BOLD),
+    ));
+    frame.render_widget(Paragraph::new(title_line), chunks[0]);
+
+    let body_lines: Vec<Line> = if plugins.is_empty() {
+        vec![Line::from(Span::styled(
+            "(loading or no plugins found under .grain/plugins/)",
+            Style::default().fg(palette.muted),
+        ))]
+    } else {
+        plugins
+            .iter()
+            .flat_map(|p| {
+                let mut header = vec![Span::styled(
+                    format!("• {}", p.name),
+                    Style::default().fg(palette.fg).add_modifier(Modifier::BOLD),
+                )];
+                if !p.version.is_empty() {
+                    header.push(Span::styled(
+                        format!(" v{}", p.version),
+                        Style::default().fg(palette.secondary),
+                    ));
+                }
+                header.push(Span::raw("  "));
+                header.push(Span::styled(
+                    format!(
+                        "[skills: {} · themes: {} · scripts: {}]",
+                        p.skills, p.themes, p.scripts
+                    ),
+                    Style::default().fg(palette.info),
+                ));
+                let detail = if p.description.is_empty() {
+                    Line::from(Span::styled(
+                        "    (no description)",
+                        Style::default().fg(palette.muted),
+                    ))
+                } else {
+                    Line::from(Span::styled(
+                        format!("    {}", p.description),
+                        Style::default().fg(palette.muted),
+                    ))
+                };
+                vec![Line::from(header), detail]
+            })
+            .collect()
+    };
+    frame.render_widget(
+        Paragraph::new(Text::from(body_lines)).wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+
+    // Footer: built-in Esc hint plus one chip per contributed
+    // ui_command. Each chip shows the bound key bracket + label,
+    // attributed by plugin name in muted text.
+    let mut footer_spans: Vec<Span> = vec![Span::styled(
+        "Esc close",
+        Style::default().fg(palette.muted),
+    )];
+    for cmd in ui_commands {
+        if cmd.command.target != "plugins" {
+            continue;
+        }
+        footer_spans.push(Span::raw("  "));
+        footer_spans.push(Span::styled(
+            format!("[{}]", cmd.command.key),
+            Style::default().fg(palette.accent).add_modifier(Modifier::BOLD),
+        ));
+        footer_spans.push(Span::raw(" "));
+        footer_spans.push(Span::styled(
+            cmd.command.label.clone(),
+            Style::default().fg(palette.fg),
+        ));
+        footer_spans.push(Span::styled(
+            format!(" ({})", cmd.plugin_name),
+            Style::default().fg(palette.muted),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(footer_spans)), chunks[3]);
+}
+
+/// Draw a plugin-contributed [`crate::app::Overlay::DynamicForm`].
+/// One field per row pair (label above, editable buffer below);
+/// the focused field's buffer gets an underscore cursor suffix and
+/// accent-colored label.
+fn draw_dynamic_form(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    title: &str,
+    fields: &[crate::app::DynamicFormFieldState],
+    focused: usize,
+    palette: &Palette,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // title
+            Constraint::Length(1), // pad
+            Constraint::Min(1),    // body
+            Constraint::Length(1), // hint
+        ])
+        .split(popup);
+
+    let title_line = Line::from(Span::styled(
+        title.to_string(),
+        Style::default()
+            .fg(palette.accent)
+            .add_modifier(Modifier::BOLD),
+    ));
+    frame.render_widget(Paragraph::new(title_line), chunks[0]);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(fields.len() * 2);
+    for (i, f) in fields.iter().enumerate() {
+        let focused = i == focused;
+        let label_style = if focused {
+            Style::default().fg(palette.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.muted)
+        };
+        lines.push(Line::from(Span::styled(f.label.clone(), label_style)));
+        let mut body = if f.value.is_empty() {
+            Span::styled(
+                if f.placeholder.is_empty() {
+                    "  (empty)".to_string()
+                } else {
+                    format!("  {}", f.placeholder)
+                },
+                Style::default().fg(palette.muted),
+            )
+        } else {
+            Span::styled(
+                format!("  {}", f.value),
+                Style::default().fg(palette.fg),
+            )
+        };
+        if focused {
+            body = Span::styled(
+                format!("{}_", body.content),
+                body.style.fg(palette.fg),
+            );
+        }
+        lines.push(Line::from(body));
+    }
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Tab next · Shift-Tab prev · Enter submit · Esc cancel",
+            Style::default().fg(palette.muted),
+        ))),
+        chunks[3],
+    );
+}
+
+/// Draw a plugin-contributed [`crate::app::Overlay::DynamicModal`].
+/// Body is wrap-rendered; severity tints the title accent.
+fn draw_dynamic_modal(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    title: &str,
+    body: &str,
+    severity: grain_ai_agent_headless::ModalSeverity,
+    palette: &Palette,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(popup);
+
+    let accent = match severity {
+        grain_ai_agent_headless::ModalSeverity::Info => palette.accent,
+        grain_ai_agent_headless::ModalSeverity::Success => palette.info,
+        grain_ai_agent_headless::ModalSeverity::Warn => palette.secondary,
+        grain_ai_agent_headless::ModalSeverity::Error => palette.error,
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            title.to_string(),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ))),
+        chunks[0],
+    );
+    frame.render_widget(
+        Paragraph::new(body.to_string())
+            .style(Style::default().fg(palette.fg))
+            .wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Enter / Esc close",
+            Style::default().fg(palette.muted),
+        ))),
+        chunks[3],
+    );
+}
+
+/// Draw a plugin-contributed [`crate::app::Overlay::DynamicConfirm`].
+/// Body is wrap-rendered; footer shows `y / Enter confirm · n / Esc cancel`.
+fn draw_dynamic_confirm(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    title: &str,
+    body: &str,
+    palette: &Palette,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(popup);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        chunks[0],
+    );
+    frame.render_widget(
+        Paragraph::new(body.to_string())
+            .style(Style::default().fg(palette.fg))
+            .wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "y / Enter confirm · n / Esc cancel",
             Style::default().fg(palette.muted),
         ))),
         chunks[3],

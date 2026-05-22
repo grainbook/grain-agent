@@ -62,7 +62,7 @@ pub struct PluginManifest {
     #[serde(default)]
     pub author: String,
     /// Declarative UI extensions. Each entry registers a footer hint
-    /// + key binding on an existing overlay (today: `"plugins"`);
+    /// and key binding on an existing overlay (today: `"plugins"`);
     /// pressing the key dispatches to the named Rhai handler.
     ///
     /// TOML form (note `[[ui_command]]`, singular, to match

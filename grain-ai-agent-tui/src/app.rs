@@ -83,6 +83,45 @@ pub enum Overlay {
         plugins: Vec<grain_ai_agent_headless::PluginInfo>,
         ui_commands: Vec<grain_ai_agent_headless::BoundUiCommand>,
     },
+    /// Dynamic multi-field form pushed by a plugin UI handler's
+    /// `OverlayDescriptor::Form`. The TUI owns input state per
+    /// field; on Enter, the focused-field buffers are bundled into
+    /// a JSON map and dispatched to the named `on_submit` handler.
+    DynamicForm {
+        title: String,
+        fields: Vec<DynamicFormFieldState>,
+        on_submit: String,
+        focused: usize,
+    },
+    /// Dynamic message box pushed by a plugin UI handler's
+    /// `OverlayDescriptor::Modal`. Dismissed with Esc / Enter.
+    DynamicModal {
+        title: String,
+        body: String,
+        severity: grain_ai_agent_headless::ModalSeverity,
+    },
+    /// Dynamic yes/no prompt pushed by a plugin UI handler's
+    /// `OverlayDescriptor::Confirm`. Yes dispatches `on_yes` with
+    /// `yes_args`; No dismisses.
+    DynamicConfirm {
+        title: String,
+        body: String,
+        on_yes: String,
+        yes_args: serde_json::Value,
+    },
+}
+
+/// Per-field editor state inside [`Overlay::DynamicForm`]. The TUI
+/// holds the live buffer; the field's declarative shape (label,
+/// placeholder, initial) came from the plugin descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicFormFieldState {
+    pub name: String,
+    pub label: String,
+    pub placeholder: String,
+    /// Editable buffer. Initialized from
+    /// [`grain_ai_agent_headless::FormField::initial`].
+    pub value: String,
 }
 
 /// One row in the transcript. Kept as plain strings so the renderer can
@@ -1027,11 +1066,48 @@ impl AppState {
                 }
                 Vec::new()
             }
-            TuiEvent::UiOverlay(_descriptor) => {
-                // Slice 4 renders Form / Modal / Confirm overlays.
-                // For now drop the descriptor — slice 3 only proves
-                // the dispatch path: worker successfully called the
-                // handler and converted the result.
+            TuiEvent::UiOverlay(descriptor) => {
+                use grain_ai_agent_headless::OverlayDescriptor as D;
+                self.overlay = Some(match descriptor {
+                    D::Form {
+                        title,
+                        fields,
+                        on_submit,
+                    } => Overlay::DynamicForm {
+                        title,
+                        fields: fields
+                            .into_iter()
+                            .map(|f| DynamicFormFieldState {
+                                name: f.name,
+                                label: f.label,
+                                placeholder: f.placeholder,
+                                value: f.initial,
+                            })
+                            .collect(),
+                        on_submit,
+                        focused: 0,
+                    },
+                    D::Modal {
+                        title,
+                        body,
+                        severity,
+                    } => Overlay::DynamicModal {
+                        title,
+                        body,
+                        severity,
+                    },
+                    D::Confirm {
+                        title,
+                        body,
+                        on_yes,
+                        yes_args,
+                    } => Overlay::DynamicConfirm {
+                        title,
+                        body,
+                        on_yes,
+                        yes_args,
+                    },
+                });
                 Vec::new()
             }
             TuiEvent::UiHandlerError(msg) => {
@@ -1188,6 +1264,18 @@ impl AppState {
         }
         if matches!(self.overlay, Some(Overlay::SessionResume { .. })) {
             return self.on_key_session_resume(key);
+        }
+        if matches!(self.overlay, Some(Overlay::Plugins { .. })) {
+            return self.on_key_plugins(key);
+        }
+        if matches!(self.overlay, Some(Overlay::DynamicForm { .. })) {
+            return self.on_key_dynamic_form(key);
+        }
+        if matches!(
+            self.overlay,
+            Some(Overlay::DynamicModal { .. } | Overlay::DynamicConfirm { .. })
+        ) {
+            return self.on_key_dynamic_modal_or_confirm(key);
         }
         match key.code {
             KeyCode::F(1) => {
@@ -1557,6 +1645,122 @@ impl AppState {
             _ => {}
         }
         Vec::new()
+    }
+
+    /// Key handler for the `/plugins` overlay. Plugin-contributed
+    /// `[[ui_command]]` entries register single-character keys that
+    /// dispatch to a Rhai handler; everything else is a no-op (Esc
+    /// is owned by the outer dispatcher).
+    fn on_key_plugins(&mut self, key: KeyEvent) -> Vec<Command> {
+        let Some(Overlay::Plugins { ui_commands, .. }) = &self.overlay else {
+            return Vec::new();
+        };
+        let KeyCode::Char(c) = key.code else {
+            return Vec::new();
+        };
+        let typed = c.to_string();
+        // Only the "plugins" target is honored today. Future
+        // overlays will read the same `target` field with their own
+        // string.
+        for cmd in ui_commands {
+            if cmd.command.target == "plugins" && cmd.command.key == typed {
+                return vec![Command::InvokePluginUi {
+                    handler: cmd.command.handler.clone(),
+                    args: serde_json::Value::Null,
+                }];
+            }
+        }
+        Vec::new()
+    }
+
+    /// Key handler for [`Overlay::DynamicForm`]. Tab / Down cycles
+    /// field focus; Shift-Tab / Up cycles backward; printable chars
+    /// extend the focused buffer; Backspace shortens it; Enter
+    /// bundles every field into a JSON object and dispatches
+    /// `on_submit`.
+    fn on_key_dynamic_form(&mut self, key: KeyEvent) -> Vec<Command> {
+        let Some(Overlay::DynamicForm {
+            fields,
+            on_submit,
+            focused,
+            ..
+        }) = &mut self.overlay
+        else {
+            return Vec::new();
+        };
+        match key.code {
+            KeyCode::Tab | KeyCode::Down => {
+                if !fields.is_empty() {
+                    *focused = (*focused + 1) % fields.len();
+                }
+                Vec::new()
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                if !fields.is_empty() {
+                    *focused = (*focused + fields.len() - 1) % fields.len();
+                }
+                Vec::new()
+            }
+            KeyCode::Enter => {
+                let handler = on_submit.clone();
+                let mut obj = serde_json::Map::new();
+                for f in fields.iter() {
+                    obj.insert(
+                        f.name.clone(),
+                        serde_json::Value::String(f.value.clone()),
+                    );
+                }
+                self.overlay = None;
+                vec![Command::InvokePluginUi {
+                    handler,
+                    args: serde_json::Value::Object(obj),
+                }]
+            }
+            KeyCode::Backspace => {
+                if let Some(field) = fields.get_mut(*focused) {
+                    field.value.pop();
+                }
+                Vec::new()
+            }
+            KeyCode::Char(c) => {
+                if let Some(field) = fields.get_mut(*focused) {
+                    field.value.push(c);
+                }
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Key handler shared by [`Overlay::DynamicModal`] and
+    /// [`Overlay::DynamicConfirm`]. Modal: Enter dismisses.
+    /// Confirm: `y` / Enter dispatches `on_yes` with `yes_args`;
+    /// `n` dismisses. Esc is owned by the outer dispatcher.
+    fn on_key_dynamic_modal_or_confirm(&mut self, key: KeyEvent) -> Vec<Command> {
+        match self.overlay.as_ref() {
+            Some(Overlay::DynamicModal { .. }) => {
+                if matches!(key.code, KeyCode::Enter) {
+                    self.overlay = None;
+                }
+                Vec::new()
+            }
+            Some(Overlay::DynamicConfirm {
+                on_yes, yes_args, ..
+            }) => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    let handler = on_yes.clone();
+                    let args = yes_args.clone();
+                    self.overlay = None;
+                    vec![Command::InvokePluginUi { handler, args }]
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.overlay = None;
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
     }
 
     /// Key handler for the `/log` overlay. PgUp/PgDn page through the
