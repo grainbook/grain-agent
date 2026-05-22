@@ -637,12 +637,17 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         }
         (raw as f64 * 1.3).ceil() as u64
     };
-    eprintln!(
-        "[info] context guard: system+tools overhead ≈ {system_overhead_tokens} tokens \
+    let overhead_banner = format!(
+        "context guard: system+tools overhead ≈ {system_overhead_tokens} tokens \
          ({} tools, system_prompt {} bytes)",
         tools.len(),
         system_prompt.len(),
     );
+    eprintln!("[info] {overhead_banner}");
+    // Deferred — `evt_tx` is constructed a few lines below. Replay
+    // here so it shows up in the TUI transcript instead of being
+    // hidden behind the alt screen.
+    let overhead_banner_for_replay = overhead_banner;
     let guard = ContextGuard::with_active_model_handle(
         registry.clone(),
         active_model_handle.clone(),
@@ -665,6 +670,10 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     for msg in deferred_warnings.drain(..) {
         let _ = evt_tx.send(TuiEvent::AgentWorkerError(msg));
     }
+    // Surface the context-guard overhead pre-charge so the user can
+    // see what budget the guard is actually working against without
+    // having to hunt for stderr behind the alt screen.
+    let _ = evt_tx.send(TuiEvent::Info(format!("({overhead_banner_for_replay})")));
 
     // --- Hooks: storm suppressor + optional escalation ---------------------
     let before_tool_call: Option<BeforeToolCallFn> = Some(grain_agent_harness::storm_hook(
