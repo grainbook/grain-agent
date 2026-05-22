@@ -25,6 +25,7 @@ grain-ai-agent-headless = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 grain-script-boa = { workspace = true, optional = true }
+grain-script-rhai = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -33,6 +34,13 @@ default = []
 # `<workspace>/.grain/scripts/`. Off by default — Boa adds ~5MB to the
 # compile.
 scripts-boa = ["dep:grain-script-boa"]
+# Enable Rhai scripting through `grain-script-rhai`. Picks up `.rhai`
+# files from the same script directories as `scripts-boa`; both
+# engines can coexist (each filters by extension). With this on, the
+# TUI registers `plugins_install` / `plugins_update` / `plugins_remove`
+# as host native functions so in-plugin Rhai scripts can manage other
+# plugins without round-tripping through TUI slash commands.
+scripts-rhai = ["dep:grain-script-rhai"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
