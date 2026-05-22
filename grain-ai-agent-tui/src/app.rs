@@ -647,6 +647,13 @@ pub struct AppState {
     pub capabilities: Capabilities,
     pub show_thinking: bool,
     pub last_error: Option<String>,
+    /// Ephemeral status line rendered above the input box. Each new
+    /// [`TuiEvent::Status`] replaces the previous value — no append,
+    /// no transcript pollution. Cleared on `AgentEnd` / turn error so
+    /// the slot doesn't linger across turns. Used today by
+    /// `retry-on-overflow` to surface mid-turn retry progress without
+    /// corrupting the alt screen via stderr.
+    pub ephemeral_status: Option<String>,
     /// Available themes (built-ins + user). Index 0 is the default
     /// chosen at startup; the picker walks this list.
     pub themes: Vec<Theme>,
@@ -853,6 +860,7 @@ impl AppState {
             capabilities,
             show_thinking,
             last_error: None,
+            ephemeral_status: None,
             themes,
             current_theme_idx,
             providers,
@@ -1356,6 +1364,13 @@ impl AppState {
             }
             TuiEvent::Info(text) => {
                 self.push(TranscriptKind::Info, text);
+                Vec::new()
+            }
+            TuiEvent::Status(text) => {
+                // Replace, don't append — the slot exists exactly so the
+                // user doesn't see a stack of "attempt 1/8, 2/8, 3/8..."
+                // rows piling up. Empty string clears the slot.
+                self.ephemeral_status = if text.is_empty() { None } else { Some(text) };
                 Vec::new()
             }
             TuiEvent::PluginsListed {
@@ -2793,6 +2808,9 @@ impl AppState {
                 self.streaming = false;
                 self.streaming_started_at = None;
                 self.pending_tool_calls = 0;
+                // The retry-on-overflow status is per-turn — clear it
+                // when the turn ends so it doesn't linger into idle.
+                self.ephemeral_status = None;
             }
         }
     }

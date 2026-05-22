@@ -68,11 +68,17 @@ pub fn draw(frame: &mut Frame<'_>, state: &AppState) {
     let header_rows = (header_para.line_count(area.width) as u16).clamp(1, HEADER_MAX_ROWS);
     let footer_rows = (footer_para.line_count(area.width) as u16).clamp(1, FOOTER_MAX_ROWS);
     let input_rows = input_height(state, area.width);
+    // Ephemeral status slot — 1 row above the input box when set, 0
+    // rows (no slot) when empty. Replace-in-place, never appended to
+    // the transcript: keeps retry-on-overflow progress visible without
+    // stacking N warns per turn.
+    let status_rows: u16 = if state.ephemeral_status.is_some() { 1 } else { 0 };
     let constraints: Vec<Constraint> = if palette_rows > 0 {
         vec![
             Constraint::Length(header_rows),  // header (dynamic)
             Constraint::Min(1),               // transcript (flex)
             Constraint::Length(palette_rows), // slash palette
+            Constraint::Length(status_rows),  // ephemeral status
             Constraint::Length(input_rows),   // input (dynamic)
             Constraint::Length(footer_rows),  // footer (dynamic)
         ]
@@ -80,6 +86,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &AppState) {
         vec![
             Constraint::Length(header_rows),  // header (dynamic)
             Constraint::Min(1),               // transcript (flex)
+            Constraint::Length(status_rows),  // ephemeral status
             Constraint::Length(input_rows),   // input (dynamic)
             Constraint::Length(footer_rows),  // footer (dynamic)
         ]
@@ -94,11 +101,13 @@ pub fn draw(frame: &mut Frame<'_>, state: &AppState) {
     draw_transcript(frame, chunks[1], state, palette);
     if palette_rows > 0 {
         draw_palette(frame, chunks[2], state, palette);
+        draw_status(frame, chunks[3], state, palette);
+        draw_input(frame, chunks[4], state, palette);
+        frame.render_widget(footer_para, chunks[5]);
+    } else {
+        draw_status(frame, chunks[2], state, palette);
         draw_input(frame, chunks[3], state, palette);
         frame.render_widget(footer_para, chunks[4]);
-    } else {
-        draw_input(frame, chunks[2], state, palette);
-        frame.render_widget(footer_para, chunks[3]);
     }
 
     if let Some(overlay) = &state.overlay {
@@ -581,6 +590,25 @@ fn draw_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &P
 
     frame.render_widget(
         Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+/// Render the single-row ephemeral status slot above the input box.
+/// When `state.ephemeral_status` is `None`, `area` is given `0` rows
+/// (no slot allocated) — see the constraint setup in [`draw`].
+fn draw_status(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &Palette) {
+    let Some(text) = state.ephemeral_status.as_ref() else {
+        return;
+    };
+    if area.height == 0 {
+        return;
+    }
+    let style = Style::default()
+        .fg(palette.warning)
+        .add_modifier(Modifier::DIM);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(text.clone(), style))),
         area,
     );
 }

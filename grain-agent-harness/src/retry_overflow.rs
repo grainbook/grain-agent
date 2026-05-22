@@ -29,6 +29,13 @@ use grain_agent_core::{
 /// indicates a context-window overflow.
 pub type OverflowDetector = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// Notification callback invoked each time the wrapper trims + retries.
+/// Args: `attempt` (1-based current retry), `max_retries`, `dropped`
+/// (messages dropped this round). Use it to render a transient UI
+/// status line instead of writing to stderr (which corrupts a TUI's
+/// alt screen).
+pub type RetryNotify = Arc<dyn Fn(usize, usize, usize) + Send + Sync>;
+
 /// Configuration for [`RetryOnOverflowStream`].
 #[derive(Clone)]
 pub struct RetryOnOverflowConfig {
@@ -42,6 +49,11 @@ pub struct RetryOnOverflowConfig {
     /// Optional override for the pattern matcher that decides "this error
     /// is an overflow". Default: a small set of known provider patterns.
     pub is_overflow: Option<OverflowDetector>,
+    /// Optional notifier fired on each retry. When set the wrapper
+    /// suppresses its built-in `eprintln!` so callers (typically the
+    /// TUI) can render their own ephemeral status without seeing
+    /// double output corrupt the alt screen.
+    pub on_retry: Option<RetryNotify>,
 }
 
 impl std::fmt::Debug for RetryOnOverflowConfig {
@@ -50,6 +62,7 @@ impl std::fmt::Debug for RetryOnOverflowConfig {
             .field("max_retries", &self.max_retries)
             .field("min_messages", &self.min_messages)
             .field("is_overflow", &self.is_overflow.as_ref().map(|_| ".."))
+            .field("on_retry", &self.on_retry.as_ref().map(|_| ".."))
             .finish()
     }
 }
@@ -60,6 +73,7 @@ impl Default for RetryOnOverflowConfig {
             max_retries: 8,
             min_messages: 2,
             is_overflow: None,
+            on_retry: None,
         }
     }
 }
@@ -154,12 +168,21 @@ impl LlmStream for RetryOnOverflowStream {
                 {
                     // Overflow -- drop the oldest safe message and retry.
                     let dropped = drop_oldest_safe(&mut ctx.messages);
-                    eprintln!(
-                        "[warn] retry-on-overflow: dropped {dropped} message(s), \
-                         retrying (attempt {}/{})",
-                        attempt + 1,
-                        self.config.max_retries
-                    );
+                    // Notify the host (typically the TUI) so it can
+                    // render a transient status line. Fall back to
+                    // stderr only when no notifier is wired -- writing
+                    // to stderr concurrently with a ratatui alt-screen
+                    // session garbles the UI.
+                    if let Some(notify) = &self.config.on_retry {
+                        notify(attempt + 1, self.config.max_retries, dropped);
+                    } else {
+                        eprintln!(
+                            "[warn] retry-on-overflow: dropped {dropped} message(s), \
+                             retrying (attempt {}/{})",
+                            attempt + 1,
+                            self.config.max_retries
+                        );
+                    }
                     last_events = events;
                     continue;
                 }

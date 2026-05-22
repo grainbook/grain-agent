@@ -58,7 +58,9 @@ pub use escalation::{
 pub use prefix_pin::{PinnedSystemPrompt, append_only_guard};
 pub use pruning::{PruneConfig, PruneOutcome, prune_tool_outputs};
 pub use repair::{StormConfig, storm_hook};
-pub use retry_overflow::{RetryOnOverflowConfig, RetryOnOverflowStream};
+pub use retry_overflow::{
+    OverflowDetector, RetryNotify, RetryOnOverflowConfig, RetryOnOverflowStream,
+};
 pub use session::{
     InMemorySessionRepo, InMemorySessionStorage, Session, SessionContext, SessionError,
     SessionMetadata, SessionRepo, SessionStorage, SessionTreeEntry, SessionTreeEntryKind,

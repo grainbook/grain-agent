@@ -92,6 +92,12 @@ pub enum TuiEvent {
     /// `TranscriptKind::Info` row. Used for `/resume` swap
     /// confirmations and `/compact` summaries.
     Info(String),
+    /// Worker pushed an ephemeral status line — rendered as a
+    /// **single-row floating slot** above the input box, replacing
+    /// the previous status rather than appending to the transcript.
+    /// Used by `retry-on-overflow` so the user sees retry progress
+    /// without N rows of stderr corrupting the alt screen.
+    Status(String),
     /// Worker scanned `plugins_dir` and returns the discovered
     /// `lazy.gagent` plugin set. Populates the `/plugins` overlay
     /// with both the plugin list and any plugin-contributed footer

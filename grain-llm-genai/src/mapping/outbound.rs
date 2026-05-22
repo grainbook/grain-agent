@@ -48,13 +48,14 @@ pub fn to_chat_request(ctx: &LlmContext) -> ChatRequest {
         chat = chat.with_system(ctx.system_prompt.clone());
     }
 
+    // `corrupt_ids` are silently dropped — this scan runs on every
+    // request and writing to stderr concurrently with a TUI alt
+    // screen corrupts the display. The retry-on-overflow notifier
+    // already surfaces a coarse "retrying" signal to the host; this
+    // finer-grained "we dropped a malformed tool_call" stays in the
+    // implementation log (visible via `RUST_LOG=debug` in headless
+    // mode).
     let corrupt_ids = collect_corrupt_tool_call_ids(&ctx.messages);
-    if !corrupt_ids.is_empty() {
-        eprintln!(
-            "[warn] grain-llm-genai: dropping {} corrupt tool_call(s) from request",
-            corrupt_ids.len()
-        );
-    }
 
     for msg in &ctx.messages {
         let cm = match msg {

@@ -525,11 +525,28 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             .build(),
     );
 
+    // --- Channels (early so the retry-on-overflow notifier can capture
+    // evt_tx in its callback below) ----------------------------------------
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
+    let (evt_tx, evt_rx) = mpsc::unbounded_channel::<TuiEvent>();
+
     // Wrap with reactive retry-on-overflow so provider-side 400s for
     // context-window overshoot are handled by trimming + retrying
     // rather than surfacing as a fatal error to the user.
-    let retry_cfg = grain_agent_harness::RetryOnOverflowConfig::default();
+    //
+    // The `on_retry` callback routes retry progress through
+    // `TuiEvent::Status` — a single replace-in-place slot above the
+    // input box — instead of letting the harness `eprintln!` to a
+    // stderr the ratatui alt screen can't isolate (the old behavior
+    // stacked one warn row per attempt and corrupted the status bar).
+    let mut retry_cfg = grain_agent_harness::RetryOnOverflowConfig::default();
     let max_retries = retry_cfg.max_retries;
+    let evt_tx_for_retry = evt_tx.clone();
+    retry_cfg.on_retry = Some(Arc::new(move |attempt, max, dropped| {
+        let _ = evt_tx_for_retry.send(TuiEvent::Status(format!(
+            "retry-on-overflow: dropped {dropped} msg, attempt {attempt}/{max}"
+        )));
+    }));
     let stream: StreamFn =
         Arc::new(grain_agent_harness::RetryOnOverflowStream::with_config(stream, retry_cfg));
     eprintln!(
@@ -694,9 +711,9 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     .with_system_overhead_tokens(system_overhead_tokens)
     .into_transform_fn();
 
-    // --- Channels ----------------------------------------------------------
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
-    let (evt_tx, evt_rx) = mpsc::unbounded_channel::<TuiEvent>();
+    // (Channels are created earlier so the retry-on-overflow notifier
+    // can capture `evt_tx`; this slot stays as a comment for the
+    // benefit of readers who grep for it.)
 
     // Replay any plugin-spec sync failures into the TUI transcript so
     // the user actually sees them — the equivalent stderr lines emit
