@@ -17,7 +17,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Clear, Paragraph, Wrap},
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{AppState, Focus, Overlay, SLASH_CATALOG, TranscriptKind};
 use crate::theme::{Palette, Theme, ThemeSource};
@@ -27,25 +27,65 @@ use grain_llm_genai::{ProviderKind, ProviderProfile};
 /// around `palette_focused`.
 const PALETTE_MAX_ROWS: u16 = 12;
 
+/// Cap on the input box's vertical growth. Past this we stop adding
+/// rows even if the input keeps wrapping — the transcript needs the
+/// room. Cursor stays parked on the last visible row; users who want
+/// to see more can scroll back over the input contents with arrow
+/// keys (the buffer itself is unbounded).
+const INPUT_MAX_ROWS: u16 = 8;
+
+/// Visual width of the input prompt prefix `"› "`. Two cells (one
+/// glyph + one space).
+const INPUT_PREFIX_COLS: u16 = 2;
+
+/// Cap on header height when its content wraps (long model id +
+/// workspace path can overflow narrow terminals). Past this we stop
+/// growing; the transcript needs the room.
+const HEADER_MAX_ROWS: u16 = 3;
+
+/// Cap on footer height when status + key-bind hint wraps. The footer
+/// can carry a *lot* of content during a turn (spinner + tokens +
+/// cache rate + cost + tool count + session-Σ + hint), so we allow
+/// it to grow more than the header before clamping.
+const FOOTER_MAX_ROWS: u16 = 5;
+
 pub fn draw(frame: &mut Frame<'_>, state: &AppState) {
     let area = frame.area();
     let palette = &state.theme().palette;
 
     let palette_rows = palette_height(state);
+    // Dynamic heights. The ratatui "dynamic layout" recipe says:
+    // give the flex pane `Constraint::Min(1)` and every other chunk
+    // a `Constraint::Length(known_height)`. We build header / footer
+    // paragraphs once, measure them with `Paragraph::line_count(width)`
+    // (gated on the `unstable-rendered-line-info` cargo feature, which
+    // this crate already opts into), cap each, then render them at
+    // their layout chunks below. Net effect: a narrower terminal makes
+    // the long footer status line wrap into 2-3 rows instead of being
+    // sliced off; the transcript shrinks to compensate.
+    let header_para = build_header_paragraph(state, palette);
+    let footer_para = build_footer_paragraph(state, palette);
+    let header_rows = (header_para.line_count(area.width) as u16)
+        .max(1)
+        .min(HEADER_MAX_ROWS);
+    let footer_rows = (footer_para.line_count(area.width) as u16)
+        .max(1)
+        .min(FOOTER_MAX_ROWS);
+    let input_rows = input_height(state, area.width);
     let constraints: Vec<Constraint> = if palette_rows > 0 {
         vec![
-            Constraint::Length(1), // header
-            Constraint::Min(1),    // transcript
-            Constraint::Length(palette_rows),
-            Constraint::Length(1), // input
-            Constraint::Length(1), // footer
+            Constraint::Length(header_rows),  // header (dynamic)
+            Constraint::Min(1),               // transcript (flex)
+            Constraint::Length(palette_rows), // slash palette
+            Constraint::Length(input_rows),   // input (dynamic)
+            Constraint::Length(footer_rows),  // footer (dynamic)
         ]
     } else {
         vec![
-            Constraint::Length(1), // header
-            Constraint::Min(1),    // transcript
-            Constraint::Length(1), // input
-            Constraint::Length(1), // footer
+            Constraint::Length(header_rows),  // header (dynamic)
+            Constraint::Min(1),               // transcript (flex)
+            Constraint::Length(input_rows),   // input (dynamic)
+            Constraint::Length(footer_rows),  // footer (dynamic)
         ]
     };
 
@@ -54,20 +94,89 @@ pub fn draw(frame: &mut Frame<'_>, state: &AppState) {
         .constraints(constraints)
         .split(area);
 
-    draw_header(frame, chunks[0], state, palette);
+    frame.render_widget(header_para, chunks[0]);
     draw_transcript(frame, chunks[1], state, palette);
     if palette_rows > 0 {
         draw_palette(frame, chunks[2], state, palette);
         draw_input(frame, chunks[3], state, palette);
-        draw_footer(frame, chunks[4], state, palette);
+        frame.render_widget(footer_para, chunks[4]);
     } else {
         draw_input(frame, chunks[2], state, palette);
-        draw_footer(frame, chunks[3], state, palette);
+        frame.render_widget(footer_para, chunks[3]);
     }
 
     if let Some(overlay) = &state.overlay {
         draw_overlay(frame, area, overlay, state, palette);
     }
+}
+
+/// Compute the input box's vertical height in rows for this frame.
+/// One row at minimum (the cursor always needs somewhere to live),
+/// growing with char-wrapped content, capped at [`INPUT_MAX_ROWS`].
+fn input_height(state: &AppState, area_width: u16) -> u16 {
+    let lines = wrap_input_to_lines(&state.input, area_width).len() as u16;
+    lines.max(1).min(INPUT_MAX_ROWS)
+}
+
+/// Char-wrap (not word-wrap) `input` to a column budget so the cursor
+/// math stays predictable. The first row reserves
+/// [`INPUT_PREFIX_COLS`] for the prompt prefix `"› "`; continuation
+/// rows start flush left. Wide glyphs (CJK, emoji) cost two cells per
+/// `UnicodeWidthChar::width`. Newline characters (`\n`) force a hard
+/// break (we may not have multi-line input today, but keep the
+/// invariant correct for future paste-into-input flows).
+fn wrap_input_to_lines(input: &str, area_width: u16) -> Vec<String> {
+    let width = area_width.max(INPUT_PREFIX_COLS + 1);
+    let mut lines: Vec<String> = vec![String::new()];
+    let mut col: u16 = INPUT_PREFIX_COLS;
+    for ch in input.chars() {
+        if ch == '\n' {
+            lines.push(String::new());
+            col = 0;
+            continue;
+        }
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+        if col + w > width {
+            lines.push(String::new());
+            col = 0;
+        }
+        lines.last_mut().unwrap().push(ch);
+        col += w;
+    }
+    lines
+}
+
+/// Map a byte cursor inside `state.input` to a wrapped `(row, col)`
+/// position relative to the input area's top-left corner. `col`
+/// includes the prefix offset on row 0. Returns `(0, INPUT_PREFIX_COLS)`
+/// for an empty input. Caller is responsible for clamping when the
+/// total row count exceeds [`INPUT_MAX_ROWS`] (the cursor pins to the
+/// last visible row in that case).
+fn input_cursor_offset(input: &str, byte_cursor: usize, area_width: u16) -> (u16, u16) {
+    let width = area_width.max(INPUT_PREFIX_COLS + 1);
+    let mut row: u16 = 0;
+    let mut col: u16 = INPUT_PREFIX_COLS;
+    let cursor = byte_cursor.min(input.len());
+    let mut bytes_consumed = 0usize;
+    for ch in input.chars() {
+        if bytes_consumed >= cursor {
+            break;
+        }
+        if ch == '\n' {
+            row = row.saturating_add(1);
+            col = 0;
+            bytes_consumed += ch.len_utf8();
+            continue;
+        }
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+        if col + w > width {
+            row = row.saturating_add(1);
+            col = 0;
+        }
+        col += w;
+        bytes_consumed += ch.len_utf8();
+    }
+    (row, col)
 }
 
 /// Number of vertical cells reserved for the palette this frame.
@@ -85,7 +194,11 @@ fn palette_height(state: &AppState) -> u16 {
     }
 }
 
-fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &Palette) {
+/// Construct the header paragraph. Wraps on `Wrap { trim: false }` so
+/// `Paragraph::line_count(width)` returns the right height for the
+/// dynamic layout in [`draw`]; under wide terminals the result is
+/// always 1 row.
+fn build_header_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragraph<'a> {
     let mut caps = Vec::new();
     if state.capabilities.allow_write {
         caps.push("write");
@@ -123,7 +236,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &Pa
             Style::default().fg(palette.secondary),
         ),
     ]);
-    frame.render_widget(Paragraph::new(line), area);
+    Paragraph::new(line).wrap(Wrap { trim: false })
 }
 
 fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &Palette) {
@@ -359,29 +472,48 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &Pal
     } else {
         Style::default().fg(palette.muted)
     };
-    let line = Line::from(vec![
-        Span::styled("› ", prefix_style),
-        Span::styled(state.input.as_str(), text_style),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    // Char-wrap so the cursor math stays in sync with what we render:
+    // the helper returns one `String` per visual row, with the prefix
+    // already accounted for on row 0.
+    let wrapped = wrap_input_to_lines(&state.input, area.width);
+    let mut lines: Vec<Line<'_>> = Vec::with_capacity(wrapped.len());
+    for (i, segment) in wrapped.iter().enumerate() {
+        if i == 0 {
+            lines.push(Line::from(vec![
+                Span::styled("› ", prefix_style),
+                Span::styled(segment.clone(), text_style),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(segment.clone(), text_style)));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), area);
 
     if state.focus == Focus::Input && state.overlay.is_none() {
-        // "› " is 2 cells wide (one glyph + space). After it we need
-        // the *visual* width of the input up to the byte-cursor, not
-        // the char count — CJK / emoji glyphs occupy 2 cells each and
-        // a naive `.chars().count()` parked the cursor inside the last
-        // wide glyph after typing it.
-        let prefix = &state.input[..state.cursor.min(state.input.len())];
-        let col_offset = 2 + UnicodeWidthStr::width(prefix) as u16;
-        let cx = area
-            .x
-            .saturating_add(col_offset)
-            .min(area.x + area.width.saturating_sub(1));
-        frame.set_cursor_position((cx, area.y));
+        // Cursor position depends on which wrapped row the byte cursor
+        // lands on. `input_cursor_offset` returns `(row, col)` in the
+        // input area's local coordinate space; we clamp the row to
+        // [`INPUT_MAX_ROWS`] - 1 so the cursor pins to the bottom when
+        // input has grown past the visible budget (rare — input rows
+        // are dynamic, so the cap kicks in only when transcript would
+        // be squeezed below 1 row).
+        let (row, col) = input_cursor_offset(&state.input, state.cursor, area.width);
+        let max_row = area.height.saturating_sub(1);
+        let cursor_row = row.min(max_row);
+        let cursor_col = col.min(area.width.saturating_sub(1));
+        frame.set_cursor_position((
+            area.x.saturating_add(cursor_col),
+            area.y.saturating_add(cursor_row),
+        ));
     }
 }
 
-fn draw_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &Palette) {
+/// Construct the footer paragraph. Wraps with `Wrap { trim: false }`
+/// so long status (spinner + tokens + cost + tool count + Σ + hint)
+/// gracefully grows downward on narrow terminals instead of clipping
+/// off-screen. Dynamic height is computed in [`draw`] via
+/// `Paragraph::line_count(width)`.
+fn build_footer_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragraph<'a> {
     let mut spans = Vec::new();
     if state.streaming {
         // Build a Claude-Code-style spinner: rotating verb + elapsed
@@ -470,7 +602,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &Pa
         "↑↓ history · Tab complete · PgUp/PgDn scroll · End tail · F1 help · F5 thinking · / cmds · Ctrl-C abort · Esc clear/quit",
         Style::default().fg(palette.muted),
     ));
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false })
 }
 
 /// Pick a "thinking" word that rotates every 5 seconds. Variety
@@ -1362,5 +1494,96 @@ mod ui_format_tests {
         assert_eq!(cost_color(0.199, p), p.warning);
         assert_eq!(cost_color(0.20, p), p.error);
         assert_eq!(cost_color(99.0, p), p.error);
+    }
+
+    #[test]
+    fn wrap_input_returns_one_line_for_empty_input() {
+        let lines = wrap_input_to_lines("", 80);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "");
+    }
+
+    #[test]
+    fn wrap_input_keeps_short_input_on_one_line() {
+        let lines = wrap_input_to_lines("hello", 80);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "hello");
+    }
+
+    #[test]
+    fn wrap_input_splits_at_width_boundary_accounting_for_prefix() {
+        // Width 10, prefix occupies first 2 cells → row 0 fits 8 chars,
+        // continuation rows fit 10 chars each.
+        let lines = wrap_input_to_lines("abcdefghijklmnopqrstuvwxyz", 10);
+        assert_eq!(lines[0], "abcdefgh"); // 8 chars after prefix
+        assert_eq!(lines[1], "ijklmnopqr"); // 10 chars
+        assert_eq!(lines[2], "stuvwxyz"); // remainder
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn wrap_input_treats_newline_as_hard_break() {
+        let lines = wrap_input_to_lines("hi\nthere", 80);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "hi");
+        assert_eq!(lines[1], "there");
+    }
+
+    #[test]
+    fn wrap_input_counts_wide_glyphs_as_two_cells() {
+        // 中 = 2 cells. Width 10, prefix = 2, so row 0 fits 4 wide chars
+        // (using 8 cells).
+        let lines = wrap_input_to_lines("中文中文中", 10);
+        assert_eq!(lines[0], "中文中文"); // 4 wide chars = 8 cells, fits after prefix
+        assert_eq!(lines[1], "中"); // remainder
+    }
+
+    #[test]
+    fn input_cursor_offset_origin_for_empty_input() {
+        let (row, col) = input_cursor_offset("", 0, 80);
+        assert_eq!((row, col), (0, INPUT_PREFIX_COLS));
+    }
+
+    #[test]
+    fn input_cursor_offset_tracks_visual_width_after_wide_glyphs() {
+        // After 2 wide chars, cursor is at prefix (2) + 4 = col 6.
+        let s = "中文";
+        let (row, col) = input_cursor_offset(s, s.len(), 80);
+        assert_eq!((row, col), (0, INPUT_PREFIX_COLS + 4));
+    }
+
+    #[test]
+    fn input_cursor_offset_jumps_to_next_row_on_wrap() {
+        // Width 10, prefix 2 → row 0 ends at col 10 after 8 chars.
+        // Cursor at byte 12 means 8 on row 0 + 4 on row 1.
+        let s = "abcdefghijkl"; // 12 chars
+        let (row, col) = input_cursor_offset(s, s.len(), 10);
+        assert_eq!(row, 1);
+        assert_eq!(col, 4);
+    }
+
+    #[test]
+    fn wrap_input_caps_implicitly_at_max_rows_via_input_height() {
+        // We can't construct a full `AppState` here without going through
+        // the wider crate test seam, but `wrap_input_to_lines` is the
+        // load-bearing helper; verify the cap arithmetic matches what
+        // `input_height` would clamp to.
+        let long = "x".repeat(500);
+        let rows = wrap_input_to_lines(&long, 20).len() as u16;
+        assert!(rows > INPUT_MAX_ROWS);
+        // Cap kicks in on the consumer side.
+        assert_eq!(rows.max(1).min(INPUT_MAX_ROWS), INPUT_MAX_ROWS);
+    }
+
+    #[test]
+    fn wrap_input_minimum_width_does_not_panic() {
+        // Width 0 / 1 / 2 would otherwise divide cleanly to "no room";
+        // helper bumps to PREFIX + 1 internally so wrapping always
+        // makes forward progress (at least one char per row).
+        let lines = wrap_input_to_lines("abcd", 1);
+        assert!(!lines.is_empty());
+        // All characters preserved across the wrapped rows.
+        let joined: String = lines.concat();
+        assert_eq!(joined, "abcd");
     }
 }
