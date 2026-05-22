@@ -1319,6 +1319,7 @@ dependencies = [
 name = "grain-agent-harness"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "async-trait",
  "futures",
  "grain-agent-core",
