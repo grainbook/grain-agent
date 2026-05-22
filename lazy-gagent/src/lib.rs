@@ -1,4 +1,4 @@
-//! `lazy.gagent` Phase A — plugin discovery + manifest parsing.
+//! `lazy.gagent` plugin SDK.
 //!
 //! A **plugin** is a directory under `<workspace>/.grain/plugins/<name>/`
 //! containing a `plugin.toml` manifest. The plugin's contents extend
@@ -12,16 +12,23 @@
 //!   scripts/*.js             # optional — Boa scripts (Phase B integration)
 //! ```
 //!
-//! Phase A is a **façade**: it doesn't introduce new runtime mechanics.
-//! All it does is point the existing `find_skills(...)` and
-//! `load_user_themes(...)` calls at extra directories so users can
-//! organize related skills + themes + future scripts under one named
-//! folder instead of strewing them across `~/.claude/skills/` and
-//! `<workspace>/.grain/themes/`.
+//! # Phase status
 //!
-//! Phase B (TODO) will add: lazy loading, slash-command extension,
-//! keybinding registration, hook injection, and an in-TUI `/plugins`
-//! overlay.
+//! - **Phase A (today)** — façade. [`discover_plugins`] walks
+//!   `<plugins_dir>` and returns a list of [`Plugin`] records; the TUI
+//!   hands each plugin's `skills/` to its existing `find_skills(...)`
+//!   pass and `themes/` to `load_user_themes(...)`. No new runtime
+//!   mechanics — just a unifying convention so related skills + themes
+//!   + scripts can live under one named folder.
+//! - **Phase B (planned)** — Boa scripts integration, in-TUI
+//!   `/plugins` overlay, manifest-declared system-prompt fragments,
+//!   slash-command + keybinding registries, hook injection, and a
+//!   `lazy.gagent` UX for install / update / disable.
+//! - **Phase C (planned)** — remote git sources with a local cache.
+//!
+//! This crate stays pure-data on purpose: no `tokio`, no UI deps. The
+//! TUI (and any future headless harness) decides how to consume the
+//! discovered plugin set.
 
 use std::path::{Path, PathBuf};
 

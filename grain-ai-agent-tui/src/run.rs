@@ -90,8 +90,8 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
     let plugins_dir = args
         .plugins_dir
         .clone()
-        .unwrap_or_else(|| crate::plugins::default_plugins_dir(&args.workspace));
-    let plugin_theme_dirs: Vec<std::path::PathBuf> = crate::plugins::discover_plugins(&plugins_dir)
+        .unwrap_or_else(|| lazy_gagent::default_plugins_dir(&args.workspace));
+    let plugin_theme_dirs: Vec<std::path::PathBuf> = lazy_gagent::discover_plugins(&plugins_dir)
         .into_iter()
         .filter_map(|p| p.themes_dir())
         .collect();

@@ -353,10 +353,10 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     let plugins_dir = cfg
         .plugins_dir
         .clone()
-        .unwrap_or_else(|| crate::plugins::default_plugins_dir(workspace.root()));
-    let discovered_plugins = crate::plugins::discover_plugins(&plugins_dir);
+        .unwrap_or_else(|| lazy_gagent::default_plugins_dir(workspace.root()));
+    let discovered_plugins = lazy_gagent::discover_plugins(&plugins_dir);
     for p in &discovered_plugins {
-        eprintln!("[info] {}", crate::plugins::summarize_plugin(p));
+        eprintln!("[info] {}", lazy_gagent::summarize_plugin(p));
     }
     let mut skills = find_skills(&skills_dir).unwrap_or_default();
     for p in &discovered_plugins {

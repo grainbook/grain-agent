@@ -23,7 +23,6 @@ pub mod cli;
 pub mod config_apply;
 pub mod event;
 pub mod persist;
-pub mod plugins;
 pub mod run;
 pub mod theme;
 pub mod ui;
