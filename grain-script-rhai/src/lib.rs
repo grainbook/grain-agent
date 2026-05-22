@@ -571,6 +571,52 @@ mod tests {
     }
 
     #[test]
+    fn lazy_gagent_install_rhai_loads_with_host_primitives_registered() {
+        // Smoke-test that the shipping `lazy-gagent/scripts/install.rhai`
+        // parses and its `tools()` manifest returns the three expected
+        // entries when the host primitives are registered. Catches drift
+        // between the TUI's host-fn names and the script's calls.
+        let script_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("lazy-gagent")
+            .join("scripts");
+        if !script_dir.is_dir() {
+            // Older checkouts may not have the lazy-gagent scripts/
+            // directory; nothing to smoke-test in that case.
+            return;
+        }
+        let mut engine = RhaiExtension::default_engine();
+        engine.register_fn(
+            "plugins_install",
+            |_a: String, _b: String| -> String { "ok".into() },
+        );
+        engine.register_fn("plugins_update", |_a: String| -> String { "ok".into() });
+        engine.register_fn(
+            "plugins_remove",
+            |_a: String, _b: bool| -> String { "ok".into() },
+        );
+        let ext = RhaiExtension::from_scripts_dirs_with_engine(engine, &[script_dir]).unwrap();
+        let names: Vec<_> = ext
+            .tools()
+            .into_iter()
+            .map(|t| t.definition().name.clone())
+            .collect();
+        assert!(
+            names.contains(&"lazy_install".to_string()),
+            "tools: {names:?}"
+        );
+        assert!(
+            names.contains(&"lazy_update".to_string()),
+            "tools: {names:?}"
+        );
+        assert!(
+            names.contains(&"lazy_remove".to_string()),
+            "tools: {names:?}"
+        );
+    }
+
+    #[test]
     fn from_scripts_dirs_walks_each_dir_in_order() {
         let tmp = tempfile::tempdir().unwrap();
         let a = tmp.path().join("a");
