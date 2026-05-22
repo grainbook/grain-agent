@@ -164,6 +164,7 @@ mod tests {
             description: desc.into(),
             file_path: String::new(),
             disable_model_invocation: false,
+            body: String::new(),
         }
     }
 

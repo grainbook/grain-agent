@@ -31,9 +31,10 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use grain_agent_core::{
-    Agent, AgentError, AgentEvent, AgentMessage, AgentOptions, AgentTool, AssistantMessage,
-    AssistantMessageEvent, GetApiKeyFn, Model, QueueMode, StreamFn, ThinkingLevel,
-    ToolExecutionMode, TransformContextFn,
+    Agent, AfterToolCallFn, AgentError, AgentEvent, AgentMessage, AgentOptions, AgentTool,
+    AssistantMessage, AssistantMessageEvent, BeforeToolCallFn, ConvertToLlmFn, GetApiKeyFn,
+    Model, PrepareNextTurnFn, QueueMode, StreamFn, ThinkingLevel, ToolExecutionMode,
+    TransformContextFn,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -72,6 +73,24 @@ pub struct AgentHarnessOptions {
     pub session_id: Option<String>,
     pub transport: Option<String>,
     pub max_retry_delay_ms: Option<u64>,
+    /// Optional Agent hook: gate a tool call before it executes
+    /// (storm suppression, schema repair, …). Passed through verbatim
+    /// to [`AgentOptions::before_tool_call`].
+    pub before_tool_call: Option<BeforeToolCallFn>,
+    /// Optional Agent hook: rewrite / inspect a tool result after
+    /// execution (error-streak terminator, result-truncation, …).
+    /// Passed through to [`AgentOptions::after_tool_call`].
+    pub after_tool_call: Option<AfterToolCallFn>,
+    /// Optional Agent hook: swap model / thinking level between
+    /// turns (failure-signal escalation, etc.). Passed through to
+    /// [`AgentOptions::prepare_next_turn`].
+    pub prepare_next_turn: Option<PrepareNextTurnFn>,
+    /// Optional Agent hook: override the default projection from
+    /// `AgentMessage[]` → `Message[]`. **Replaces** the harness's
+    /// custom-message routing — callers wanting both behaviors
+    /// should call [`crate::convert_to_llm`] inside their wrapper.
+    /// Most callers want `None` (let the harness do the right thing).
+    pub convert_to_llm: Option<ConvertToLlmFn>,
 }
 
 impl AgentHarnessOptions {
@@ -95,6 +114,10 @@ impl AgentHarnessOptions {
             session_id: None,
             transport: None,
             max_retry_delay_ms: None,
+            before_tool_call: None,
+            after_tool_call: None,
+            prepare_next_turn: None,
+            convert_to_llm: None,
         }
     }
 }
@@ -440,6 +463,10 @@ impl AgentHarness {
             session_id,
             transport,
             max_retry_delay_ms,
+            before_tool_call,
+            after_tool_call,
+            prepare_next_turn,
+            convert_to_llm,
         } = options;
 
         // Seed the agent with the session's current branch context.
@@ -465,12 +492,13 @@ impl AgentHarness {
         agent_opts.thinking_level = thinking_level;
         agent_opts.tools = filtered_tools;
         agent_opts.messages = seeded_messages;
-        // Wrap our sync, harness-aware `convert_to_llm` projection
-        // into the async closure shape `Agent` expects. Same as the
-        // existing default but routes custom messages (branch
-        // summaries, compactions, appendEntry payloads) properly.
-        agent_opts.convert_to_llm = Some(Arc::new(|messages: Vec<AgentMessage>| {
-            Box::pin(async move { convert_to_llm_sync(messages) })
+        // `convert_to_llm`: caller-supplied wins; otherwise install
+        // the harness's custom-message-aware default (routes
+        // branchSummary / compactionSummary / custom payloads).
+        agent_opts.convert_to_llm = Some(convert_to_llm.unwrap_or_else(|| {
+            Arc::new(|messages: Vec<AgentMessage>| {
+                Box::pin(async move { convert_to_llm_sync(messages) })
+            })
         }));
         agent_opts.transform_context = transform_context;
         agent_opts.get_api_key = get_api_key;
@@ -480,6 +508,14 @@ impl AgentHarness {
         agent_opts.transport = transport;
         agent_opts.max_retry_delay_ms = max_retry_delay_ms;
         agent_opts.tool_execution = tool_execution;
+        // Provider-agnostic hooks (Phase 3.0): pass through verbatim
+        // to the underlying Agent. Lets callers wire storm
+        // suppression / error-streak terminator / failure
+        // escalation / debug-log capture without dropping
+        // AgentHarness's other features.
+        agent_opts.before_tool_call = before_tool_call;
+        agent_opts.after_tool_call = after_tool_call;
+        agent_opts.prepare_next_turn = prepare_next_turn;
 
         let agent = Arc::new(Agent::new(agent_opts));
 
@@ -1510,5 +1546,86 @@ mod tests {
         .await;
         // Fresh harness has no active run.
         h.wait_for_idle().await;
+    }
+
+    // ---- Phase 3.0: hook pass-through -----------------------------
+
+    #[tokio::test]
+    async fn prepare_next_turn_hook_is_plumbed_to_underlying_agent() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_for_hook = calls.clone();
+        let hook: grain_agent_core::PrepareNextTurnFn = Arc::new(move |_ctx| {
+            let calls = calls_for_hook.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::Relaxed);
+                None
+            })
+        });
+
+        let mut opts =
+            AgentHarnessOptions::new(empty_session(), dummy_model(), stub_stream_fn());
+        opts.prepare_next_turn = Some(hook);
+        let h = AgentHarness::new(opts).await;
+
+        h.prompt_text("hello").await.unwrap();
+        h.wait_for_idle().await;
+
+        // Stub stream emits one turn (StopReason::Stop, no tool
+        // calls); loop fires prepare_next_turn after that turn before
+        // deciding to stop.
+        assert!(
+            calls.load(Ordering::Relaxed) >= 1,
+            "prepare_next_turn hook should have been invoked at least once"
+        );
+    }
+
+    #[tokio::test]
+    async fn convert_to_llm_default_routes_custom_messages() {
+        // No caller-supplied convert_to_llm → harness installs its
+        // own custom-message-aware default. This is a smoke check
+        // that nothing panics + the agent state seeds normally.
+        let h = AgentHarness::new(AgentHarnessOptions::new(
+            empty_session(),
+            dummy_model(),
+            stub_stream_fn(),
+        ))
+        .await;
+        h.prompt_text("hi").await.unwrap();
+        h.wait_for_idle().await;
+    }
+
+    #[tokio::test]
+    async fn convert_to_llm_user_override_replaces_default() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_for_hook = calls.clone();
+        let user_fn: grain_agent_core::ConvertToLlmFn = Arc::new(
+            move |messages: Vec<AgentMessage>| {
+                let calls = calls_for_hook.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    // Same projection as the default but with a
+                    // side-effect to prove the override wins.
+                    messages
+                        .into_iter()
+                        .filter_map(|m| match m {
+                            AgentMessage::Standard(msg) => Some(msg),
+                            AgentMessage::Custom(_) => None,
+                        })
+                        .collect()
+                })
+            },
+        );
+        let mut opts =
+            AgentHarnessOptions::new(empty_session(), dummy_model(), stub_stream_fn());
+        opts.convert_to_llm = Some(user_fn);
+        let h = AgentHarness::new(opts).await;
+        h.prompt_text("hi").await.unwrap();
+        h.wait_for_idle().await;
+        assert!(
+            calls.load(Ordering::Relaxed) >= 1,
+            "user-supplied convert_to_llm must replace the default"
+        );
     }
 }

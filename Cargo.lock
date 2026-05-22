@@ -1286,6 +1286,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "url",
+ "uuid",
 ]
 
 [[package]]

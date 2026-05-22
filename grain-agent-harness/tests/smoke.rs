@@ -50,12 +50,14 @@ async fn skills_render_into_system_prompt_xml() {
             description: "Runs shell commands".into(),
             file_path: "/skills/bash/SKILL.md".into(),
             disable_model_invocation: false,
+            body: String::new(),
         },
         Skill {
             name: "Hidden".into(),
             description: "Hidden skill".into(),
             file_path: "/skills/hidden/SKILL.md".into(),
             disable_model_invocation: true,
+            body: String::new(),
         },
     ];
     let rendered = format_skills_for_system_prompt(&skills);

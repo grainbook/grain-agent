@@ -283,7 +283,7 @@ fn draw_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &P
     let matches = state.palette_matches();
     if matches.is_empty() {
         let line = Line::from(Span::styled(
-            "  (no commands match)",
+            "  (no matches)",
             Style::default().fg(palette.muted),
         ));
         frame.render_widget(Paragraph::new(line), area);
@@ -588,6 +588,7 @@ fn draw_overlay(
         Overlay::ThemePicker { .. } => (60, 20),
         Overlay::ProviderPicker { .. } => (72, 18),
         Overlay::Log { .. } => (96, 30),
+        Overlay::SessionResume { .. } => (88, 24),
     };
     let popup = centered_rect_fixed(target_w, target_h, area);
     // Clear so the transcript underneath doesn't bleed through; then
@@ -622,6 +623,9 @@ fn draw_overlay(
         }
         Overlay::Log { scroll } => {
             return draw_log(frame, inner, *scroll, state, palette);
+        }
+        Overlay::SessionResume { focused, sessions } => {
+            return draw_session_resume(frame, inner, *focused, sessions, palette);
         }
     };
 
@@ -890,6 +894,113 @@ fn draw_log(
         ))),
         chunks[3],
     );
+}
+
+/// Render the `/resume` picker: title + list of past sessions
+/// (`title · model · mtime`), with the currently focused row reverse-
+/// styled. Hint row at the bottom describes the keys.
+fn draw_session_resume(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    focused: usize,
+    sessions: &[grain_ai_agent_headless::SessionMeta],
+    palette: &Palette,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // title
+            Constraint::Length(1), // pad
+            Constraint::Min(1),    // list
+            Constraint::Length(1), // hint
+        ])
+        .split(popup);
+
+    let title_line = Line::from(vec![
+        Span::styled(
+            "resume session",
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("({} entries)", sessions.len()),
+            Style::default().fg(palette.muted),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(title_line), chunks[0]);
+
+    let body = if sessions.is_empty() {
+        Paragraph::new("(no past sessions found in sessions dir)")
+            .style(Style::default().fg(palette.muted))
+            .wrap(Wrap { trim: false })
+    } else {
+        let lines: Vec<Line> = sessions
+            .iter()
+            .enumerate()
+            .flat_map(|(i, sess)| {
+                let mtime_str = humanize_mtime(sess.modified_at);
+                let model = sess.model.as_deref().unwrap_or("(unknown)");
+                let title = sess.title_or_placeholder();
+                let row = title.to_string();
+                let meta = format!("    {model} · {mtime_str} · {} msgs", sess.message_count);
+                let (row_style, meta_style) = if i == focused {
+                    (
+                        Style::default()
+                            .fg(palette.surface)
+                            .bg(palette.accent)
+                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(palette.surface).bg(palette.accent),
+                    )
+                } else {
+                    (
+                        Style::default().fg(palette.fg),
+                        Style::default().fg(palette.muted),
+                    )
+                };
+                vec![
+                    Line::from(Span::styled(row, row_style)),
+                    Line::from(Span::styled(meta, meta_style)),
+                ]
+            })
+            .collect();
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false })
+    };
+    frame.render_widget(body, chunks[2]);
+
+    let hint = if sessions.is_empty() {
+        "Esc close"
+    } else {
+        "↑↓ navigate · Enter pick · Esc close"
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            hint,
+            Style::default().fg(palette.muted),
+        ))),
+        chunks[3],
+    );
+}
+
+/// Format a SystemTime as a human-friendly relative string ("3m ago",
+/// "2h ago", "5d ago"). Falls back to a raw timestamp if the system
+/// clock is somehow before UNIX epoch.
+fn humanize_mtime(t: std::time::SystemTime) -> String {
+    use std::time::SystemTime;
+    let Ok(elapsed) = SystemTime::now().duration_since(t) else {
+        return "future".to_string();
+    };
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3_600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3_600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
 }
 
 fn draw_provider_picker(

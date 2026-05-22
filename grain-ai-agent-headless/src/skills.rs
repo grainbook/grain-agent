@@ -140,11 +140,14 @@ fn parse_skill(content: &str, skill_md: &Path, dir: &Path) -> Skill {
             .to_string();
     }
 
+    let body = extract_body(content);
+
     Skill {
         name,
         description,
         file_path: skill_md.to_path_buf().to_string_lossy().into_owned(),
         disable_model_invocation,
+        body,
     }
 }
 
@@ -177,6 +180,35 @@ fn unquote(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// Extract the body content after the frontmatter `---` closing fence.
+/// Returns everything after the second `---` (i.e. the skill instructions
+/// that get read by the LLM on demand).
+fn extract_body(content: &str) -> String {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    // Must start with `---` to have frontmatter.
+    let after_open = match content
+        .strip_prefix("---")
+        .and_then(|s| s.strip_prefix('\n').or_else(|| s.strip_prefix("\r\n")))
+    {
+        Some(s) => s,
+        None => return content.to_string(),
+    };
+    // Find the closing `---`.
+    let body_start = match after_open.find("\n---").or_else(|| after_open.find("\r\n---")) {
+        Some(pos) => {
+            // Skip past the `\n---` marker.
+            let rest = &after_open[pos..];
+            rest.strip_prefix("\n---")
+                .or_else(|| rest.strip_prefix("\r\n---"))
+                .unwrap_or(rest)
+        }
+        None => return String::new(),
+    };
+    // Trim leading whitespace / newlines from the body but preserve
+    // trailing content as-is.
+    body_start.trim_start().to_string()
 }
 
 /// Resolve the skills directory: if `override_path` is set, use it as-is

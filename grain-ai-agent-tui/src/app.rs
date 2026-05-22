@@ -65,6 +65,15 @@ pub enum Overlay {
     Log {
         scroll: usize,
     },
+    /// Session-resume picker (Claude-Code-style `/resume`). Shows
+    /// past `<uuidv7>.jsonl` files discovered by the worker. `Enter`
+    /// in Phase 1 prints a `relaunch with --session <path>` hint into
+    /// the transcript; true in-place swap lands in Phase 4 after the
+    /// TUI worker migrates to `AgentHarness::new`.
+    SessionResume {
+        focused: usize,
+        sessions: Vec<grain_ai_agent_headless::SessionMeta>,
+    },
 }
 
 /// One row in the transcript. Kept as plain strings so the renderer can
@@ -101,6 +110,10 @@ pub enum Command {
     /// and calls `Agent::set_model(...)` then replies with
     /// [`TuiEvent::ProviderApplied`].
     ApplyProvider(usize),
+    /// Scan `sessions_dir` for past `<uuidv7>.jsonl` files. Worker
+    /// returns the list via [`TuiEvent::SessionsListed`], which
+    /// populates the `/resume` overlay.
+    ReturnSessions,
     Quit,
 }
 
@@ -189,6 +202,27 @@ pub struct CommandCatalogItem {
     pub description: &'static str,
 }
 
+/// An item shown in the slash palette — either a built-in slash command
+/// or a dynamically loaded skill from `.claude/skills/`.
+#[derive(Debug, Clone)]
+pub struct PaletteItem {
+    /// Display trigger shown on the left (e.g. `/help`, `skill: rust-helper`).
+    pub trigger: String,
+    pub description: String,
+    pub action: PaletteAction,
+}
+
+/// What happens when the user presses Enter on a palette item.
+#[derive(Debug, Clone)]
+pub enum PaletteAction {
+    /// Dispatch as a built-in slash command (snap input → trigger, then
+    /// `dispatch_slash` on submit).
+    DispatchSlash,
+    /// Inject the skill body content into the input so the user can
+    /// review / edit before submitting to the LLM.
+    InjectBody(String),
+}
+
 /// Built-in slash commands shown in the palette dropdown. Order is the
 /// presentation order when the input is just `/`.
 pub const SLASH_CATALOG: &[CommandCatalogItem] = &[
@@ -219,6 +253,10 @@ pub const SLASH_CATALOG: &[CommandCatalogItem] = &[
     CommandCatalogItem {
         trigger: "/log",
         description: "show recent request bodies (needs --debug-log)",
+    },
+    CommandCatalogItem {
+        trigger: "/resume",
+        description: "open the session-resume picker (past transcripts)",
     },
     CommandCatalogItem {
         trigger: "/exit",
@@ -321,6 +359,9 @@ pub struct AppState {
     /// `None` — meaning the CLI `--model` flag governs and the picker
     /// shows no `✓` marker.
     pub current_provider_idx: Option<usize>,
+    /// Skills loaded from `.claude/skills/` at startup. Used in the
+    /// slash palette for prompt injection alongside built-in commands.
+    pub skills: Vec<grain_agent_harness::Skill>,
     /// Highlighted row inside the slash-command palette. Reset to 0
     /// whenever the filter (the input text) changes, so a fresh typed
     /// character always lands on the top match.
@@ -494,6 +535,7 @@ impl AppState {
             current_theme_idx,
             providers,
             current_provider_idx: initial_provider_idx,
+            skills: Vec::new(),
             palette_focused: 0,
             history: Vec::new(),
             history_cursor: None,
@@ -665,16 +707,49 @@ impl AppState {
 
     /// Catalog rows whose trigger starts with the user's input
     /// (case-insensitive). When the user has typed just `/`, every
-    /// row matches.
-    pub fn palette_matches(&self) -> Vec<&'static CommandCatalogItem> {
+    /// row matches. Includes both built-in slash commands and loaded
+    /// skills so the user can inject skill prompts via `/`.
+    pub fn palette_matches(&self) -> Vec<PaletteItem> {
         if !self.input.starts_with('/') {
             return Vec::new();
         }
         let needle = self.input.to_ascii_lowercase();
-        SLASH_CATALOG
+        let mut items: Vec<PaletteItem> = SLASH_CATALOG
             .iter()
             .filter(|item| item.trigger.starts_with(&needle))
-            .collect()
+            .map(|item| PaletteItem {
+                trigger: item.trigger.to_string(),
+                description: item.description.to_string(),
+                action: PaletteAction::DispatchSlash,
+            })
+            .collect();
+
+        // Add skills: when the needle is just `/`, show all skills.
+        // When the needle is e.g. `/ru`, also include skills whose
+        // name or description contains the text after `/`.
+        let skill_filter = needle.strip_prefix('/').unwrap_or(&needle);
+        for skill in &self.skills {
+            if skill.disable_model_invocation {
+                continue;
+            }
+            let show = skill_filter.is_empty()
+                || skill
+                    .name
+                    .to_ascii_lowercase()
+                    .contains(skill_filter)
+                || skill
+                    .description
+                    .to_ascii_lowercase()
+                    .contains(skill_filter);
+            if show {
+                items.push(PaletteItem {
+                    trigger: format!("skill: {}", skill.name),
+                    description: skill.description.clone(),
+                    action: PaletteAction::InjectBody(skill.body.clone()),
+                });
+            }
+        }
+        items
     }
 
     fn push(&mut self, kind: TranscriptKind, text: String) {
@@ -719,6 +794,10 @@ impl AppState {
                 self.overlay = Some(Overlay::Skills(skills));
                 Vec::new()
             }
+            TuiEvent::SkillsLoaded(skills) => {
+                self.skills = skills;
+                Vec::new()
+            }
             TuiEvent::AgentWorkerError(msg) => {
                 self.push(TranscriptKind::Error, msg);
                 Vec::new()
@@ -727,6 +806,19 @@ impl AppState {
                 self.request_log.push_back(body);
                 while self.request_log.len() > MAX_REQUEST_LOG {
                     self.request_log.pop_front();
+                }
+                Vec::new()
+            }
+            TuiEvent::SessionsListed(list) => {
+                // Only swap when the overlay is still open (user may
+                // have hit Esc while the scan was in flight).
+                if let Some(Overlay::SessionResume { sessions, focused }) =
+                    &mut self.overlay
+                {
+                    *sessions = list;
+                    if *focused >= sessions.len() {
+                        *focused = sessions.len().saturating_sub(1);
+                    }
                 }
                 Vec::new()
             }
@@ -878,6 +970,9 @@ impl AppState {
         if matches!(self.overlay, Some(Overlay::Log { .. })) {
             return self.on_key_log(key);
         }
+        if matches!(self.overlay, Some(Overlay::SessionResume { .. })) {
+            return self.on_key_session_resume(key);
+        }
         match key.code {
             KeyCode::F(1) => {
                 self.overlay = Some(Overlay::Help);
@@ -939,8 +1034,12 @@ impl AppState {
                 if self.palette_visible() {
                     let matches = self.palette_matches();
                     if let Some(item) = matches.get(self.palette_focused) {
-                        self.input = item.trigger.to_string();
-                        self.cursor = self.input.len();
+                        // Tab only completes slash-command triggers,
+                        // not skill names.
+                        if matches!(item.action, PaletteAction::DispatchSlash) {
+                            self.input = item.trigger.to_string();
+                            self.cursor = self.input.len();
+                        }
                     }
                 }
                 Vec::new()
@@ -1009,14 +1108,30 @@ impl AppState {
         match key.code {
             KeyCode::Enter => {
                 // If the palette is visible AND has a highlighted
-                // match, snap the input to that command's trigger so
-                // partial typing (`/the`) submits as the full command
-                // (`/theme`).
+                // match, handle it based on the action type.
                 if self.palette_visible() {
                     let matches = self.palette_matches();
                     if let Some(item) = matches.get(self.palette_focused) {
-                        self.input = item.trigger.to_string();
-                        self.cursor = self.input.len();
+                        match &item.action {
+                            PaletteAction::InjectBody(body) => {
+                                // Inject the skill body into the input
+                                // so the user can review / edit before
+                                // submitting to the LLM. Don't send yet.
+                                self.input = body.clone();
+                                self.cursor = self.input.len();
+                                self.palette_focused = 0;
+                                self.history_cursor = None;
+                                self.history_draft.clear();
+                                return Vec::new();
+                            }
+                            PaletteAction::DispatchSlash => {
+                                // Snap the input to the command's trigger
+                                // so partial typing (`/the`) submits as
+                                // the full command (`/theme`).
+                                self.input = item.trigger.to_string();
+                                self.cursor = self.input.len();
+                            }
+                        }
                     }
                 }
                 let line = self.input.trim().to_string();
@@ -1187,6 +1302,48 @@ impl AppState {
         Vec::new()
     }
 
+    /// Key handler for the `/resume` picker overlay. ↑↓ move focus;
+    /// Enter prints the chosen session's path to the transcript and
+    /// closes the overlay (Phase 1 — in-place swap lands later).
+    fn on_key_session_resume(&mut self, key: KeyEvent) -> Vec<Command> {
+        let Some(Overlay::SessionResume { focused, sessions }) = &mut self.overlay else {
+            return Vec::new();
+        };
+        match key.code {
+            KeyCode::Up => {
+                if *focused > 0 {
+                    *focused -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if *focused + 1 < sessions.len() {
+                    *focused += 1;
+                }
+            }
+            KeyCode::Home => {
+                *focused = 0;
+            }
+            KeyCode::End => {
+                *focused = sessions.len().saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                if let Some(sel) = sessions.get(*focused) {
+                    let path = sel.path.display().to_string();
+                    self.push(
+                        TranscriptKind::Info,
+                        format!(
+                            "(to resume: relaunch with `grain-tui --session {path}` \
+                             — in-place /resume coming in Phase 4)"
+                        ),
+                    );
+                }
+                self.overlay = None;
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
     /// Key handler for the `/log` overlay. PgUp/PgDn page through the
     /// joined entries; Home/End jump to ends. Esc is handled by the
     /// outer dispatcher.
@@ -1326,6 +1483,16 @@ impl AppState {
                 let focused = self.current_provider_idx.unwrap_or(0);
                 self.overlay = Some(Overlay::ProviderPicker { focused });
                 Vec::new()
+            }
+            "resume" => {
+                // Open the picker immediately with an empty list;
+                // the worker scans disk and replies via
+                // `TuiEvent::SessionsListed`, which swaps the list in.
+                self.overlay = Some(Overlay::SessionResume {
+                    focused: 0,
+                    sessions: Vec::new(),
+                });
+                vec![Command::ReturnSessions]
             }
             "log" | "logs" => {
                 if self.request_log.is_empty() {
@@ -2317,7 +2484,7 @@ mod tests {
         assert_eq!(
             initial.len(),
             SLASH_CATALOG.len(),
-            "bare slash matches every command"
+            "bare slash matches every command (no skills loaded)"
         );
 
         for c in "the".chars() {
@@ -2326,6 +2493,7 @@ mod tests {
         let narrowed = s.palette_matches();
         assert_eq!(narrowed.len(), 1);
         assert_eq!(narrowed[0].trigger, "/theme");
+        assert!(matches!(narrowed[0].action, PaletteAction::DispatchSlash));
     }
 
     // ---- Selection primitives -----------------------------------
@@ -2614,6 +2782,98 @@ mod tests {
         }
     }
 
+    // ---- /resume overlay ---------------------------------------
+
+    fn fake_session_meta(id: &str, secs_ago: u64) -> grain_ai_agent_headless::SessionMeta {
+        grain_ai_agent_headless::SessionMeta {
+            id: id.into(),
+            path: std::path::PathBuf::from(format!("/tmp/{id}.jsonl")),
+            title: Some(format!("first prompt of {id}")),
+            model: Some("anthropic/claude-sonnet-4-5".into()),
+            message_count: 3,
+            modified_at: std::time::SystemTime::now()
+                - std::time::Duration::from_secs(secs_ago),
+        }
+    }
+
+    #[test]
+    fn slash_resume_opens_overlay_and_emits_return_sessions() {
+        let mut s = fresh();
+        s.input = "/resume".into();
+        s.cursor = s.input.len();
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert_eq!(cmds, vec![Command::ReturnSessions]);
+        assert!(matches!(s.overlay, Some(Overlay::SessionResume { .. })));
+    }
+
+    #[test]
+    fn sessions_listed_event_populates_open_picker() {
+        let mut s = fresh();
+        s.overlay = Some(Overlay::SessionResume {
+            focused: 0,
+            sessions: Vec::new(),
+        });
+        s.on_event(TuiEvent::SessionsListed(vec![
+            fake_session_meta("a", 30),
+            fake_session_meta("b", 60),
+        ]));
+        if let Some(Overlay::SessionResume { sessions, .. }) = &s.overlay {
+            assert_eq!(sessions.len(), 2);
+        } else {
+            panic!("overlay should still be SessionResume");
+        }
+    }
+
+    #[test]
+    fn sessions_listed_event_no_op_when_overlay_closed() {
+        let mut s = fresh();
+        assert!(s.overlay.is_none());
+        s.on_event(TuiEvent::SessionsListed(vec![fake_session_meta("a", 0)]));
+        // Still none — user closed before scan completed.
+        assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn resume_picker_arrows_navigate_within_bounds() {
+        let mut s = fresh();
+        s.overlay = Some(Overlay::SessionResume {
+            focused: 0,
+            sessions: vec![fake_session_meta("a", 0), fake_session_meta("b", 60)],
+        });
+        s.on_event(TuiEvent::Key(press(KeyCode::Down)));
+        if let Some(Overlay::SessionResume { focused, .. }) = s.overlay.clone() {
+            assert_eq!(focused, 1);
+        }
+        // End clamps to last entry.
+        s.on_event(TuiEvent::Key(press(KeyCode::End)));
+        if let Some(Overlay::SessionResume { focused, .. }) = s.overlay {
+            assert_eq!(focused, 1);
+        }
+    }
+
+    #[test]
+    fn resume_picker_enter_pushes_relaunch_hint_and_closes() {
+        let mut s = fresh();
+        s.overlay = Some(Overlay::SessionResume {
+            focused: 0,
+            sessions: vec![fake_session_meta("xyz", 10)],
+        });
+        s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert!(s.overlay.is_none());
+        assert!(
+            s.transcript
+                .iter()
+                .any(|l| l.kind == TranscriptKind::Info
+                    && l.text.contains("--session")
+                    && l.text.contains("xyz.jsonl"))
+        );
+    }
+
+    #[test]
+    fn slash_resume_appears_in_catalog() {
+        assert!(SLASH_CATALOG.iter().any(|c| c.trigger == "/resume"));
+    }
+
     #[test]
     fn slash_log_appears_in_catalog() {
         assert!(SLASH_CATALOG.iter().any(|c| c.trigger == "/log"));
@@ -2871,6 +3131,111 @@ mod tests {
                 .iter()
                 .any(|l| l.kind == TranscriptKind::ThinkingText
                     && l.text.contains("thinking-text"))
+        );
+    }
+
+    // ---- skill palette injection -----------------------------------
+
+    #[test]
+    fn skills_loaded_event_populates_skills_field() {
+        let mut s = fresh();
+        assert!(s.skills.is_empty());
+        let test_skill = grain_agent_harness::Skill {
+            name: "test-skill".into(),
+            description: "A test skill".into(),
+            file_path: "/skills/test/SKILL.md".into(),
+            disable_model_invocation: false,
+            body: "you are a test skill".into(),
+        };
+        s.on_event(TuiEvent::SkillsLoaded(vec![test_skill]));
+        assert_eq!(s.skills.len(), 1);
+        assert_eq!(s.skills[0].name, "test-skill");
+        assert_eq!(s.skills[0].body, "you are a test skill");
+    }
+
+    #[test]
+    fn palette_includes_skills_alongside_commands() {
+        let mut s = fresh();
+        let test_skill = grain_agent_harness::Skill {
+            name: "test-skill".into(),
+            description: "A test skill".into(),
+            file_path: String::new(),
+            disable_model_invocation: false,
+            body: "you are a test skill".into(),
+        };
+        s.skills = vec![test_skill];
+
+        s.on_event(TuiEvent::Key(press(KeyCode::Char('/'))));
+        let matches = s.palette_matches();
+        // Should have both SLASH_CATALOG entries and the skill.
+        assert!(matches.len() > SLASH_CATALOG.len());
+        let skill_item = matches
+            .iter()
+            .find(|m| m.trigger == "skill: test-skill")
+            .expect("skill must appear in palette");
+        assert!(
+            matches!(skill_item.action, PaletteAction::InjectBody(ref b) if b == "you are a test skill")
+        );
+    }
+
+    #[test]
+    fn palette_enter_on_skill_injects_body_and_does_not_dispatch() {
+        let mut s = fresh();
+        let test_skill = grain_agent_harness::Skill {
+            name: "test-skill".into(),
+            description: "A test skill".into(),
+            file_path: String::new(),
+            disable_model_invocation: false,
+            body: "## skill prompt body\n\nDo the thing.".into(),
+        };
+        s.skills = vec![test_skill];
+
+        // Type "/" to open the palette, then press Enter on the first
+        // match (which is the first SLASH_CATALOG item, not the skill).
+        // First move down past the commands to land on the skill.
+        s.on_event(TuiEvent::Key(press(KeyCode::Char('/'))));
+        // Move palette_focused past the commands to the skill.
+        for _ in 0..SLASH_CATALOG.len() {
+            s.on_event(TuiEvent::Key(press(KeyCode::Down)));
+        }
+
+        // Now Enter should inject the body and NOT send anything.
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert!(cmds.is_empty(), "skill injection should not dispatch");
+        assert_eq!(s.input, "## skill prompt body\n\nDo the thing.");
+        assert_eq!(s.cursor, s.input.len());
+        // Palette should be gone because input no longer starts with /.
+        assert!(!s.palette_visible());
+    }
+
+    #[test]
+    fn disabled_skills_do_not_appear_in_palette() {
+        let mut s = fresh();
+        let visible_skill = grain_agent_harness::Skill {
+            name: "visible".into(),
+            description: "visible skill".into(),
+            file_path: String::new(),
+            disable_model_invocation: false,
+            body: "visible body".into(),
+        };
+        let disabled_skill = grain_agent_harness::Skill {
+            name: "hidden".into(),
+            description: "hidden skill".into(),
+            file_path: String::new(),
+            disable_model_invocation: true,
+            body: "hidden body".into(),
+        };
+        s.skills = vec![visible_skill, disabled_skill];
+
+        s.on_event(TuiEvent::Key(press(KeyCode::Char('/'))));
+        let matches = s.palette_matches();
+        assert!(
+            matches.iter().any(|m| m.trigger.contains("visible")),
+            "visible skill should appear"
+        );
+        assert!(
+            !matches.iter().any(|m| m.trigger.contains("hidden")),
+            "disabled skill should not appear"
         );
     }
 }

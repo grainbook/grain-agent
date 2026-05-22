@@ -34,6 +34,9 @@ pub enum TuiEvent {
     /// Worker resolved the skills list. Tuples are
     /// `(name, description, disable_model_invocation)`.
     OverlaySkills(Vec<(String, String, bool)>),
+    /// Worker loaded skills at startup (includes body content for
+    /// slash-palette injection).
+    SkillsLoaded(Vec<grain_agent_harness::Skill>),
     /// Worker hit a fatal-ish error (e.g. agent ended with `error_message`,
     /// or a slash command sub-call failed). Already user-facing.
     AgentWorkerError(String),
@@ -68,4 +71,7 @@ pub enum TuiEvent {
     /// Pushed into [`crate::AppState::request_log`] and viewable via
     /// the `/log` overlay.
     RequestLogged { body: String },
+    /// Worker scanned `sessions_dir` and returns the discovered
+    /// session list (newest first). Fills the `/resume` picker.
+    SessionsListed(Vec<grain_ai_agent_headless::SessionMeta>),
 }

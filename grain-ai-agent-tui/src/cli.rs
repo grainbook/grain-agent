@@ -57,9 +57,17 @@ pub struct Args {
     pub allow_semantic_search: bool,
 
     /// JSONL session file: prior messages are loaded on start; new
-    /// messages are appended as they finalize.
+    /// messages are appended as they finalize. Overrides
+    /// `--sessions-dir` auto-create.
     #[arg(long)]
     pub session: Option<PathBuf>,
+
+    /// Directory holding session JSONL files. When `--session` isn't
+    /// passed, the TUI auto-creates a fresh `<uuidv7>.jsonl` inside
+    /// this directory at startup so every run is recoverable later
+    /// via `/resume`. Defaults to `<workspace>/.grain/sessions/`.
+    #[arg(long)]
+    pub sessions_dir: Option<PathBuf>,
 
     /// Directory scanned for `<name>/SKILL.md` skill files. Defaults to
     /// `<workspace>/.claude/skills`.

@@ -35,6 +35,7 @@ pub mod migrations;
 pub mod prompt;
 pub mod runtime;
 pub mod session;
+pub mod session_discovery;
 pub mod skills;
 pub mod slash;
 pub mod telemetry;
@@ -63,6 +64,9 @@ pub use runtime::{
     coding_web_tools, coding_write_tools,
 };
 pub use session::{SessionError, SessionWriter, load_messages};
+pub use session_discovery::{
+    SessionMeta, TITLE_PREVIEW_MAX, list_sessions, new_session_path, parse_session_meta,
+};
 pub use skills::{DEFAULT_SKILLS_DIR, SkillsError, find_skills, resolve_skills_dir};
 pub use diagnostics::{SourceInfo, render_doctor_report, render_source_info_block, source_info};
 pub use slash::{HELP_TEXT, SlashCommand, parse as parse_slash_command};

@@ -68,6 +68,9 @@ pub struct WorkerConfig {
     /// Capture outbound request bodies (projected `Message[]`) into a
     /// ring buffer for the in-TUI `/log` overlay. Off → no capture.
     pub debug_log: bool,
+    /// Directory for auto-created session files when `session` is
+    /// unset. `None` → `<workspace>/.grain/sessions/`.
+    pub sessions_dir: Option<PathBuf>,
 }
 
 impl From<&Args> for WorkerConfig {
@@ -94,6 +97,7 @@ impl From<&Args> for WorkerConfig {
             escalate_after: a.escalate_after,
             bypass_proxy: a.bypass_proxy,
             debug_log: a.debug_log,
+            sessions_dir: a.sessions_dir.clone(),
         }
     }
 }
@@ -159,7 +163,7 @@ pub struct Worker {
 }
 
 /// Spawn the agent worker. Returns a [`Worker`] bundle on success.
-pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
+pub fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // --- Workspace + registry ---------------------------------------------
     let workspace = Arc::new(
         Workspace::new(&cfg.workspace_root)
@@ -220,6 +224,9 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     };
     let skills_dir = resolve_skills_dir(workspace.root(), cfg.skills_dir.as_deref());
     let skills = find_skills(&skills_dir).unwrap_or_default();
+    // Clone for the UI's slash-palette skill injection — the original
+    // moves into `PinnedSystemPrompt::build` below.
+    let skills_for_ui = skills.clone();
     let pinned = grain_agent_harness::PinnedSystemPrompt::build(base_prompt, &skills);
     eprintln!(
         "[info] system prompt pinned ({} bytes, digest {:016x})",
@@ -228,7 +235,35 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     );
     let system_prompt = pinned.to_string_owned();
 
-    // --- Session restore ---------------------------------------------------
+    // --- Session auto-create + restore -------------------------------------
+    // Resolve the sessions directory once — used for both
+    // auto-create on startup and for `/resume`'s `list_sessions` scan
+    // in the command loop.
+    let sessions_dir = cfg
+        .sessions_dir
+        .clone()
+        .unwrap_or_else(|| workspace.root().join(".grain").join("sessions"));
+    // When `--session` isn't given, mint a fresh `<uuidv7>.jsonl`
+    // inside `sessions_dir` so every run leaves a recoverable
+    // transcript that `/resume` can later find. Failure to create the
+    // dir downgrades to "no session writer" rather than aborting
+    // startup.
+    if cfg.session.is_none() {
+        match std::fs::create_dir_all(&sessions_dir) {
+            Ok(()) => {
+                let path = grain_ai_agent_headless::new_session_path(&sessions_dir);
+                eprintln!("[info] session: {}", path.display());
+                cfg.session = Some(path);
+            }
+            Err(e) => {
+                eprintln!(
+                    "[warn] could not create sessions dir {}: {e} \
+                     (session won't be persisted this run)",
+                    sessions_dir.display()
+                );
+            }
+        }
+    }
     let prior_messages = match &cfg.session {
         Some(path) => load_messages(path).map_err(|e| WorkerInitError::Session {
             path: path.clone(),
@@ -423,6 +458,8 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     let workspace_for_task = workspace.clone();
     let registry_for_task = registry.clone();
     let skills_dir_for_task = skills_dir.clone();
+    let sessions_dir_for_task = sessions_dir.clone();
+    let skills_for_ui = skills_for_ui.clone();
     let evt_tx_for_task = evt_tx.clone();
     let model_cost_for_task = model_cost.clone();
     // Captured by the worker task closure so the Boa worker stays
@@ -493,6 +530,10 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             }
         }
 
+        // Send loaded skills to the UI so the slash-palette can offer
+        // skill prompt injection alongside built-in commands.
+        let _ = evt_tx_for_task.send(TuiEvent::SkillsLoaded(skills_for_ui));
+
         // If we booted with a profile, tell the UI so the status line
         // and `✓` marker land correctly on first frame.
         if let Some(name) = active_profile_name.clone() {
@@ -508,6 +549,7 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             workspace_for_task,
             registry_for_task,
             skills_dir_for_task,
+            sessions_dir_for_task,
             profiles,
             cmd_rx,
             evt_tx_for_task,
@@ -529,6 +571,7 @@ async fn run_command_loop(
     workspace: Arc<Workspace>,
     registry: Arc<Registry>,
     skills_dir: PathBuf,
+    sessions_dir: PathBuf,
     profiles: Vec<ProviderProfile>,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     evt_tx: mpsc::UnboundedSender<TuiEvent>,
@@ -568,6 +611,10 @@ async fn run_command_loop(
                     let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!("skills scan: {e}")));
                 }
             },
+            Command::ReturnSessions => {
+                let list = grain_ai_agent_headless::list_sessions(&sessions_dir);
+                let _ = evt_tx.send(TuiEvent::SessionsListed(list));
+            }
             Command::ApplyProvider(idx) => {
                 let Some(profile) = profiles.get(idx) else {
                     let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(

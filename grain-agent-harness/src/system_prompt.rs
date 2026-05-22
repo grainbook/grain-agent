@@ -14,6 +14,10 @@ pub struct Skill {
     pub file_path: String,
     #[serde(default)]
     pub disable_model_invocation: bool,
+    /// Full body content after the frontmatter `---` fence.
+    /// Used by TUI slash-palette skill injection.
+    #[serde(default)]
+    pub body: String,
 }
 
 /// Format the model-visible portion of a skill list for system-prompt
