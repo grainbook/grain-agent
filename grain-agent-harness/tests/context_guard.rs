@@ -137,9 +137,27 @@ fn estimator_tool_call_counts_name_plus_arguments() {
 
 #[test]
 fn estimator_messages_sums_each_entry() {
-    let est = TokenEstimator::approximate();
+    // Disable per-message framing here so we're testing pure content
+    // accumulation; framing is exercised by its own dedicated tests.
+    let est = TokenEstimator::approximate().with_per_message_overhead(0);
     let msgs = vec![user_text("aaaa"), assistant_text("bbbb"), tool_result("cccc")];
     assert_eq!(est.estimate_messages(&msgs), 3);
+}
+
+#[test]
+fn estimator_messages_charges_per_message_framing_by_default() {
+    let est = TokenEstimator::approximate();
+    // 3 messages × 1 content token + 3 × 16 framing = 51 tokens.
+    let msgs = vec![user_text("aaaa"), assistant_text("bbbb"), tool_result("cccc")];
+    assert_eq!(est.estimate_messages(&msgs), 3 + 3 * 16);
+}
+
+#[test]
+fn estimator_per_message_overhead_is_customizable() {
+    let est = TokenEstimator::approximate().with_per_message_overhead(5);
+    let msgs = vec![user_text("aaaa"), assistant_text("bbbb")];
+    assert_eq!(est.estimate_messages(&msgs), 2 + 2 * 5);
+    assert_eq!(est.per_message_overhead(), 5);
 }
 
 #[test]
@@ -164,10 +182,13 @@ async fn under_budget_passes_through_unchanged() {
 async fn drop_oldest_truncates_from_head() {
     // 4 messages each "aaaaaaaaaaaaaaaaaaaa" (20 chars / 4 = 5 tokens) =
     // 20 tokens total. Budget = 11 tokens → should drop until <= 11 (3
-    // messages = 15 tokens > 11, 2 messages = 10 tokens ≤ 11).
+    // messages = 15 tokens > 11, 2 messages = 10 tokens ≤ 11). Disable
+    // per-message framing here so the math stays anchored to content
+    // alone; framing accounting has its own dedicated tests.
     let registry = registry_with("test/model", 11);
     let transform = ContextGuard::new(registry, "test/model")
         .with_headroom_tokens(0)
+        .with_estimator(TokenEstimator::approximate().with_per_message_overhead(0))
         .with_policy(ContextGuardPolicy::DropOldest)
         .into_transform_fn();
     let msgs = vec![

@@ -61,6 +61,13 @@ pub enum ContextGuardPolicy {
 #[derive(Debug, Clone, Copy)]
 pub struct TokenEstimator {
     bytes_per_token: f64,
+    /// Tokens charged on top of content for each transcript message —
+    /// covers the JSON framing (`{"role":...,"content":[...]}`) and the
+    /// per-message structural tokens BPE tokenizers assess. Without
+    /// this, transcripts with many small messages (612-message
+    /// debugging sessions, e.g.) drift several thousand tokens below
+    /// reality because the framing is invisible to content estimation.
+    per_message_overhead: u64,
 }
 
 impl Default for TokenEstimator {
@@ -72,15 +79,24 @@ impl Default for TokenEstimator {
 impl TokenEstimator {
     /// Standard bytes-per-token approximation (4.0). ASCII content
     /// matches legacy chars/4 estimates; CJK is much closer to truth
-    /// than the old chars-based variant.
+    /// than the old chars-based variant. Defaults to 16 tokens
+    /// per-message overhead — a conservative middle estimate for
+    /// OpenAI/Anthropic-style JSON framing (real values land in the
+    /// 7-30 range depending on message type).
     pub const fn approximate() -> Self {
-        TokenEstimator { bytes_per_token: 4.0 }
+        TokenEstimator {
+            bytes_per_token: 4.0,
+            per_message_overhead: 16,
+        }
     }
 
     /// Customize the ratio. Values ≤ 0 are clamped to 1.0 to avoid divide-by-zero.
     pub fn with_bytes_per_token(n: f64) -> Self {
         let n = if n <= 0.0 { 1.0 } else { n };
-        TokenEstimator { bytes_per_token: n }
+        TokenEstimator {
+            bytes_per_token: n,
+            per_message_overhead: Self::approximate().per_message_overhead,
+        }
     }
 
     /// Backwards-compat alias for [`Self::with_bytes_per_token`]. The
@@ -88,6 +104,20 @@ impl TokenEstimator {
     /// kept to avoid churning external callers.
     pub fn with_chars_per_token(n: f64) -> Self {
         Self::with_bytes_per_token(n)
+    }
+
+    /// Override the per-message JSON-framing overhead. Set to 0 in
+    /// unit tests that care about pure content accounting.
+    pub fn with_per_message_overhead(mut self, n: u64) -> Self {
+        self.per_message_overhead = n;
+        self
+    }
+
+    /// The configured per-message JSON-framing overhead. Used by
+    /// [`apply_policy`] and [`crate::compaction::TokenBudgetPolicy`]
+    /// to charge framing tokens against the budget alongside content.
+    pub fn per_message_overhead(&self) -> u64 {
+        self.per_message_overhead
     }
 
     /// Tokens for a UTF-8 string (byte count divided by ratio).
@@ -98,7 +128,10 @@ impl TokenEstimator {
         (bytes as f64 / self.bytes_per_token).ceil() as u64
     }
 
-    /// Tokens for one [`AgentMessage`]. Images count as a flat 100 tokens.
+    /// Tokens for one [`AgentMessage`] — content only, no framing.
+    /// Framing is added by [`Self::estimate_messages`] / policy code,
+    /// not here, so single-message semantics stay focused on content.
+    /// Images count as a flat 100 tokens.
     pub fn estimate_message(&self, m: &AgentMessage) -> u64 {
         match m {
             AgentMessage::Standard(Message::User(u)) => self.estimate_user_message(u),
@@ -111,9 +144,10 @@ impl TokenEstimator {
         }
     }
 
-    /// Tokens for a whole transcript.
+    /// Tokens for a whole transcript including per-message framing.
     pub fn estimate_messages(&self, ms: &[AgentMessage]) -> u64 {
-        ms.iter().map(|m| self.estimate_message(m)).sum()
+        let content: u64 = ms.iter().map(|m| self.estimate_message(m)).sum();
+        content + self.per_message_overhead * (ms.len() as u64)
     }
 
     fn estimate_user_message(&self, m: &UserMessage) -> u64 {
@@ -330,10 +364,14 @@ fn apply_policy(
 ) -> Vec<AgentMessage> {
     // Per-message token estimates — compute once and reuse instead of
     // re-summing the whole transcript on every iteration of DropOldest
-    // (the old implementation was O(n²)).
+    // (the old implementation was O(n²)). Each entry includes the
+    // estimator's per-message framing charge so DropOldest's running
+    // total stays consistent with `estimator.estimate_messages(...)`
+    // without needing to track framing separately.
+    let framing = estimator.per_message_overhead();
     let per_message: Vec<u64> = messages
         .iter()
-        .map(|m| estimator.estimate_message(m))
+        .map(|m| estimator.estimate_message(m) + framing)
         .collect();
     let total: u64 = per_message.iter().sum();
     if total <= budget {

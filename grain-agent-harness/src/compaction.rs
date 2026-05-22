@@ -218,11 +218,14 @@ impl CompactionPolicy for TokenBudgetPolicy {
         }
 
         // 3. Walk backward from tail accumulating tokens until we've
-        //    kept at least `keep_recent_tokens`.
+        //    kept at least `keep_recent_tokens`. Include per-message
+        //    framing in each entry so the running total matches what
+        //    `estimate_messages` reported in step 2.
         let keep_recent = self.settings.keep_recent_tokens;
+        let framing = self.estimator.per_message_overhead();
         let per_msg: Vec<u64> = messages
             .iter()
-            .map(|m| self.estimator.estimate_message(m))
+            .map(|m| self.estimator.estimate_message(m) + framing)
             .collect();
         let mut tail_tokens: u64 = 0;
         let mut keep_start = messages.len(); // index of first kept message
