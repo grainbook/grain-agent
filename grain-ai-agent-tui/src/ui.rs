@@ -721,6 +721,7 @@ fn draw_overlay(
         Overlay::ProviderPicker { .. } => (72, 18),
         Overlay::Log { .. } => (96, 30),
         Overlay::SessionResume { .. } => (88, 24),
+        Overlay::Plugins(_) => (78, 22),
     };
     let popup = centered_rect_fixed(target_w, target_h, area);
     // Clear so the transcript underneath doesn't bleed through; then
@@ -759,6 +760,7 @@ fn draw_overlay(
         Overlay::SessionResume { focused, sessions } => {
             return draw_session_resume(frame, inner, *focused, sessions, palette);
         }
+        Overlay::Plugins(plugins) => ("plugins", OverlayBody::Plugins(plugins)),
     };
 
     let chunks = Layout::default()
@@ -822,6 +824,56 @@ fn draw_overlay(
                 chunks[2],
             );
         }
+        OverlayBody::Plugins(plugins) => {
+            let lines: Vec<Line> = if plugins.is_empty() {
+                vec![Line::from(Span::styled(
+                    "(loading or no plugins found under .grain/plugins/)",
+                    Style::default().fg(palette.muted),
+                ))]
+            } else {
+                plugins
+                    .iter()
+                    .flat_map(|p| {
+                        // Header row: bullet + name + version + counts chip.
+                        let mut header = vec![Span::styled(
+                            format!("• {}", p.name),
+                            Style::default().fg(palette.fg).add_modifier(Modifier::BOLD),
+                        )];
+                        if !p.version.is_empty() {
+                            header.push(Span::styled(
+                                format!(" v{}", p.version),
+                                Style::default().fg(palette.secondary),
+                            ));
+                        }
+                        header.push(Span::raw("  "));
+                        header.push(Span::styled(
+                            format!(
+                                "[skills: {} · themes: {} · scripts: {}]",
+                                p.skills, p.themes, p.scripts
+                            ),
+                            Style::default().fg(palette.info),
+                        ));
+                        // Detail row: description (muted), indented.
+                        let detail = if p.description.is_empty() {
+                            Line::from(Span::styled(
+                                "    (no description)",
+                                Style::default().fg(palette.muted),
+                            ))
+                        } else {
+                            Line::from(Span::styled(
+                                format!("    {}", p.description),
+                                Style::default().fg(palette.muted),
+                            ))
+                        };
+                        vec![Line::from(header), detail]
+                    })
+                    .collect()
+            };
+            frame.render_widget(
+                Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+                chunks[2],
+            );
+        }
     }
 
     frame.render_widget(
@@ -836,6 +888,7 @@ fn draw_overlay(
 enum OverlayBody<'a> {
     Text(String),
     Skills(&'a [(String, String, bool)]),
+    Plugins(&'a [lazy_gagent::PluginInfo]),
 }
 
 fn draw_doctor(

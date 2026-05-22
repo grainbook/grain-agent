@@ -621,6 +621,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     let registry_for_task = registry.clone();
     let skills_dir_for_task = skills_dir.clone();
     let sessions_dir_for_task = sessions_dir.clone();
+    let plugins_dir_for_task = plugins_dir.clone();
     let evt_tx_for_task = evt_tx.clone();
     let model_cost_for_task = model_cost.clone();
     // Captured by the worker task closure so the Boa worker stays
@@ -666,6 +667,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             registry_for_task,
             skills_dir_for_task,
             sessions_dir_for_task,
+            plugins_dir_for_task,
             profiles,
             cmd_rx,
             evt_tx_for_task,
@@ -691,6 +693,7 @@ async fn run_command_loop(
     registry: Arc<Registry>,
     skills_dir: PathBuf,
     sessions_dir: PathBuf,
+    plugins_dir: PathBuf,
     profiles: Vec<ProviderProfile>,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     evt_tx: mpsc::UnboundedSender<TuiEvent>,
@@ -737,6 +740,14 @@ async fn run_command_loop(
             Command::ReturnSessions => {
                 let list = grain_ai_agent_headless::list_sessions(&sessions_dir);
                 let _ = evt_tx.send(TuiEvent::SessionsListed(list));
+            }
+            Command::ReturnPlugins => {
+                let infos: Vec<lazy_gagent::PluginInfo> =
+                    lazy_gagent::discover_plugins(&plugins_dir)
+                        .iter()
+                        .map(lazy_gagent::plugin_info)
+                        .collect();
+                let _ = evt_tx.send(TuiEvent::PluginsListed(infos));
             }
             Command::ResumeSession(path) => {
                 // Cancel any in-flight turn and wait for the old

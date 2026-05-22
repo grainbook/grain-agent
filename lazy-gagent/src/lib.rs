@@ -160,6 +160,40 @@ pub fn parse_manifest(path: &Path) -> std::io::Result<PluginManifest> {
 /// individual skill / theme files here (that happens when the existing
 /// `find_skills` / `load_user_themes` paths re-walk the same dirs).
 pub fn summarize_plugin(plugin: &Plugin) -> String {
+    let info = plugin_info(plugin);
+    format!(
+        "plugin '{}' (skills: {}, themes: {}, scripts: {})",
+        info.name, info.skills, info.themes, info.scripts
+    )
+}
+
+/// Serializable plugin summary suitable for IPC between the worker
+/// task and the TUI thread (or any future headless lister). Carries
+/// manifest metadata plus a shallow count of each convention
+/// subdirectory's entries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginInfo {
+    pub name: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub author: String,
+    /// Absolute path to the plugin's root directory (where `plugin.toml`
+    /// lives). Useful for the `/plugins` overlay's "open in editor" /
+    /// "reveal in finder" actions in later phases.
+    pub root: PathBuf,
+    pub skills: usize,
+    pub themes: usize,
+    pub scripts: usize,
+}
+
+/// Derive a [`PluginInfo`] snapshot from a [`Plugin`]. Counts come from
+/// a shallow `read_dir` of the convention subdirectories — entries
+/// that fail to validate later (malformed `SKILL.md`, broken theme
+/// TOML) still get counted here.
+pub fn plugin_info(plugin: &Plugin) -> PluginInfo {
     let count_dir = |dir: Option<PathBuf>| -> usize {
         let Some(d) = dir else {
             return 0;
@@ -168,13 +202,16 @@ pub fn summarize_plugin(plugin: &Plugin) -> String {
             .map(|r| r.flatten().count())
             .unwrap_or(0)
     };
-    let s = count_dir(plugin.skills_dir());
-    let t = count_dir(plugin.themes_dir());
-    let c = count_dir(plugin.scripts_dir());
-    format!(
-        "plugin '{}' (skills: {s}, themes: {t}, scripts: {c})",
-        plugin.manifest.name
-    )
+    PluginInfo {
+        name: plugin.manifest.name.clone(),
+        version: plugin.manifest.version.clone(),
+        description: plugin.manifest.description.clone(),
+        author: plugin.manifest.author.clone(),
+        root: plugin.root.clone(),
+        skills: count_dir(plugin.skills_dir()),
+        themes: count_dir(plugin.themes_dir()),
+        scripts: count_dir(plugin.scripts_dir()),
+    }
 }
 
 #[cfg(test)]
@@ -303,5 +340,39 @@ mod tests {
         assert!(summary.contains("skills: 2"), "{summary}");
         assert!(summary.contains("themes: 1"), "{summary}");
         assert!(summary.contains("scripts: 0"), "{summary}");
+    }
+
+    #[test]
+    fn plugin_info_carries_metadata_and_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_root = tmp.path().join("info-test");
+        write_manifest(
+            &plugin_root,
+            "info-test",
+            "version = \"1.2.3\"\ndescription = \"hello\"\nauthor = \"alice\"\n",
+        );
+        std::fs::create_dir_all(plugin_root.join("skills/x")).unwrap();
+        let plugins = discover_plugins(tmp.path());
+        let info = plugin_info(&plugins[0]);
+        assert_eq!(info.name, "info-test");
+        assert_eq!(info.version, "1.2.3");
+        assert_eq!(info.description, "hello");
+        assert_eq!(info.author, "alice");
+        assert_eq!(info.root, plugin_root);
+        assert_eq!(info.skills, 1);
+        assert_eq!(info.themes, 0);
+        assert_eq!(info.scripts, 0);
+    }
+
+    #[test]
+    fn plugin_info_roundtrips_through_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_root = tmp.path().join("serde-test");
+        write_manifest(&plugin_root, "serde-test", "");
+        let plugins = discover_plugins(tmp.path());
+        let info = plugin_info(&plugins[0]);
+        let s = toml::to_string(&info).expect("serialize");
+        let back: PluginInfo = toml::from_str(&s).expect("deserialize");
+        assert_eq!(info, back);
     }
 }

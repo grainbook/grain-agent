@@ -74,6 +74,11 @@ pub enum Overlay {
         focused: usize,
         sessions: Vec<grain_ai_agent_headless::SessionMeta>,
     },
+    /// `lazy.gagent` plugin overlay (`/plugins`). Read-only listing
+    /// of plugins discovered under `<workspace>/.grain/plugins/`.
+    /// Phase B-2: viewing only — install / enable / disable land in
+    /// later phases when there's a plugin registry to mutate.
+    Plugins(Vec<lazy_gagent::PluginInfo>),
 }
 
 /// One row in the transcript. Kept as plain strings so the renderer can
@@ -124,6 +129,10 @@ pub enum Command {
     /// [`TuiEvent::Info`] on success or [`TuiEvent::AgentWorkerError`]
     /// on failure (e.g. empty transcript).
     Compact { keep_recent: usize },
+    /// Re-scan `plugins_dir` and reply via [`TuiEvent::PluginsListed`].
+    /// Cheap (one shallow `read_dir` + N manifest parses); safe to
+    /// call every time the user opens the overlay.
+    ReturnPlugins,
     Quit,
 }
 
@@ -271,6 +280,10 @@ pub const SLASH_CATALOG: &[CommandCatalogItem] = &[
     CommandCatalogItem {
         trigger: "/compact",
         description: "summarize transcript prefix (keeps last 4 turns)",
+    },
+    CommandCatalogItem {
+        trigger: "/plugins",
+        description: "list lazy.gagent plugins discovered under .grain/plugins/",
     },
     CommandCatalogItem {
         trigger: "/exit",
@@ -939,6 +952,14 @@ impl AppState {
             }
             TuiEvent::Info(text) => {
                 self.push(TranscriptKind::Info, text);
+                Vec::new()
+            }
+            TuiEvent::PluginsListed(list) => {
+                // Only swap when the overlay is still open (user may
+                // have hit Esc while the scan was in flight).
+                if let Some(Overlay::Plugins(plugins)) = &mut self.overlay {
+                    *plugins = list;
+                }
                 Vec::new()
             }
             TuiEvent::ScrollUp { amount } => {
@@ -1634,6 +1655,13 @@ impl AppState {
                     "(compacting transcript — keeping last 4 messages)".into(),
                 );
                 vec![Command::Compact { keep_recent: 4 }]
+            }
+            "plugins" => {
+                // Open the overlay immediately with an empty list;
+                // the worker scans disk and replies via
+                // `TuiEvent::PluginsListed`, which swaps the list in.
+                self.overlay = Some(Overlay::Plugins(Vec::new()));
+                vec![Command::ReturnPlugins]
             }
             "exit" | "quit" | "q" => {
                 self.should_quit = true;

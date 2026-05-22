@@ -82,4 +82,7 @@ pub enum TuiEvent {
     /// `TranscriptKind::Info` row. Used for `/resume` swap
     /// confirmations and `/compact` summaries.
     Info(String),
+    /// Worker scanned `plugins_dir` and returns the discovered
+    /// `lazy.gagent` plugin set. Populates the `/plugins` overlay.
+    PluginsListed(Vec<lazy_gagent::PluginInfo>),
 }
