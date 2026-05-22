@@ -1396,6 +1396,7 @@ dependencies = [
 name = "grain-deepseek-pack"
 version = "0.1.0"
 dependencies = [
+ "grain-agent-core",
  "serde_json",
  "tokio",
 ]
