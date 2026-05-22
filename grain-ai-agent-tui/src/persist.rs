@@ -128,6 +128,34 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_preserves_provider_and_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("tui-state.toml");
+        let original = PersistedState {
+            last_provider: Some("openai-work".into()),
+            last_model: Some("openai/gpt-4o".into()),
+            ..PersistedState::default()
+        };
+        original.save(&path).unwrap();
+        let loaded = PersistedState::load(&path);
+        assert_eq!(loaded.last_provider.as_deref(), Some("openai-work"));
+        assert_eq!(loaded.last_model.as_deref(), Some("openai/gpt-4o"));
+    }
+
+    #[test]
+    fn backward_compat_loads_old_file_without_new_fields() {
+        // A file written before last_provider / last_model existed
+        // should parse as default for those fields.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("legacy.toml");
+        std::fs::write(&path, "last_theme = \"dracula\"\n").unwrap();
+        let s = PersistedState::load(&path);
+        assert_eq!(s.last_theme.as_deref(), Some("dracula"));
+        assert!(s.last_provider.is_none());
+        assert!(s.last_model.is_none());
+    }
+
+    #[test]
     fn default_path_matches_workspace_convention() {
         let p = default_path(Path::new("/workspace"));
         assert_eq!(

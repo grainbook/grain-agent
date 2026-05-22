@@ -41,18 +41,40 @@ pub enum TuiError {
 /// Entry point: takes parsed [`Args`], owns the terminal for the
 /// duration of the session, and returns once the user quits.
 pub async fn run_tui(args: Args) -> Result<(), TuiError> {
+    // Load persisted preferences early so they can influence the
+    // initial provider / model selection before spawning the worker.
+    let persist_path = persist::default_path(&args.workspace);
+    let persisted = PersistedState::load(&persist_path);
+
     // Resolve provider profiles before spawning the worker — the worker
     // needs them to register OpenAI-compat endpoints up front and to
     // honor `--provider <name>` at boot.
+    //
+    // Fallback chain for initial provider:
+    //   1. `--provider <name>` CLI flag (explicit user intent)
+    //   2. `persisted.last_provider` (previous session's choice)
+    //   3. None (use `--model` verbatim)
+    let requested_provider = args.provider.as_deref()
+        .or(persisted.last_provider.as_deref());
     let (profiles, initial_profile_idx) = resolve_profiles(
         args.providers_file.as_deref(),
         &args.workspace,
-        args.provider.as_deref(),
+        requested_provider,
     );
 
     let mut cfg = WorkerConfig::from(&args);
     cfg.profiles = profiles.clone();
     cfg.initial_profile_idx = initial_profile_idx;
+
+    // Fallback chain for initial model:
+    //   1. `--model <id>` CLI flag (explicit user intent)
+    //   2. `persisted.last_model` (previous session's choice)
+    //   3. Keep the WorkerConfig default (deepseek/deepseek-chat)
+    if cfg.model == "deepseek/deepseek-chat" {
+        if let Some(ref m) = persisted.last_model {
+            cfg.model = m.clone();
+        }
+    }
 
     let Worker {
         cmd_tx,
@@ -68,12 +90,10 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
         .themes_dir
         .clone()
         .unwrap_or_else(|| args.workspace.join(".grain").join("themes"));
-    // Load persisted preferences (last theme). When the user passed
-    // `--theme` explicitly (i.e. not the literal default `"default"`),
-    // the CLI wins; otherwise we honor the persisted choice so the
-    // theme survives restarts.
-    let persist_path = persist::default_path(&args.workspace);
-    let persisted = PersistedState::load(&persist_path);
+    // Theme fallback chain:
+    //   1. `--theme <name>` CLI flag (explicit user intent)
+    //   2. `persisted.last_theme` (previous session's choice)
+    //   3. "default"
     let requested_theme: String = if args.theme != "default" {
         args.theme.clone()
     } else {
@@ -380,6 +400,24 @@ async fn event_loop(
                 if let Err(e) = persisted.save(&persist_path) {
                     eprintln!("[warn] tui-state save {}: {e}", persist_path.display());
                 }
+            }
+        }
+        // Persist provider / model changes so they survive restarts.
+        // Only write when they actually changed to avoid churning
+        // the file on every unrelated event.
+        let current_provider = state.current_provider_idx
+            .and_then(|i| state.providers.get(i))
+            .map(|p| p.name.clone());
+        if current_provider != persisted.last_provider {
+            persisted.last_provider = current_provider;
+            if let Err(e) = persisted.save(&persist_path) {
+                eprintln!("[warn] tui-state save {}: {e}", persist_path.display());
+            }
+        }
+        if persisted.last_model.as_deref() != Some(&state.model_id) {
+            persisted.last_model = Some(state.model_id.clone());
+            if let Err(e) = persisted.save(&persist_path) {
+                eprintln!("[warn] tui-state save {}: {e}", persist_path.display());
             }
         }
         if state.should_quit {
