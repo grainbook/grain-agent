@@ -12,6 +12,8 @@
 //!   so re-sending it isn't required for correctness. The text is still
 //!   preserved in the grain transcript via [`AssistantContent::Thinking`].
 
+use std::collections::HashSet;
+
 use genai::chat::{
     ChatMessage, ChatOptions, ChatRequest, ContentPart, MessageContent, Tool, ToolCall,
     ToolResponse,
@@ -31,6 +33,14 @@ pub fn baseline_chat_options() -> ChatOptions {
 }
 
 /// Translate an `LlmContext` snapshot into a `ChatRequest`.
+///
+/// History entries whose tool-call arguments arrived as a malformed
+/// string (truncated JSON from a streaming chunk that the inbound
+/// normalizer couldn't unwrap) are dropped before the request goes
+/// out — provider would reject the whole turn with
+/// `tool_calls[].function.arguments must decode to a JSON object,
+/// got str`. The corresponding tool_result entries are dropped
+/// alongside them so we don't leave orphans.
 pub fn to_chat_request(ctx: &LlmContext) -> ChatRequest {
     let mut chat = ChatRequest::new(Vec::with_capacity(ctx.messages.len()));
 
@@ -38,13 +48,24 @@ pub fn to_chat_request(ctx: &LlmContext) -> ChatRequest {
         chat = chat.with_system(ctx.system_prompt.clone());
     }
 
+    let corrupt_ids = collect_corrupt_tool_call_ids(&ctx.messages);
+    if !corrupt_ids.is_empty() {
+        eprintln!(
+            "[warn] grain-llm-genai: dropping {} corrupt tool_call(s) from request",
+            corrupt_ids.len()
+        );
+    }
+
     for msg in &ctx.messages {
         let cm = match msg {
-            Message::User(u) => user_to_chat_message(u),
-            Message::Assistant(a) => assistant_to_chat_message(a),
-            Message::ToolResult(t) => tool_result_to_chat_message(t),
+            Message::User(u) => Some(user_to_chat_message(u)),
+            Message::Assistant(a) => assistant_to_chat_message(a, &corrupt_ids),
+            Message::ToolResult(t) if corrupt_ids.contains(&t.tool_call_id) => None,
+            Message::ToolResult(t) => Some(tool_result_to_chat_message(t)),
         };
-        chat = chat.append_message(cm);
+        if let Some(cm) = cm {
+            chat = chat.append_message(cm);
+        }
     }
 
     let tools: Vec<Tool> = ctx.tools.iter().map(tool_def_to_genai).collect();
@@ -53,6 +74,41 @@ pub fn to_chat_request(ctx: &LlmContext) -> ChatRequest {
     }
 
     chat
+}
+
+/// Scan the transcript and return the IDs of tool_calls whose
+/// `arguments` is a string that doesn't decode to a JSON object. These
+/// entries can't be sent to the provider as-is.
+fn collect_corrupt_tool_call_ids(messages: &[Message]) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for msg in messages {
+        if let Message::Assistant(a) = msg {
+            for c in &a.content {
+                if let AssistantContent::ToolCall(tc) = c
+                    && is_tool_args_corrupt(&tc.arguments)
+                {
+                    ids.insert(tc.id.clone());
+                }
+            }
+        }
+    }
+    ids
+}
+
+/// `arguments` is "corrupt" if it's a `Value::String` whose content
+/// neither parses as JSON nor parses to an object. Non-string values
+/// pass through here (object/array/scalar) — providers may still
+/// reject array/scalar but that's a separate concern; we only guard
+/// the specific "got str" failure mode here.
+fn is_tool_args_corrupt(args: &serde_json::Value) -> bool {
+    if let serde_json::Value::String(s) = args {
+        !matches!(
+            serde_json::from_str::<serde_json::Value>(s),
+            Ok(v) if v.is_object()
+        )
+    } else {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -80,13 +136,20 @@ fn user_content_to_part(c: &UserContent) -> ContentPart {
     }
 }
 
-fn assistant_to_chat_message(msg: &AssistantMessage) -> ChatMessage {
+fn assistant_to_chat_message(
+    msg: &AssistantMessage,
+    corrupt_tool_call_ids: &HashSet<String>,
+) -> Option<ChatMessage> {
     let mut parts: Vec<ContentPart> = Vec::with_capacity(msg.content.len());
     let mut signatures: Vec<String> = Vec::new();
 
     for c in &msg.content {
         match c {
             AssistantContent::Text(t) => parts.push(ContentPart::Text(t.text.clone())),
+            AssistantContent::ToolCall(tc) if corrupt_tool_call_ids.contains(&tc.id) => {
+                // Drop — its tool_result is being dropped alongside in
+                // `to_chat_request`, so no orphan.
+            }
             AssistantContent::ToolCall(tc) => parts.push(ContentPart::ToolCall(ToolCall {
                 call_id: tc.id.clone(),
                 fn_name: tc.name.clone(),
@@ -132,15 +195,19 @@ fn assistant_to_chat_message(msg: &AssistantMessage) -> ChatMessage {
         }
     }
 
-    let content = if parts.is_empty() {
-        MessageContent::from_text(String::new())
-    } else if let [ContentPart::Text(text)] = parts.as_slice() {
+    // If every content part was a corrupt tool_call we'd drop the
+    // whole message — an empty assistant turn confuses providers and
+    // there's nothing useful to send anyway.
+    if parts.is_empty() {
+        return None;
+    }
+    let content = if let [ContentPart::Text(text)] = parts.as_slice() {
         MessageContent::from_text(text.clone())
     } else {
         MessageContent::from_parts(parts)
     };
 
-    ChatMessage::assistant(content)
+    Some(ChatMessage::assistant(content))
 }
 
 fn tool_result_to_chat_message(msg: &ToolResultMessage) -> ChatMessage {
@@ -233,5 +300,57 @@ mod tests {
         // shape mismatch surfaces (rather than being silently masked).
         let raw = json!("just a string");
         assert_eq!(normalize_outbound_tool_args(&raw), raw);
+    }
+
+    #[test]
+    fn is_tool_args_corrupt_flags_unparseable_strings() {
+        // Truncated JSON — what an interrupted streaming chunk leaves.
+        assert!(is_tool_args_corrupt(&json!(r#"{"path": "/foo", "old": "abc"#)));
+        // Valid JSON but not an object.
+        assert!(is_tool_args_corrupt(&json!(r#""just a value""#)));
+        // Plain object — fine.
+        assert!(!is_tool_args_corrupt(&json!({"path": "/foo"})));
+        // String encoding of an object — fine (normalize_outbound unwraps).
+        assert!(!is_tool_args_corrupt(&json!(r#"{"path": "/foo"}"#)));
+    }
+
+    #[test]
+    fn collect_corrupt_tool_call_ids_picks_up_only_broken_calls() {
+        use grain_agent_core::{
+            AssistantMessage, StopReason, ToolCall as GrainToolCall, Usage,
+        };
+        let good = Message::Assistant(AssistantMessage {
+            content: vec![AssistantContent::ToolCall(GrainToolCall {
+                id: "call_good".into(),
+                name: "read".into(),
+                arguments: json!({"path": "/x"}),
+            })],
+            api: "test".into(),
+            provider: "test".into(),
+            model: "test".into(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+        });
+        let bad = Message::Assistant(AssistantMessage {
+            content: vec![AssistantContent::ToolCall(GrainToolCall {
+                id: "call_bad".into(),
+                name: "edit".into(),
+                // Truncated JSON, mimicking the kimi failure observed
+                // in the wild on a 616-message resume.
+                arguments: json!(r#"{"path": "/x", "old": "abc"#),
+            })],
+            api: "test".into(),
+            provider: "test".into(),
+            model: "test".into(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+        });
+        let ids = collect_corrupt_tool_call_ids(&[good, bad]);
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains("call_bad"));
     }
 }
