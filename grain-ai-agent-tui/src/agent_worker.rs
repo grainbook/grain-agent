@@ -210,6 +210,20 @@ impl HarnessBuilder {
     /// with the separate `SessionWriter` subscription installed in
     /// [`install_subscriptions`].
     async fn build(&self, prior_messages: Vec<AgentMessage>) -> Arc<AgentHarness> {
+        self.build_with_model(prior_messages, self.model.clone()).await
+    }
+
+    /// Same as [`Self::build`] but pins the new harness to the
+    /// supplied `model` instead of the captured boot-time one.
+    /// Used by `/resume` so the resumed session keeps the
+    /// **currently** selected provider/model (the one the user is
+    /// actively driving in this run) instead of snapping back to
+    /// whatever was active at TUI startup.
+    async fn build_with_model(
+        &self,
+        prior_messages: Vec<AgentMessage>,
+        model: Model,
+    ) -> Arc<AgentHarness> {
         let session = Session::new(Arc::new(InMemorySessionStorage::new(
             SessionMetadata::new(),
         )));
@@ -218,11 +232,7 @@ impl HarnessBuilder {
                 eprintln!("[warn] seed session message failed: {e}");
             }
         }
-        let mut opts = AgentHarnessOptions::new(
-            session,
-            self.model.clone(),
-            self.stream.clone(),
-        );
+        let mut opts = AgentHarnessOptions::new(session, model, self.stream.clone());
         opts.system_prompt = SystemPrompt::Static(self.system_prompt.clone());
         opts.tools = self.tools.clone();
         opts.transform_context = Some(self.transform_context.clone());
@@ -1045,6 +1055,14 @@ async fn run_command_loop(
         eprintln!("[info] DeepSeek pack active — reasoning scavenge + subagent.done detection enabled");
     }
 
+    // Tracks the model the harness is *currently* driving. Starts
+    // from the boot-time model captured in HarnessBuilder; updated
+    // every time `ApplyProvider` (and any future `/model`-style
+    // command) swaps the harness's model. `ResumeSession` reads
+    // this to pin the resumed harness to whatever the user is
+    // currently using, instead of snapping back to the boot model.
+    let mut current_model = builder.model.clone();
+
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             Command::SendPrompt(text) => {
@@ -1331,7 +1349,15 @@ async fn run_command_loop(
                         None
                     }
                 };
-                let new_harness = builder.build(prior).await;
+                // Pin the resumed harness to the **currently
+                // active** model — not the boot-time one captured
+                // in `builder.model`, and not anything saved in
+                // the resumed JSONL session's metadata. This
+                // matches what the user is actively driving in
+                // this run.
+                let new_harness = builder
+                    .build_with_model(prior, current_model.clone())
+                    .await;
                 install_subscriptions(
                     &new_harness,
                     &evt_tx,
@@ -1384,7 +1410,10 @@ async fn run_command_loop(
                     .unwrap_or_else(|| synthetic_model_from_profile(profile));
                 let model = override_model_provider(model, profile);
                 let cost = model.cost.clone();
-                harness.set_model(model).await;
+                harness.set_model(model.clone()).await;
+                // Keep `current_model` in sync so a later /resume
+                // hands the resumed harness the right model.
+                current_model = model;
                 let _ = evt_tx.send(TuiEvent::ProviderApplied {
                     profile: profile.name.clone(),
                     model: profile.model.clone(),
