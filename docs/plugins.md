@@ -73,6 +73,13 @@ Add `kind = "git"` / `kind = "local"` to a `[[plugin]]` block to force a particu
 
 **Bootstrap story** — this solves the chicken-and-egg for the future `lazy-gagent` plugin manager: list it in the spec like anything else. The engine pulls it in before plugin discovery runs, so by the time the agent boots there's no difference between "the manager" and "any plugin the manager would have installed".
 
+**HTTPS auth caveat** — `git clone` runs with `GIT_TERMINAL_PROMPT=0` and a closed stdin, so it can't ever prompt for credentials (and can't hang the boot path waiting for them). For private repos, either:
+
+- pre-configure a credential helper (`git config --global credential.helper osxkeychain` on macOS, `manager-core` on Windows, `store` for plain-text), **or**
+- use the SSH URL form (`git@github.com:owner/repo.git`) which authenticates via your SSH agent.
+
+A missing credential surfaces as a clean `failed` entry in the boot log; the rest of the spec keeps installing.
+
 Skip semantics: an existing directory under `<plugins_dir>/<name>/` is **never touched** — no re-clone, no overwrite. To re-install, `rm -rf` first.
 
 Failures are non-fatal: one bad src emits a `[warn]` line, every other plugin continues to install.

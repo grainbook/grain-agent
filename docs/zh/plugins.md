@@ -74,6 +74,13 @@ src  = "/Users/me/dev/my-plugin"  # 文件系统路径 → symlink 过去
 
 **Bootstrap 妙处**：解决 `lazy-gagent` 管理器的鸡生蛋问题 —— 跟其它插件一样写进 spec 就行。引擎在 plugin discover 之前先拉好，到 agent 启动时「管理器」跟「管理器装的插件」没区别。
 
+**HTTPS 鉴权注意** —— `git clone` 在 `GIT_TERMINAL_PROMPT=0` + 关闭 stdin 下跑，所以**永远不会**提示输密码也**不会**卡住启动。私有仓库的两条路：
+
+- 预配置 credential helper（macOS: `git config --global credential.helper osxkeychain`、Windows: `manager-core`、其它: `store`），**或者**
+- 用 SSH URL 形式 (`git@github.com:owner/repo.git`)，靠你机器上的 SSH agent 鉴权
+
+凭证缺失会作为干净的 `failed` 行落在启动日志里；spec 里其它插件继续装。
+
 跳过规则：`<plugins_dir>/<name>/` 已存在时**永不动**（不重新 clone、不覆盖）。要重装得自己先 `rm -rf`。
 
 失败不致命：单个 src 坏掉打 `[warn]` 行，其它插件照装。

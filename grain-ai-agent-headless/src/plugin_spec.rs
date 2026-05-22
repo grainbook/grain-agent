@@ -207,7 +207,19 @@ pub fn sync_plugins(spec: &PluginSpecFile, plugins_dir: &Path) -> SyncReport {
 }
 
 fn clone_git(src: &str, rev: Option<&str>, target: &Path) -> Result<(), String> {
+    // `GIT_TERMINAL_PROMPT=0` + closed stdin: when an HTTPS URL needs
+    // credentials and the user hasn't pre-configured a helper, git
+    // would otherwise grab `/dev/tty` and block the boot path until
+    // the user types something — and *before* the TUI takes over the
+    // terminal Ctrl-C doesn't reach it cleanly. With these set, git
+    // fails fast with "could not read Username for 'https://…'",
+    // surfaced as a normal `SyncReport.failed` entry. Users with
+    // private repos should either pre-configure a credential helper
+    // (e.g. `git config --global credential.helper osxkeychain`) or
+    // switch the `src` to an SSH URL.
     let output = std::process::Command::new("git")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
         .arg("clone")
         .arg(src)
         .arg(target)
@@ -219,6 +231,8 @@ fn clone_git(src: &str, rev: Option<&str>, target: &Path) -> Result<(), String> 
     }
     if let Some(rev) = rev {
         let output = std::process::Command::new("git")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(std::process::Stdio::null())
             .current_dir(target)
             .arg("checkout")
             .arg(rev)
