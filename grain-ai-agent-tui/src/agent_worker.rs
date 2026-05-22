@@ -741,6 +741,18 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // `RhaiExtension::tools()`) so we don't need a separate
     // keepalive — dropping the extension wrapper is fine.
 
+    // Capture the ingredients the worker needs to rebuild the Rhai
+    // tool list on `Command::ReloadRhaiScripts`. `base_tools` is the
+    // pre-Rhai snapshot taken above; on reload we set
+    // `agent.tools = base_tools + fresh_rhai_tools`.
+    #[cfg(feature = "scripts-rhai")]
+    let rhai_ctx_for_task = RhaiReloadCtx {
+        spec_path: spec_path_for_rhai.clone(),
+        plugins_dir: plugins_dir.clone(),
+        script_dirs: rhai_dirs.clone(),
+        base_tools,
+    };
+
     let join = tokio::spawn(async move {
         // Pin the Boa extension into the task scope so its worker
         // thread lives until the agent task exits.
@@ -782,6 +794,8 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             profiles,
             cmd_rx,
             evt_tx_for_task,
+            #[cfg(feature = "scripts-rhai")]
+            rhai_ctx_for_task,
         )
         .await;
     });
@@ -792,6 +806,28 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         handles,
         join,
     })
+}
+
+/// Context the worker needs to rebuild Rhai-contributed tools on
+/// `Command::ReloadRhaiScripts`. Captured at boot in `spawn()` and
+/// kept alive in the worker for the agent's lifetime.
+#[cfg(feature = "scripts-rhai")]
+#[derive(Clone)]
+pub struct RhaiReloadCtx {
+    /// Path to `<workspace>/.grain/plugin-spec.toml` — host fn
+    /// closures need this to install / remove plugins from inside
+    /// scripts.
+    pub spec_path: PathBuf,
+    /// `<plugins_dir>` resolved at boot. Same path the boot-time
+    /// `discover_plugins` walked.
+    pub plugins_dir: PathBuf,
+    /// Every directory we load `*.rhai` from — workspace primary
+    /// plus each plugin's `scripts/` subdir (frozen at boot).
+    pub script_dirs: Vec<PathBuf>,
+    /// Tools the agent already had **before** Rhai contributed:
+    /// built-in read/write/bash/web, Boa-scripted tools, etc. On
+    /// reload we set `agent.tools = base_tools + fresh_rhai_tools`.
+    pub base_tools: Vec<Arc<dyn AgentTool>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -808,6 +844,7 @@ async fn run_command_loop(
     profiles: Vec<ProviderProfile>,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     evt_tx: mpsc::UnboundedSender<TuiEvent>,
+    #[cfg(feature = "scripts-rhai")] rhai_ctx: RhaiReloadCtx,
 ) {
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
@@ -937,6 +974,31 @@ async fn run_command_loop(
                         )));
                     }
                 }
+            }
+            #[cfg(feature = "scripts-rhai")]
+            Command::ReloadRhaiScripts => {
+                // Rebuild from the captured ingredients. Each tool
+                // is `Arc<dyn AgentTool>` so the swap is just a
+                // pointer move on the agent side — no in-flight turn
+                // gets disturbed.
+                let fresh_rhai = build_rhai_tools(
+                    &rhai_ctx.spec_path,
+                    &rhai_ctx.plugins_dir,
+                    &rhai_ctx.script_dirs,
+                );
+                let mut combined = rhai_ctx.base_tools.clone();
+                let count = fresh_rhai.len();
+                combined.extend(fresh_rhai);
+                harness.agent().set_tools(combined).await;
+                let _ = evt_tx.send(TuiEvent::Info(format!(
+                    "(reloaded — {count} Rhai tool(s) active)"
+                )));
+            }
+            #[cfg(not(feature = "scripts-rhai"))]
+            Command::ReloadRhaiScripts => {
+                let _ = evt_tx.send(TuiEvent::AgentWorkerError(
+                    "reload: TUI was built without --features scripts-rhai".into(),
+                ));
             }
             Command::ResumeSession(path) => {
                 // Cancel any in-flight turn and wait for the old

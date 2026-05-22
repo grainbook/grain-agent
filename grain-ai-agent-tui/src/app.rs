@@ -152,6 +152,13 @@ pub enum Command {
         name: String,
         delete_files: bool,
     },
+    /// Reload the Rhai script catalog without restarting the TUI:
+    /// rebuilds the Rhai engine, re-loads every `*.rhai` from the
+    /// captured script dirs, and swaps the agent's tool list to
+    /// `base_tools + fresh_rhai`. Sent manually via the `/reload`
+    /// slash command or automatically by the `hot-reload` feature's
+    /// file watcher. Worker emits a [`TuiEvent::Info`] on success.
+    ReloadRhaiScripts,
     Quit,
 }
 
@@ -315,6 +322,10 @@ pub const SLASH_CATALOG: &[CommandCatalogItem] = &[
     CommandCatalogItem {
         trigger: "/remove",
         description: "/remove <name> [--keep-files] — drop from spec (and dir)",
+    },
+    CommandCatalogItem {
+        trigger: "/reload",
+        description: "reload Rhai scripts (no restart) — requires --features scripts-rhai",
     },
     CommandCatalogItem {
         trigger: "/exit",
@@ -1737,6 +1748,13 @@ impl AppState {
                     format!("(updating '{name}' …)"),
                 );
                 vec![Command::UpdatePlugin { name: name.into() }]
+            }
+            "reload" => {
+                self.push(
+                    TranscriptKind::Info,
+                    "(reloading Rhai scripts…)".into(),
+                );
+                vec![Command::ReloadRhaiScripts]
             }
             "remove" | "uninstall" => {
                 let mut parts = rest.split_whitespace();
