@@ -91,21 +91,17 @@ pub struct RhaiExtension {
 }
 
 impl RhaiExtension {
-    /// Single-directory convenience.
-    pub fn from_scripts_dir(dir: impl AsRef<Path>) -> Result<Self, RhaiExtensionError> {
-        Self::from_scripts_dirs(&[dir])
-    }
-
-    /// Load every `*.rhai` file under each of `dirs` (sorted within
-    /// each dir for determinism) into one shared [`Engine`]. Each
-    /// script's `tools()` manifest is invoked once; the returned
-    /// descriptors become `Arc<dyn AgentTool>` entries on
-    /// [`Self::tools`]. Missing directories are silently skipped so
-    /// the call site can pass plugin script dirs that may or may not
-    /// exist.
-    pub fn from_scripts_dirs(
-        dirs: &[impl AsRef<Path>],
-    ) -> Result<Self, RhaiExtensionError> {
+    /// Build a fresh [`Engine`] with the same defaults
+    /// [`Self::from_scripts_dir`] uses internally. Use when the
+    /// caller wants to register host functions (e.g. plugin manager
+    /// primitives, file-system helpers, logging) *before* loading
+    /// scripts. Hand the configured engine to
+    /// [`Self::from_scripts_dirs_with_engine`].
+    ///
+    /// Defaults applied:
+    /// - `set_max_expr_depths(256, 256)` so realistic nested
+    ///   JSON-schema literals don't trip Rhai's complexity guard.
+    pub fn default_engine() -> Engine {
         let mut engine = Engine::new();
         // Defaults bite on realistic JSON-schema literals: triple-nested
         // `#{ properties: #{ text: #{ type: "string" } } }` inside a
@@ -113,6 +109,36 @@ impl RhaiExtension {
         // (32). Lift the cap to 256 — well below any pathological
         // input but far above any sane manifest.
         engine.set_max_expr_depths(256, 256);
+        engine
+    }
+
+    /// Single-directory convenience using [`Self::default_engine`].
+    pub fn from_scripts_dir(dir: impl AsRef<Path>) -> Result<Self, RhaiExtensionError> {
+        Self::from_scripts_dirs(&[dir])
+    }
+
+    /// Multi-directory convenience using [`Self::default_engine`].
+    pub fn from_scripts_dirs(
+        dirs: &[impl AsRef<Path>],
+    ) -> Result<Self, RhaiExtensionError> {
+        Self::from_scripts_dirs_with_engine(Self::default_engine(), dirs)
+    }
+
+    /// Load every `*.rhai` file under each of `dirs` (sorted within
+    /// each dir for determinism) into the supplied [`Engine`]. Each
+    /// script's `tools()` manifest is invoked once; the returned
+    /// descriptors become `Arc<dyn AgentTool>` entries on
+    /// [`Self::tools`]. Missing directories are silently skipped so
+    /// the call site can pass plugin script dirs that may or may not
+    /// exist.
+    ///
+    /// Pass-an-engine variant: register host functions on `engine`
+    /// before calling this — those functions remain available to
+    /// every loaded script.
+    pub fn from_scripts_dirs_with_engine(
+        engine: Engine,
+        dirs: &[impl AsRef<Path>],
+    ) -> Result<Self, RhaiExtensionError> {
         let engine = Arc::new(engine);
 
         // Collect script paths from every dir.
@@ -501,6 +527,47 @@ mod tests {
         write_script(tmp.path(), "syntax", r#"fn tools() { #! not valid"#);
         let err = RhaiExtension::from_scripts_dir(tmp.path()).err().expect("expected error");
         assert!(matches!(err, RhaiExtensionError::Compile { .. }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_registered_fn_is_callable_from_script() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_script(
+            tmp.path(),
+            "uses_host",
+            r#"
+                fn tools() {
+                    [#{ name: "ping", parameters: #{}, fn_name: "ping" }]
+                }
+                fn ping(args) {
+                    // Host function `host_echo(s)` is registered by the caller
+                    // before scripts load; here we just call it like any native.
+                    host_echo(args.text)
+                }
+            "#,
+        );
+        let mut engine = RhaiExtension::default_engine();
+        engine.register_fn("host_echo", |s: String| -> String { format!("host:{s}") });
+        let ext = RhaiExtension::from_scripts_dirs_with_engine(engine, &[tmp.path()]).unwrap();
+        let tool = ext.tools().into_iter().next().unwrap();
+        let result = tool
+            .execute(
+                "call-1",
+                serde_json::json!({ "text": "hello" }),
+                CancellationToken::new(),
+                Arc::new(|_: grain_agent_core::AgentToolResult| {}),
+            )
+            .await
+            .unwrap();
+        let body = result
+            .content
+            .into_iter()
+            .filter_map(|c| match c {
+                grain_agent_core::UserContent::Text(t) => Some(t.text),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(body.contains("host:hello"), "got {body:?}");
     }
 
     #[test]
