@@ -753,11 +753,103 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         base_tools,
     };
 
+    // Hot-reload: install a notify watcher on every Rhai script dir
+    // and forward "something changed" pulses (debounced) into the
+    // worker via `Command::ReloadRhaiScripts`. The keepalive tuple
+    // (watcher + bridge thread) lives alongside the boa keepalive
+    // so it gets torn down at the same time. When the cmd_tx
+    // channel closes, the bridge thread sees the send error and
+    // exits naturally.
+    #[cfg(feature = "hot-reload")]
+    let _hot_reload_keepalive: Option<(
+        notify::RecommendedWatcher,
+        std::thread::JoinHandle<()>,
+    )> = {
+        use notify::{RecursiveMode, Watcher};
+
+        let (event_tx, event_rx) = std::sync::mpsc::channel::<()>();
+        let watcher_result = notify::recommended_watcher(
+            move |res: notify::Result<notify::Event>| {
+                // Filter: only fire on data changes / file creation /
+                // removal. notify can also emit `Access` events on some
+                // platforms which would spam the bridge.
+                let should_fire = match res {
+                    Ok(ev) => matches!(
+                        ev.kind,
+                        notify::EventKind::Create(_)
+                            | notify::EventKind::Modify(_)
+                            | notify::EventKind::Remove(_)
+                    ),
+                    Err(_) => false,
+                };
+                if should_fire {
+                    let _ = event_tx.send(());
+                }
+            },
+        );
+        match watcher_result {
+            Ok(mut watcher) => {
+                let mut watched_any = false;
+                for dir in &rhai_dirs {
+                    if !dir.exists() {
+                        continue;
+                    }
+                    if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
+                        eprintln!(
+                            "[warn] notify watch {}: {e}",
+                            dir.display()
+                        );
+                    } else {
+                        watched_any = true;
+                    }
+                }
+                if watched_any {
+                    let cmd_tx_for_watcher = cmd_tx.clone();
+                    let bridge = std::thread::spawn(move || {
+                        // First-event blocks; bursts coalesce inside
+                        // the DEBOUNCE window so an editor's "atomic
+                        // save" (write-temp + rename) only triggers
+                        // one reload.
+                        const DEBOUNCE: std::time::Duration =
+                            std::time::Duration::from_millis(250);
+                        while event_rx.recv().is_ok() {
+                            while event_rx.recv_timeout(DEBOUNCE).is_ok() {
+                                // drain
+                            }
+                            if cmd_tx_for_watcher
+                                .send(Command::ReloadRhaiScripts)
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+                    eprintln!(
+                        "[info] hot-reload: watching {} Rhai dir(s) for changes",
+                        rhai_dirs.len()
+                    );
+                    Some((watcher, bridge))
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                eprintln!("[warn] hot-reload init failed: {e}");
+                None
+            }
+        }
+    };
+
     let join = tokio::spawn(async move {
         // Pin the Boa extension into the task scope so its worker
         // thread lives until the agent task exits.
         #[cfg(feature = "scripts-boa")]
         let _boa_keepalive = _scripts_keepalive;
+        // Same lifetime story for the notify watcher + bridge
+        // thread: dropping them mid-loop would silently stop hot
+        // reload. Pin them into the task scope.
+        #[cfg(feature = "hot-reload")]
+        let _hot_reload_keepalive_in_task = _hot_reload_keepalive;
 
         install_subscriptions(
             &harness,
