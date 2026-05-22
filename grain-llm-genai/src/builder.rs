@@ -7,10 +7,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use genai::Client;
 use genai::adapter::AdapterKind;
 use genai::chat::ChatOptions;
 use genai::resolver::{AuthData, Endpoint};
+use genai::Client;
 use genai::{ModelIden, ServiceTarget};
 use grain_llm_models::Registry;
 
@@ -162,6 +162,9 @@ impl GenaiStreamBuilder {
             .into_iter()
             .map(|e| (e.id.clone(), e))
             .collect();
+        let has_loopback_compat_endpoint = compat_map
+            .values()
+            .any(|endpoint| is_loopback_url(&endpoint.base_url));
         let compat_map = Arc::new(compat_map);
         let env_resolver = Arc::new(env_resolver);
 
@@ -171,28 +174,28 @@ impl GenaiStreamBuilder {
         // in our compat table.
         let auth_compat = compat_map.clone();
         let auth_env = env_resolver.clone();
-        let auth_resolver = move |model_iden: ModelIden|
-            -> genai::resolver::Result<Option<AuthData>> {
-            // 1. OpenAI-compat namespace? Use its env var.
-            let (namespace, _) = model_iden.model_name.namespace_and_name();
-            if let Some(ns) = namespace
-                && let Some(ep) = auth_compat.get(ns)
-                && let Ok(v) = std::env::var(&ep.env_var)
-                && !v.is_empty()
-            {
-                return Ok(Some(AuthData::from_single(v)));
-            }
-            // 2. Custom override for the adapter? Use it.
-            let adapter_name = model_iden.adapter_kind.as_lower_str();
-            if let Some(env) = auth_env.env_var_for(adapter_name)
-                && let Ok(v) = std::env::var(env)
-                && !v.is_empty()
-            {
-                return Ok(Some(AuthData::from_single(v)));
-            }
-            // 3. Fall through to genai's default lookup by returning None.
-            Ok(None)
-        };
+        let auth_resolver =
+            move |model_iden: ModelIden| -> genai::resolver::Result<Option<AuthData>> {
+                // 1. OpenAI-compat namespace? Use its env var.
+                let (namespace, _) = model_iden.model_name.namespace_and_name();
+                if let Some(ns) = namespace
+                    && let Some(ep) = auth_compat.get(ns)
+                    && let Ok(v) = std::env::var(&ep.env_var)
+                    && !v.is_empty()
+                {
+                    return Ok(Some(AuthData::from_single(v)));
+                }
+                // 2. Custom override for the adapter? Use it.
+                let adapter_name = model_iden.adapter_kind.as_lower_str();
+                if let Some(env) = auth_env.env_var_for(adapter_name)
+                    && let Ok(v) = std::env::var(env)
+                    && !v.is_empty()
+                {
+                    return Ok(Some(AuthData::from_single(v)));
+                }
+                // 3. Fall through to genai's default lookup by returning None.
+                Ok(None)
+            };
 
         // Service-target resolver: only intervenes for OpenAI-compat namespaces.
         // Overrides endpoint + adapter_kind to OpenAI, strips the namespace
@@ -207,10 +210,17 @@ impl GenaiStreamBuilder {
                 let Some(endpoint) = target_compat.get(ns) else {
                     return Ok(target);
                 };
+                // Local OpenAI-compatible servers (LM Studio, llama.cpp,
+                // vLLM) usually ignore the bearer token, but genai's OpenAI
+                // adapter still needs a single auth value to build headers.
                 let auth = std::env::var(&endpoint.env_var)
                     .ok()
                     .filter(|s| !s.is_empty())
                     .map(AuthData::from_single)
+                    .or_else(|| {
+                        is_loopback_url(&endpoint.base_url)
+                            .then(|| AuthData::from_single("grain-local"))
+                    })
                     .unwrap_or(target.auth);
                 let new_model = ModelIden::new(AdapterKind::OpenAI, bare.to_string());
                 Ok(ServiceTarget {
@@ -220,17 +230,46 @@ impl GenaiStreamBuilder {
                 })
             };
 
-        let client = Client::builder()
+        let mut client_builder = Client::builder()
             .with_chat_options(chat_options.clone())
             .with_auth_resolver_fn(auth_resolver)
-            .with_service_target_resolver_fn(target_resolver)
-            .build();
+            .with_service_target_resolver_fn(target_resolver);
+        if has_loopback_compat_endpoint {
+            let reqwest_client = reqwest13::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("build reqwest client with local proxy bypass");
+            client_builder = client_builder.with_reqwest(reqwest_client);
+        }
+        let client = client_builder.build();
 
-        GenaiStream::with_client_options_and_router(
-            client,
-            chat_options,
-            provider_router,
-            registry,
-        )
+        GenaiStream::with_client_options_and_router(client, chat_options, provider_router, registry)
+    }
+}
+
+fn is_loopback_url(raw: &str) -> bool {
+    let Ok(url) = reqwest13::Url::parse(raw) else {
+        return false;
+    };
+    match url.host_str() {
+        Some("localhost") => true,
+        Some(host) => host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|addr| addr.is_loopback()),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_loopback_url;
+
+    #[test]
+    fn loopback_url_detection_covers_local_provider_hosts() {
+        assert!(is_loopback_url("http://127.0.0.1:1234/v1/"));
+        assert!(is_loopback_url("http://localhost:1234/v1/"));
+        assert!(is_loopback_url("http://[::1]:1234/v1/"));
+        assert!(!is_loopback_url("https://api.example.com/v1/"));
     }
 }

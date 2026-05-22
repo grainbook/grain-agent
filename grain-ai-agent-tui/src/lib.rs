@@ -20,6 +20,7 @@
 pub mod agent_worker;
 pub mod app;
 pub mod cli;
+pub mod config_apply;
 pub mod event;
 pub mod run;
 pub mod theme;

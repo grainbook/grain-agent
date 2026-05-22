@@ -52,4 +52,15 @@ pub enum TuiEvent {
     /// Mouse wheel rolled down — translated into transcript scroll-down
     /// by `amount` rows. Same catch-up-to-tail semantics as PgDn.
     ScrollDown { amount: u16 },
+    /// Left mouse button pressed at absolute terminal cell `(row, col)`.
+    /// AppState translates into the transcript area's rendered-row
+    /// coordinate space and starts a selection.
+    MouseDown { row: u16, col: u16 },
+    /// Left mouse button dragged to `(row, col)` — extend the in-flight
+    /// selection.
+    MouseDrag { row: u16, col: u16 },
+    /// Left mouse button released — finalize the selection: extract
+    /// text from the rendered rows under the selection rectangle and
+    /// write it to the OS clipboard.
+    MouseUp,
 }

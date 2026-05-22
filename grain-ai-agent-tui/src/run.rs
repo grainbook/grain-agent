@@ -25,9 +25,9 @@ use crate::agent_worker::{Worker, WorkerConfig, WorkerInitError, spawn};
 use crate::app::{AppState, Capabilities};
 use crate::cli::Args;
 use crate::event::TuiEvent;
-use grain_llm_genai::{ProviderProfile, load_profiles, resolve_providers_file};
 use crate::theme::{Theme, builtin_themes, load_user_themes};
 use crate::ui;
+use grain_llm_genai::{ProviderProfile, load_profiles, resolve_providers_file};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TuiError {
@@ -63,9 +63,10 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
     // Resolve themes before grabbing the terminal so any disk-load
     // warnings get a chance to print to stderr before the alt screen
     // hides them.
-    let themes_dir = args.themes_dir.clone().unwrap_or_else(|| {
-        args.workspace.join(".grain").join("themes")
-    });
+    let themes_dir = args
+        .themes_dir
+        .clone()
+        .unwrap_or_else(|| args.workspace.join(".grain").join("themes"));
     let (themes, initial_idx) = resolve_themes(&themes_dir, &args.theme);
 
     let mut terminal = init_terminal()?;
@@ -133,9 +134,7 @@ fn resolve_themes(themes_dir: &std::path::Path, requested: &str) -> (Vec<Theme>,
         .position(|t| t.name == requested)
         .unwrap_or_else(|| {
             if !requested.is_empty() && requested != "default" {
-                eprintln!(
-                    "[warn] theme '{requested}' not found; falling back to 'default'"
-                );
+                eprintln!("[warn] theme '{requested}' not found; falling back to 'default'");
             }
             0
         });
@@ -208,6 +207,11 @@ async fn event_loop(
 
     let mut ticker = interval(Duration::from_millis(args.tick_ms.max(16)));
 
+    // Track the last mouse-capture state we applied to the terminal so
+    // we can re-issue Enable/Disable when the user toggles via F6.
+    // `init_terminal` started capture ON, so we mirror that here.
+    let mut mouse_capture_applied = true;
+
     // Initial draw.
     terminal.draw(|f| ui::draw(f, &state))?;
 
@@ -235,8 +239,26 @@ async fn event_loop(
         if state.should_quit {
             return Ok(());
         }
+        if state.mouse_capture_on != mouse_capture_applied {
+            apply_mouse_capture(terminal, state.mouse_capture_on)?;
+            mouse_capture_applied = state.mouse_capture_on;
+        }
         terminal.draw(|f| ui::draw(f, &state))?;
     }
+}
+
+/// Switch terminal mouse capture on or off without touching the rest
+/// of the alt-screen / raw-mode setup.
+fn apply_mouse_capture(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    enable: bool,
+) -> io::Result<()> {
+    if enable {
+        execute!(terminal.backend_mut(), EnableMouseCapture)?;
+    } else {
+        execute!(terminal.backend_mut(), DisableMouseCapture)?;
+    }
+    Ok(())
 }
 
 /// Blocking loop on a dedicated OS thread: read crossterm events and
@@ -262,14 +284,26 @@ fn forward_terminal_events(tx: mpsc::UnboundedSender<TuiEvent>) {
                     }
                 }
                 Ok(CtEvent::Mouse(m)) => {
-                    // Only act on scroll. Click / drag / move are
-                    // ignored — text selection works through the
-                    // terminal's Option/Shift-bypass override.
+                    // Scroll wheel + left-button drag for in-app text
+                    // selection. Other mouse activity (move-without-
+                    // drag, right-click, middle-click) is ignored —
+                    // those still pass through to the terminal when
+                    // F6 disables capture entirely.
+                    use crossterm::event::MouseButton;
                     let evt = match m.kind {
                         MouseEventKind::ScrollUp => Some(TuiEvent::ScrollUp { amount: WHEEL_STEP }),
                         MouseEventKind::ScrollDown => {
                             Some(TuiEvent::ScrollDown { amount: WHEEL_STEP })
                         }
+                        MouseEventKind::Down(MouseButton::Left) => Some(TuiEvent::MouseDown {
+                            row: m.row,
+                            col: m.column,
+                        }),
+                        MouseEventKind::Drag(MouseButton::Left) => Some(TuiEvent::MouseDrag {
+                            row: m.row,
+                            col: m.column,
+                        }),
+                        MouseEventKind::Up(MouseButton::Left) => Some(TuiEvent::MouseUp),
                         _ => None,
                     };
                     if let Some(e) = evt

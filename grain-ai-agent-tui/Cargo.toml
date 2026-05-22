@@ -15,6 +15,8 @@ futures = { workspace = true }
 ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 crossterm = { workspace = true }
 unicode-width = { workspace = true }
+arboard = { workspace = true }
+textwrap = { workspace = true }
 grain-agent-core = { workspace = true }
 grain-agent-harness = { workspace = true }
 grain-llm-models = { workspace = true }

@@ -15,9 +15,9 @@ use std::sync::Arc;
 use grain_agent_core::{Agent, AgentEvent, AgentOptions};
 use grain_agent_harness::context_guard::{ContextGuard, ContextGuardPolicy};
 use grain_ai_agent_headless::{
-    SessionWriter, TelemetrySink, Workspace, coding_bash_tools, coding_read_tools,
-    coding_web_tools, coding_write_tools, coding_agent_system_prompt, find_skills,
-    load_messages, render_doctor_report, resolve_skills_dir,
+    SessionWriter, TelemetrySink, Workspace, coding_agent_system_prompt, coding_bash_tools,
+    coding_read_tools, coding_web_tools, coding_write_tools, find_skills, load_messages,
+    render_doctor_report, resolve_skills_dir,
 };
 use grain_llm_genai::GenaiStream;
 use grain_llm_models::Registry;
@@ -152,7 +152,8 @@ pub struct Worker {
 pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // --- Workspace + registry ---------------------------------------------
     let workspace = Arc::new(
-        Workspace::new(&cfg.workspace_root).map_err(|e| WorkerInitError::Workspace(e.to_string()))?,
+        Workspace::new(&cfg.workspace_root)
+            .map_err(|e| WorkerInitError::Workspace(e.to_string()))?,
     );
     let registry = Arc::new(Registry::from_embedded_snapshot());
 
@@ -160,27 +161,40 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // was named, its `model` (with provider rewritten to the profile
     // name for OpenAI-compat routing) wins; otherwise fall back to the
     // CLI `--model` flag.
-    let (model, active_model_id, active_profile_name) =
-        if let Some(idx) = cfg.initial_profile_idx
-            && let Some(profile) = cfg.profiles.get(idx)
-        {
-            if !profile.auth.is_usable() {
-                return Err(WorkerInitError::OauthNotWired(profile.name.clone()));
+    let (model, active_model_id, active_profile_name) = if let Some(idx) = cfg.initial_profile_idx
+        && let Some(profile) = cfg.profiles.get(idx)
+    {
+        if !profile.auth.is_usable() {
+            return Err(WorkerInitError::OauthNotWired(profile.name.clone()));
+        }
+        // Registry-miss for a profile-driven model is **not**
+        // fatal: a profile already supplies provider kind +
+        // base_url, so we can synthesize a Model with conservative
+        // defaults for unknown ids (typical for local LM Studio /
+        // vLLM / llama.cpp / Ollama setups whose model names
+        // aren't in `models.dev`). The cost chip is suppressed
+        // (pricing is zeroed) and `context_window` defaults to
+        // 32k — pass `--headroom-tokens` if the real window is
+        // smaller.
+        let m = match registry.to_core_model(&profile.model) {
+            Some(m) => m,
+            None => {
+                eprintln!(
+                    "[info] model '{}' not in registry; synthesizing \
+                         from profile '{}' (context 32k, no pricing)",
+                    profile.model, profile.name
+                );
+                synthetic_model_from_profile(profile)
             }
-            let m = registry.to_core_model(&profile.model).ok_or_else(|| {
-                WorkerInitError::ProfileUnknownModel(
-                    profile.name.clone(),
-                    profile.model.clone(),
-                )
-            })?;
-            let m = override_model_provider(m, profile);
-            (m, profile.model.clone(), Some(profile.name.clone()))
-        } else {
-            let m = registry
-                .to_core_model(&cfg.model)
-                .ok_or_else(|| WorkerInitError::UnknownModel(cfg.model.clone()))?;
-            (m, cfg.model.clone(), None)
         };
+        let m = override_model_provider(m, profile);
+        (m, profile.model.clone(), Some(profile.name.clone()))
+    } else {
+        let m = registry
+            .to_core_model(&cfg.model)
+            .ok_or_else(|| WorkerInitError::UnknownModel(cfg.model.clone()))?;
+        (m, cfg.model.clone(), None)
+    };
 
     // --- System prompt + skills block -------------------------------------
     // Pin the prompt for the lifetime of this session. The harness's
@@ -316,13 +330,9 @@ pub fn spawn(cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                     "[info] escalation armed: → {} after {} failure(s)",
                     target.id, cfg.escalate_after
                 );
-                opts.prepare_next_turn =
-                    Some(grain_agent_harness::failure_escalation_hook(
-                        grain_agent_harness::EscalationConfig::new(
-                            cfg.escalate_after,
-                            target,
-                        ),
-                    ));
+                opts.prepare_next_turn = Some(grain_agent_harness::failure_escalation_hook(
+                    grain_agent_harness::EscalationConfig::new(cfg.escalate_after, target),
+                ));
             }
             None => {
                 eprintln!(
@@ -476,8 +486,7 @@ async fn run_command_loop(
                 let evt_tx = evt_tx.clone();
                 tokio::spawn(async move {
                     if let Err(e) = agent.prompt_text(text).await {
-                        let _ =
-                            evt_tx.send(TuiEvent::AgentWorkerError(format!("prompt: {e}")));
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!("prompt: {e}")));
                     }
                 });
             }
@@ -500,9 +509,7 @@ async fn run_command_loop(
                     let _ = evt_tx.send(TuiEvent::OverlaySkills(payload));
                 }
                 Err(e) => {
-                    let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
-                        "skills scan: {e}"
-                    )));
+                    let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!("skills scan: {e}")));
                 }
             },
             Command::ApplyProvider(idx) => {
@@ -519,24 +526,20 @@ async fn run_command_loop(
                     )));
                     continue;
                 }
-                match registry.to_core_model(&profile.model) {
-                    None => {
-                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
-                            "provider '{}': model '{}' not in registry",
-                            profile.name, profile.model
-                        )));
-                    }
-                    Some(model) => {
-                        let model = override_model_provider(model, profile);
-                        let cost = model.cost.clone();
-                        agent.set_model(model).await;
-                        let _ = evt_tx.send(TuiEvent::ProviderApplied {
-                            profile: profile.name.clone(),
-                            model: profile.model.clone(),
-                            cost,
-                        });
-                    }
-                }
+                // Same registry-miss-is-fine fallback as the startup
+                // path: a profile already carries enough info to call
+                // the endpoint; we just need a synthetic descriptor.
+                let model = registry
+                    .to_core_model(&profile.model)
+                    .unwrap_or_else(|| synthetic_model_from_profile(profile));
+                let model = override_model_provider(model, profile);
+                let cost = model.cost.clone();
+                agent.set_model(model).await;
+                let _ = evt_tx.send(TuiEvent::ProviderApplied {
+                    profile: profile.name.clone(),
+                    model: profile.model.clone(),
+                    cost,
+                });
             }
             Command::Quit => {
                 // Make sure any in-flight turn gets cancelled before the
@@ -560,4 +563,60 @@ fn override_model_provider(
         model.provider = profile.name.clone();
     }
     model
+}
+
+/// Build a synthetic [`Model`] for a profile whose `model` id isn't in
+/// the embedded `models.dev` registry. The profile alone carries enough
+/// info (provider kind + base_url + model id) to drive `grain-llm-genai`;
+/// the synthetic descriptor fills in the registry-supplied fields with
+/// conservative defaults:
+/// - `context_window = 32_768` (most local models advertise ≥ 8k; 32k
+///   is a sweet spot — pass `--headroom-tokens` for smaller windows).
+/// - `max_tokens = 4_096`.
+/// - `cost = zero` (suppresses the footer cost chip — providers without
+///   public pricing shouldn't lie).
+/// - `reasoning = false` (model-specific; the agent will still send
+///   reasoning hints if the user passes `--show-thinking`).
+fn synthetic_model_from_profile(profile: &ProviderProfile) -> grain_agent_core::Model {
+    let api = match profile.kind {
+        ProviderKind::Anthropic => "anthropic",
+        ProviderKind::OpenAi | ProviderKind::OpenAiCompat => "openai",
+        ProviderKind::Gemini => "gemini",
+    }
+    .to_string();
+    // For OpenAI-compat profiles, prefix the model id with the
+    // profile name. Genai's service-target resolver routes
+    // `<profile_name>::<rest>` through the matching
+    // `OpenAiCompatEndpoint` (the one we registered from the profile's
+    // base_url). Without this prefix, genai falls back to its own
+    // namespace heuristic and picks the wrong adapter — often Ollama —
+    // which causes the obvious "502 Bad Gateway" against the local
+    // LM Studio / vLLM server.
+    //
+    // Native kinds (Anthropic / OpenAI / Gemini) leave the id alone;
+    // there auth flows via the env-var override on the resolver, and
+    // the native adapter takes the model name verbatim.
+    let id = match profile.kind {
+        ProviderKind::OpenAiCompat => {
+            // Avoid double-namespacing if the user already wrote
+            // `model = "lmstudio/..."` in providers.toml.
+            let stripped = profile
+                .model
+                .strip_prefix(&format!("{}/", profile.name))
+                .unwrap_or(&profile.model);
+            format!("{}/{}", profile.name, stripped)
+        }
+        _ => profile.model.clone(),
+    };
+    grain_agent_core::Model {
+        id,
+        name: profile.model.clone(),
+        api,
+        provider: profile.name.clone(),
+        base_url: profile.base_url.clone().unwrap_or_default(),
+        reasoning: false,
+        context_window: 32_768,
+        max_tokens: 4_096,
+        cost: grain_agent_core::Cost::default(),
+    }
 }

@@ -100,9 +100,28 @@ impl OpenAiCompatEndpoint {
     ) -> Self {
         OpenAiCompatEndpoint {
             id: id.into(),
-            base_url: base_url.into(),
+            base_url: normalize_base_url(base_url.into()),
             env_var: env_var.into(),
         }
+    }
+}
+
+fn normalize_base_url(raw: String) -> String {
+    let Ok(mut url) = reqwest13::Url::parse(&raw) else {
+        return ensure_trailing_slash(raw);
+    };
+    if !url.path().ends_with('/') {
+        let path = format!("{}/", url.path());
+        url.set_path(&path);
+    }
+    url.to_string()
+}
+
+fn ensure_trailing_slash(raw: String) -> String {
+    if raw.ends_with('/') {
+        raw
+    } else {
+        format!("{raw}/")
     }
 }
 
@@ -125,11 +144,7 @@ impl OpenAiCompatPreset {
         match self {
             OpenAiCompatPreset::None => Vec::new(),
             OpenAiCompatPreset::Common => vec![
-                OpenAiCompatEndpoint::new(
-                    "kimi",
-                    "https://api.moonshot.cn/v1",
-                    "MOONSHOT_API_KEY",
-                ),
+                OpenAiCompatEndpoint::new("kimi", "https://api.moonshot.cn/v1", "MOONSHOT_API_KEY"),
                 OpenAiCompatEndpoint::new(
                     "siliconflow",
                     "https://api.siliconflow.cn/v1",
@@ -197,5 +212,23 @@ impl ProviderRouter {
             .get(grain_provider)
             .cloned()
             .unwrap_or_else(|| grain_provider.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OpenAiCompatEndpoint;
+
+    #[test]
+    fn openai_compat_endpoint_normalizes_base_url_for_url_join() {
+        let endpoint = OpenAiCompatEndpoint::new("local", "http://127.0.0.1:1234/v1", "KEY");
+        assert_eq!(endpoint.base_url, "http://127.0.0.1:1234/v1/");
+    }
+
+    #[test]
+    fn openai_compat_endpoint_preserves_query_while_normalizing_path() {
+        let endpoint =
+            OpenAiCompatEndpoint::new("local", "http://127.0.0.1:1234/v1?tenant=a", "KEY");
+        assert_eq!(endpoint.base_url, "http://127.0.0.1:1234/v1/?tenant=a");
     }
 }

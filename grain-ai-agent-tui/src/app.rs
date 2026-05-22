@@ -5,8 +5,10 @@
 //! Keeping the state machine pure lets us unit-test render-relevant
 //! behavior without touching a real terminal or LLM.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::time::Instant;
+
+use ratatui::layout::Rect;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use grain_agent_core::{
@@ -14,8 +16,8 @@ use grain_agent_core::{
 };
 
 use crate::event::TuiEvent;
-use grain_llm_genai::ProviderProfile;
 use crate::theme::Theme;
+use grain_llm_genai::ProviderProfile;
 
 /// Top-level UI focus. Drives which pane receives key events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -46,10 +48,14 @@ pub enum Overlay {
     Skills(Vec<(String, String, bool)>),
     /// Theme picker — `focused` is the index into [`AppState::themes`].
     /// Up/Down navigate, Enter applies, Esc cancels.
-    ThemePicker { focused: usize },
+    ThemePicker {
+        focused: usize,
+    },
     /// Provider profile picker — `focused` is the index into
     /// [`AppState::providers`]. Same key model as ThemePicker.
-    ProviderPicker { focused: usize },
+    ProviderPicker {
+        focused: usize,
+    },
 }
 
 /// One row in the transcript. Kept as plain strings so the renderer can
@@ -98,6 +104,73 @@ pub struct RenderMetrics {
     pub visible_rows: usize,
 }
 
+/// One terminal row's worth of rendered transcript content, after our
+/// own soft-wrap pass. Captured by `ui::draw_transcript` and stashed in
+/// [`AppState::rendered_rows`] so mouse handlers can:
+/// 1. Translate `(terminal_row, terminal_col)` into a `(row_idx, col)`
+///    position inside the transcript buffer.
+/// 2. Extract substrings under a drag selection when the user releases
+///    the mouse button.
+#[derive(Debug, Clone)]
+pub struct RenderedRow {
+    pub text: String,
+    pub kind: TranscriptKind,
+}
+
+/// Active text selection inside the transcript. Coordinates are
+/// `(row_idx, col)` pairs, where `row_idx` indexes into
+/// [`AppState::rendered_rows`] (the current frame's wrapped rows).
+///
+/// `dragging = true` while the left mouse button is held down. Once
+/// the button is released, we keep the selection visible briefly (so
+/// the user sees what was copied) until the next user action clears
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub anchor: (usize, usize),
+    pub active: (usize, usize),
+    pub dragging: bool,
+}
+
+impl Selection {
+    /// Return `(min_row, max_row, min_col_at_min_row, max_col_at_max_row)`
+    /// in lexicographic-(row, col) order. The "min" row is the one
+    /// where the selection visually begins.
+    pub fn normalized(self) -> (usize, usize, usize, usize) {
+        if self.anchor <= self.active {
+            (self.anchor.0, self.active.0, self.anchor.1, self.active.1)
+        } else {
+            (self.active.0, self.anchor.0, self.active.1, self.anchor.1)
+        }
+    }
+
+    /// Highlight range `[lo, hi)` to apply to a single rendered row at
+    /// index `row_idx`. `row_len` clamps `hi` so the renderer never
+    /// asks for `&text[..past_end]`.
+    pub fn col_range_for_row(self, row_idx: usize, row_len: usize) -> Option<(usize, usize)> {
+        let (min_r, max_r, min_c, max_c) = self.normalized();
+        if row_idx < min_r || row_idx > max_r {
+            return None;
+        }
+        let (lo, hi) = if min_r == max_r {
+            // Single-row selection: clamp both ends within the row.
+            let l = min_c.min(row_len);
+            let h = max_c.min(row_len);
+            (l.min(h), l.max(h))
+        } else if row_idx == min_r {
+            (min_c.min(row_len), row_len)
+        } else if row_idx == max_r {
+            (0, max_c.min(row_len))
+        } else {
+            (0, row_len)
+        };
+        if lo == hi {
+            return None;
+        }
+        Some((lo, hi))
+    }
+}
+
 /// One entry in the slash-command palette. The renderer matches on
 /// `trigger` (always including the leading `/`) and prints
 /// `description` to the right.
@@ -129,6 +202,10 @@ pub const SLASH_CATALOG: &[CommandCatalogItem] = &[
     CommandCatalogItem {
         trigger: "/theme",
         description: "open the theme picker",
+    },
+    CommandCatalogItem {
+        trigger: "/provider",
+        description: "switch provider profile from providers.toml",
     },
     CommandCatalogItem {
         trigger: "/exit",
@@ -251,6 +328,30 @@ pub struct AppState {
     /// Set to true once `Command::Quit` has been issued. The main loop
     /// breaks on this.
     pub should_quit: bool,
+    /// Whether mouse capture is currently enabled. `true` = scroll
+    /// wheel works but the terminal can't drag-select text natively.
+    /// `false` = native selection / right-click-copy works but the
+    /// scroll wheel does nothing (PgUp/PgDn still scroll).
+    ///
+    /// Toggled at runtime by F6. The main loop in `run::event_loop`
+    /// observes changes and re-issues `EnableMouseCapture` /
+    /// `DisableMouseCapture` on the terminal.
+    pub mouse_capture_on: bool,
+    /// Wrapped transcript rows from the most recent frame. Built by
+    /// `ui::draw_transcript`, consumed by mouse handlers to translate
+    /// `(terminal_row, terminal_col)` into a position inside the
+    /// transcript and to extract text under a drag selection.
+    pub rendered_rows: RefCell<Vec<RenderedRow>>,
+    /// Bounding `Rect` of the transcript pane on the current frame.
+    /// Same write-side / read-side pattern as [`Self::render_metrics`]:
+    /// `ui::draw_transcript` writes it at frame start, mouse handlers
+    /// read it on the next event.
+    pub transcript_area: Cell<Rect>,
+    /// Active in-app text selection. `None` when there's no live
+    /// selection. Set on `MouseDown`, updated on `MouseDrag`,
+    /// finalized on `MouseUp` (the drag flag flips off but the
+    /// highlight stays until the next event).
+    pub selection: Option<Selection>,
 }
 
 /// Cap on the in-memory prompt history. Old entries get truncated
@@ -374,6 +475,10 @@ impl AppState {
             history_cursor: None,
             history_draft: String::new(),
             should_quit: false,
+            mouse_capture_on: true,
+            rendered_rows: RefCell::new(Vec::new()),
+            transcript_area: Cell::new(Rect::default()),
+            selection: None,
         };
         s.push(
             TranscriptKind::Info,
@@ -415,13 +520,46 @@ impl AppState {
         }
     }
 
+    /// Translate an absolute terminal `(row, col)` from a mouse event
+    /// into a `(rendered_row_idx, col)` position inside the
+    /// transcript's wrapped-row buffer. Returns `None` when the click
+    /// falls outside the transcript pane, or when no rendered_rows
+    /// are tracked yet (e.g. before the first frame).
+    ///
+    /// The mapping respects the active scroll offset (`scroll_offset`
+    /// when frozen, end-of-buffer when `follow_bottom`).
+    pub fn translate_mouse_to_rendered(&self, row: u16, col: u16) -> Option<(usize, usize)> {
+        let area = self.transcript_area.get();
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+        if row < area.y || col < area.x {
+            return None;
+        }
+        if row >= area.y + area.height || col >= area.x + area.width {
+            return None;
+        }
+        let visible_row = (row - area.y) as usize;
+        let visible_col = (col - area.x) as usize;
+        let rendered = self.rendered_rows.borrow();
+        let total = rendered.len();
+        let visible_rows = area.height as usize;
+        let skip = if self.follow_bottom {
+            total.saturating_sub(visible_rows)
+        } else {
+            self.scroll_offset.min(total.saturating_sub(visible_rows))
+        };
+        let row_idx = skip + visible_row;
+        let row_len = rendered.get(row_idx).map(|r| r.text.len()).unwrap_or(0);
+        let col_idx = visible_col.min(row_len);
+        Some((row_idx, col_idx))
+    }
+
     /// The slash palette is visible while the input has focus, no
     /// overlay is open, and the input starts with `/`. Hidden once the
     /// user submits — re-appears when they type `/` again.
     pub fn palette_visible(&self) -> bool {
-        self.focus == Focus::Input
-            && self.overlay.is_none()
-            && self.input.starts_with('/')
+        self.focus == Focus::Input && self.overlay.is_none() && self.input.starts_with('/')
     }
 
     /// Append a submitted prompt to history (dedup immediate repeats,
@@ -559,14 +697,69 @@ impl AppState {
                 self.scroll_down(amount as usize);
                 Vec::new()
             }
-            TuiEvent::ProviderApplied { profile, model, cost } => {
+            TuiEvent::MouseDown { row, col } => {
+                if let Some(pos) = self.translate_mouse_to_rendered(row, col) {
+                    self.selection = Some(Selection {
+                        anchor: pos,
+                        active: pos,
+                        dragging: true,
+                    });
+                }
+                Vec::new()
+            }
+            TuiEvent::MouseDrag { row, col } => {
+                let pos = self.translate_mouse_to_rendered(row, col);
+                if let (Some(p), Some(sel)) = (pos, self.selection.as_mut())
+                    && sel.dragging
+                {
+                    sel.active = p;
+                }
+                Vec::new()
+            }
+            TuiEvent::MouseUp => {
+                let copy_result = self.selection.as_mut().and_then(|sel| {
+                    if !sel.dragging {
+                        return None;
+                    }
+                    sel.dragging = false;
+                    let rendered = self.rendered_rows.borrow();
+                    let text = extract_selection(&rendered, *sel);
+                    if text.is_empty() {
+                        return Some(Err(String::from("empty")));
+                    }
+                    Some(write_clipboard(&text).map(|()| text))
+                });
+                match copy_result {
+                    Some(Ok(text)) => {
+                        self.push(
+                            TranscriptKind::Info,
+                            format!("(copied {} chars to clipboard)", text.chars().count()),
+                        );
+                    }
+                    Some(Err(msg)) if msg == "empty" => {
+                        // Click without drag — clear the selection so the
+                        // highlight goes away.
+                        self.selection = None;
+                    }
+                    Some(Err(e)) => {
+                        self.push(
+                            TranscriptKind::Info,
+                            format!("(clipboard unavailable: {e})"),
+                        );
+                    }
+                    None => {}
+                }
+                Vec::new()
+            }
+            TuiEvent::ProviderApplied {
+                profile,
+                model,
+                cost,
+            } => {
                 // Mark this profile as the active one so the picker's
                 // ✓ moves immediately. Match by name so applies that
                 // happened out-of-band (e.g. CLI) still align.
-                self.current_provider_idx = self
-                    .providers
-                    .iter()
-                    .position(|p| p.name == profile);
+                self.current_provider_idx = self.providers.iter().position(|p| p.name == profile);
                 self.model_id = model.clone();
                 self.model_cost = cost;
                 self.push(
@@ -663,6 +856,24 @@ impl AppState {
                 );
                 Vec::new()
             }
+            KeyCode::F(6) => {
+                // Toggle terminal-level mouse capture so the user can
+                // pick between scroll-wheel (on) and native text
+                // selection / right-click-copy (off). The main loop
+                // in `run::event_loop` notices the flag change and
+                // re-applies `EnableMouseCapture` / `DisableMouseCapture`
+                // on the next iteration.
+                self.mouse_capture_on = !self.mouse_capture_on;
+                self.push(
+                    TranscriptKind::Info,
+                    if self.mouse_capture_on {
+                        "(mouse: wheel scroll · drag-select needs Option/Shift)".into()
+                    } else {
+                        "(mouse: native selection · wheel disabled, use PgUp/PgDn)".into()
+                    },
+                );
+                Vec::new()
+            }
             KeyCode::Tab => {
                 // While the slash palette is open, Tab completes the
                 // current input to the focused suggestion's trigger
@@ -720,8 +931,7 @@ impl AppState {
                 }
                 KeyCode::Down => {
                     if matches_len > 0 {
-                        self.palette_focused =
-                            (self.palette_focused + 1).min(matches_len - 1);
+                        self.palette_focused = (self.palette_focused + 1).min(matches_len - 1);
                     }
                     return Vec::new();
                 }
@@ -1224,6 +1434,50 @@ fn next_char_boundary(s: &str, idx: usize) -> usize {
     i.min(s.len())
 }
 
+/// Clamp a byte index to a UTF-8 char boundary inside `s`. Snaps
+/// **down** so we never slice past `idx`. Used by selection extraction
+/// + render highlight to keep multi-byte chars intact.
+fn clamp_to_char_boundary(s: &str, idx: usize) -> usize {
+    let idx = idx.min(s.len());
+    if s.is_char_boundary(idx) {
+        idx
+    } else {
+        prev_char_boundary(s, idx)
+    }
+}
+
+/// Walk the wrapped-row buffer between `selection.anchor` and `active`
+/// and pluck out the substring under the highlight. Newlines join
+/// rows. Pure — testable without a real clipboard.
+pub fn extract_selection(rendered: &[RenderedRow], selection: Selection) -> String {
+    let (min_r, max_r, _, _) = selection.normalized();
+    let mut out = String::new();
+    for idx in min_r..=max_r {
+        let Some(row) = rendered.get(idx) else {
+            continue;
+        };
+        let Some((lo, hi)) = selection.col_range_for_row(idx, row.text.len()) else {
+            continue;
+        };
+        let lo = clamp_to_char_boundary(&row.text, lo);
+        let hi = clamp_to_char_boundary(&row.text, hi);
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&row.text[lo..hi]);
+    }
+    out
+}
+
+/// Write `text` to the OS clipboard via `arboard`. Returns the error
+/// stringified — callers surface it to the user via a transcript info
+/// line rather than propagating, because clipboard failure shouldn't
+/// abort the agent loop.
+pub fn write_clipboard(text: &str) -> Result<(), String> {
+    let mut clip = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clip.set_text(text.to_string()).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1328,7 +1582,10 @@ mod tests {
         assert!(s.input.is_empty());
         assert_eq!(s.cursor, 0);
         // Last transcript line is the user prompt.
-        assert_eq!(s.transcript.last().unwrap().kind, TranscriptKind::UserPrompt);
+        assert_eq!(
+            s.transcript.last().unwrap().kind,
+            TranscriptKind::UserPrompt
+        );
     }
 
     #[test]
@@ -1359,10 +1616,11 @@ mod tests {
         }
         let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
         assert_eq!(cmds, vec![Command::Reset]);
-        assert!(s
-            .transcript
-            .iter()
-            .any(|l| l.text.contains("transcript cleared")));
+        assert!(
+            s.transcript
+                .iter()
+                .any(|l| l.text.contains("transcript cleared"))
+        );
     }
 
     #[test]
@@ -1373,10 +1631,11 @@ mod tests {
         }
         let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
         assert!(cmds.is_empty());
-        assert!(s
-            .transcript
-            .iter()
-            .any(|l| l.text.contains("unknown command")));
+        assert!(
+            s.transcript
+                .iter()
+                .any(|l| l.text.contains("unknown command"))
+        );
     }
 
     #[test]
@@ -1613,8 +1872,7 @@ mod tests {
         assert!(
             s.transcript
                 .iter()
-                .any(|l| l.text.contains("OAuth")
-                    && l.text.contains("login flow not yet wired")),
+                .any(|l| l.text.contains("OAuth") && l.text.contains("login flow not yet wired")),
             "user is told why nothing happened"
         );
     }
@@ -1828,14 +2086,16 @@ mod tests {
             is_error: false,
         }));
         assert_eq!(s.pending_tool_calls, 0);
-        assert!(s
-            .transcript
-            .iter()
-            .any(|l| l.kind == TranscriptKind::ToolCallStart));
-        assert!(s
-            .transcript
-            .iter()
-            .any(|l| l.kind == TranscriptKind::ToolCallEnd));
+        assert!(
+            s.transcript
+                .iter()
+                .any(|l| l.kind == TranscriptKind::ToolCallStart)
+        );
+        assert!(
+            s.transcript
+                .iter()
+                .any(|l| l.kind == TranscriptKind::ToolCallEnd)
+        );
     }
 
     #[test]
@@ -1916,7 +2176,10 @@ mod tests {
         s.on_event(TuiEvent::Key(press(KeyCode::Char('/'))));
         assert!(s.palette_visible());
         s.focus = Focus::Transcript;
-        assert!(!s.palette_visible(), "hidden when input pane is not focused");
+        assert!(
+            !s.palette_visible(),
+            "hidden when input pane is not focused"
+        );
         s.focus = Focus::Input;
         s.overlay = Some(Overlay::Help);
         assert!(!s.palette_visible(), "hidden when an overlay covers UI");
@@ -1941,6 +2204,200 @@ mod tests {
         let narrowed = s.palette_matches();
         assert_eq!(narrowed.len(), 1);
         assert_eq!(narrowed[0].trigger, "/theme");
+    }
+
+    // ---- Selection primitives -----------------------------------
+
+    fn rrows(items: &[(&str, TranscriptKind)]) -> Vec<RenderedRow> {
+        items
+            .iter()
+            .map(|(t, k)| RenderedRow {
+                text: (*t).to_string(),
+                kind: *k,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn selection_normalized_orders_by_lexicographic_row_col() {
+        let s = Selection {
+            anchor: (3, 4),
+            active: (1, 9),
+            dragging: false,
+        };
+        // (1,9) < (3,4) → min comes from active.
+        assert_eq!(s.normalized(), (1, 3, 9, 4));
+    }
+
+    #[test]
+    fn col_range_returns_none_outside_selected_rows() {
+        let s = Selection {
+            anchor: (2, 0),
+            active: (4, 5),
+            dragging: false,
+        };
+        assert!(s.col_range_for_row(1, 100).is_none());
+        assert!(s.col_range_for_row(5, 100).is_none());
+    }
+
+    #[test]
+    fn col_range_single_row_uses_min_max_col() {
+        let s = Selection {
+            anchor: (2, 8),
+            active: (2, 3),
+            dragging: false,
+        };
+        assert_eq!(s.col_range_for_row(2, 50), Some((3, 8)));
+    }
+
+    #[test]
+    fn col_range_multirow_first_row_extends_to_end() {
+        let s = Selection {
+            anchor: (2, 4),
+            active: (5, 10),
+            dragging: false,
+        };
+        assert_eq!(s.col_range_for_row(2, 80), Some((4, 80)));
+        assert_eq!(s.col_range_for_row(3, 80), Some((0, 80)));
+        assert_eq!(s.col_range_for_row(5, 80), Some((0, 10)));
+    }
+
+    #[test]
+    fn col_range_empty_selection_returns_none() {
+        let s = Selection {
+            anchor: (2, 5),
+            active: (2, 5),
+            dragging: false,
+        };
+        assert!(s.col_range_for_row(2, 50).is_none());
+    }
+
+    #[test]
+    fn extract_selection_single_row_substring() {
+        let rendered = rrows(&[("hello world", TranscriptKind::AssistantText)]);
+        let s = Selection {
+            anchor: (0, 6),
+            active: (0, 11),
+            dragging: false,
+        };
+        assert_eq!(extract_selection(&rendered, s), "world");
+    }
+
+    #[test]
+    fn extract_selection_multirow_joins_with_newlines() {
+        let rendered = rrows(&[
+            ("first line", TranscriptKind::AssistantText),
+            ("middle row", TranscriptKind::AssistantText),
+            ("last row", TranscriptKind::AssistantText),
+        ]);
+        let s = Selection {
+            anchor: (0, 6),
+            active: (2, 4),
+            dragging: false,
+        };
+        // Row 0: "line" (from col 6 to end "first line".len()=10)
+        // Row 1: "middle row" whole
+        // Row 2: "last" (cols 0..4)
+        assert_eq!(extract_selection(&rendered, s), "line\nmiddle row\nlast");
+    }
+
+    #[test]
+    fn extract_selection_handles_multibyte_chars() {
+        // 4 Han chars × 3 bytes each = 12 bytes total.
+        let rendered = rrows(&[("中文测试", TranscriptKind::AssistantText)]);
+        // Ask for byte-range that lands in the middle of a char;
+        // clamp must keep the slice valid (and shrink to the boundary).
+        let s = Selection {
+            anchor: (0, 2),
+            active: (0, 7),
+            dragging: false,
+        };
+        let out = extract_selection(&rendered, s);
+        // Must be valid UTF-8 (i.e. not panic).
+        assert!(out.is_empty() || out.chars().count() > 0);
+    }
+
+    #[test]
+    fn mouse_down_starts_selection_when_inside_transcript() {
+        let mut s = fresh();
+        // Pretend the transcript pane sits at (x=0, y=1) with size 80x20
+        // and that one row is rendered.
+        s.transcript_area.set(Rect::new(0, 1, 80, 20));
+        *s.rendered_rows.borrow_mut() = rrows(&[("abcdef", TranscriptKind::AssistantText)]);
+        s.on_event(TuiEvent::MouseDown { row: 1, col: 2 });
+        let sel = s.selection.expect("selection must be set");
+        assert!(sel.dragging);
+        assert_eq!(sel.anchor, sel.active);
+        assert_eq!(sel.anchor, (0, 2));
+    }
+
+    #[test]
+    fn mouse_drag_extends_active_only_while_dragging() {
+        let mut s = fresh();
+        s.transcript_area.set(Rect::new(0, 0, 80, 20));
+        *s.rendered_rows.borrow_mut() = rrows(&[
+            ("row0", TranscriptKind::AssistantText),
+            ("row1 longer text", TranscriptKind::AssistantText),
+        ]);
+        s.on_event(TuiEvent::MouseDown { row: 0, col: 1 });
+        s.on_event(TuiEvent::MouseDrag { row: 1, col: 10 });
+        let sel = s.selection.expect("present");
+        assert_eq!(sel.anchor, (0, 1));
+        assert_eq!(sel.active, (1, 10));
+        assert!(sel.dragging);
+    }
+
+    #[test]
+    fn mouse_drag_outside_transcript_is_ignored() {
+        let mut s = fresh();
+        s.transcript_area.set(Rect::new(0, 0, 80, 20));
+        *s.rendered_rows.borrow_mut() = rrows(&[("row0", TranscriptKind::AssistantText)]);
+        s.on_event(TuiEvent::MouseDown { row: 0, col: 1 });
+        // y=99 is past the bottom of the 20-row area.
+        s.on_event(TuiEvent::MouseDrag { row: 99, col: 50 });
+        let sel = s.selection.expect("present");
+        // Active wasn't updated.
+        assert_eq!(sel.active, (0, 1));
+    }
+
+    #[test]
+    fn mouse_up_with_empty_drag_clears_selection() {
+        let mut s = fresh();
+        s.transcript_area.set(Rect::new(0, 0, 80, 20));
+        *s.rendered_rows.borrow_mut() = rrows(&[("row0", TranscriptKind::AssistantText)]);
+        s.on_event(TuiEvent::MouseDown { row: 0, col: 1 });
+        s.on_event(TuiEvent::MouseUp);
+        assert!(s.selection.is_none(), "click-without-drag clears selection");
+    }
+
+    #[test]
+    fn f6_toggles_mouse_capture_flag() {
+        let mut s = fresh();
+        assert!(s.mouse_capture_on, "default is capture-on");
+        s.on_event(TuiEvent::Key(press(KeyCode::F(6))));
+        assert!(!s.mouse_capture_on);
+        s.on_event(TuiEvent::Key(press(KeyCode::F(6))));
+        assert!(s.mouse_capture_on);
+    }
+
+    #[test]
+    fn f6_pushes_info_line_into_transcript() {
+        let mut s = fresh();
+        let before = s.transcript.len();
+        s.on_event(TuiEvent::Key(press(KeyCode::F(6))));
+        assert!(s.transcript.len() > before);
+        assert_eq!(s.transcript.last().unwrap().kind, TranscriptKind::Info);
+    }
+
+    #[test]
+    fn slash_provider_appears_in_palette_catalog() {
+        // Regression: `/provider` was handled in `on_slash_command`
+        // but missing from `SLASH_CATALOG`, so the dropdown didn't
+        // surface it. Lock it in.
+        assert!(
+            SLASH_CATALOG.iter().any(|c| c.trigger == "/provider"),
+            "/provider must be discoverable via the slash palette"
+        );
     }
 
     #[test]
@@ -2068,14 +2525,26 @@ mod tests {
     fn resolve_cny_rate_explicit_cli_wins() {
         assert_eq!(resolve_cny_rate(Some(6.85), None), Some(6.85));
         // CLI also wins over a zh locale.
-        assert_eq!(resolve_cny_rate(Some(6.85), Some("zh_CN.UTF-8")), Some(6.85));
+        assert_eq!(
+            resolve_cny_rate(Some(6.85), Some("zh_CN.UTF-8")),
+            Some(6.85)
+        );
     }
 
     #[test]
     fn resolve_cny_rate_auto_from_zh_locale() {
-        assert_eq!(resolve_cny_rate(None, Some("zh_CN.UTF-8")), Some(DEFAULT_CNY_RATE));
-        assert_eq!(resolve_cny_rate(None, Some("zh_TW")), Some(DEFAULT_CNY_RATE));
-        assert_eq!(resolve_cny_rate(None, Some("ZH_HK")), Some(DEFAULT_CNY_RATE));
+        assert_eq!(
+            resolve_cny_rate(None, Some("zh_CN.UTF-8")),
+            Some(DEFAULT_CNY_RATE)
+        );
+        assert_eq!(
+            resolve_cny_rate(None, Some("zh_TW")),
+            Some(DEFAULT_CNY_RATE)
+        );
+        assert_eq!(
+            resolve_cny_rate(None, Some("ZH_HK")),
+            Some(DEFAULT_CNY_RATE)
+        );
     }
 
     #[test]
@@ -2090,7 +2559,10 @@ mod tests {
         // Zero / negative explicit override falls through to locale
         // detection rather than being honored (defensive — `--cny-rate 0`
         // is almost certainly a typo).
-        assert_eq!(resolve_cny_rate(Some(0.0), Some("zh_CN")), Some(DEFAULT_CNY_RATE));
+        assert_eq!(
+            resolve_cny_rate(Some(0.0), Some("zh_CN")),
+            Some(DEFAULT_CNY_RATE)
+        );
         assert_eq!(resolve_cny_rate(Some(-1.0), None), None);
     }
 

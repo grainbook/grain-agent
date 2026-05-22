@@ -7,7 +7,8 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, ValueEnum};
+use clap::parser::ValueSource;
+use clap::{CommandFactory, Parser, ValueEnum};
 use grain_llm_genai::OpenAiCompatPreset;
 
 /// `grain-tui` — ratatui terminal UI on top of the headless coding agent.
@@ -126,6 +127,37 @@ pub struct Args {
     /// override or to opt-in on non-zh locales.
     #[arg(long)]
     pub cny_rate: Option<f64>,
+}
+
+impl Args {
+    /// Return the set of clap argument ids whose values came from the
+    /// user (not the clap-built-in default). Used by
+    /// [`crate::config_apply::apply_config_to_args`] to avoid overriding
+    /// flags the user explicitly passed via the command line.
+    ///
+    /// Mirrors the helper on `grain_ai_agent_headless::cli::Args` —
+    /// kept in lockstep so a config field with the same name behaves
+    /// identically across both binaries.
+    pub fn explicit_arg_ids(argv: &[String]) -> std::collections::HashSet<String> {
+        let cmd = Args::command();
+        // Re-parse so we can inspect `value_source` per-arg. The
+        // caller has already verified `argv` parses; we discard the
+        // result and only keep the ArgMatches.
+        let matches = match cmd.try_get_matches_from(argv) {
+            Ok(m) => m,
+            Err(_) => return std::collections::HashSet::new(),
+        };
+        matches
+            .ids()
+            .filter_map(|id| {
+                let name = id.as_str();
+                match matches.value_source(name) {
+                    Some(ValueSource::CommandLine) => Some(name.to_string()),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

@@ -53,8 +53,8 @@ fn env_resolver_resolve_reads_env() {
     unsafe {
         std::env::set_var("GRAIN_TEST_SET_KEY_ABC", "sk-test-123");
     }
-    let r = EnvKeyResolver::default_mapping()
-        .with_override("test-provider", "GRAIN_TEST_SET_KEY_ABC");
+    let r =
+        EnvKeyResolver::default_mapping().with_override("test-provider", "GRAIN_TEST_SET_KEY_ABC");
     assert_eq!(r.resolve("test-provider").as_deref(), Some("sk-test-123"));
     unsafe {
         std::env::remove_var("GRAIN_TEST_SET_KEY_ABC");
@@ -66,15 +66,24 @@ fn openai_compat_preset_common_includes_kimi_and_siliconflow() {
     let endpoints = OpenAiCompatPreset::Common.endpoints();
     let ids: Vec<&str> = endpoints.iter().map(|e| e.id.as_str()).collect();
     assert!(ids.contains(&"kimi"), "preset includes kimi: {ids:?}");
-    assert!(ids.contains(&"siliconflow"), "preset includes siliconflow: {ids:?}");
+    assert!(
+        ids.contains(&"siliconflow"),
+        "preset includes siliconflow: {ids:?}"
+    );
 
     // Native-supported providers should NOT be in the OpenAI-compat preset
     // (otherwise the resolver would override native routing).
-    assert!(!ids.contains(&"deepseek"), "deepseek is native in genai 0.5");
-    assert!(!ids.contains(&"zhipu"), "zhipu is native (BigModel) in genai 0.5");
+    assert!(
+        !ids.contains(&"deepseek"),
+        "deepseek is native in genai 0.5"
+    );
+    assert!(
+        !ids.contains(&"zhipu"),
+        "zhipu is native (BigModel) in genai 0.5"
+    );
 
     let kimi = endpoints.iter().find(|e| e.id == "kimi").unwrap();
-    assert_eq!(kimi.base_url, "https://api.moonshot.cn/v1");
+    assert_eq!(kimi.base_url, "https://api.moonshot.cn/v1/");
     assert_eq!(kimi.env_var, "MOONSHOT_API_KEY");
 }
 
@@ -87,7 +96,7 @@ fn openai_compat_preset_none_is_empty() {
 fn openai_compat_endpoint_constructor() {
     let e = OpenAiCompatEndpoint::new("foo", "https://foo.example/v1", "FOO_KEY");
     assert_eq!(e.id, "foo");
-    assert_eq!(e.base_url, "https://foo.example/v1");
+    assert_eq!(e.base_url, "https://foo.example/v1/");
     assert_eq!(e.env_var, "FOO_KEY");
 }
 

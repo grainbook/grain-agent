@@ -18,6 +18,7 @@ toml = { workspace = true }
 genai = { workspace = true }
 grain-agent-core = { workspace = true }
 grain-llm-models = { workspace = true }
+reqwest13 = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

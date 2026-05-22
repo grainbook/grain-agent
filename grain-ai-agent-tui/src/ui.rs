@@ -19,11 +19,9 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{
-    AppState, Focus, Overlay, SLASH_CATALOG, TranscriptKind, TranscriptLine,
-};
-use grain_llm_genai::{ProviderKind, ProviderProfile};
+use crate::app::{AppState, Focus, Overlay, SLASH_CATALOG, TranscriptKind};
 use crate::theme::{Palette, Theme, ThemeSource};
+use grain_llm_genai::{ProviderKind, ProviderProfile};
 
 /// Cap on visible palette rows. Beyond this we slide a window of rows
 /// around `palette_focused`.
@@ -129,29 +127,52 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &Pa
 }
 
 fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &Palette) {
-    // Render-time filter: when thinking is collapsed, drop every
-    // `ThinkingText` row entirely. The underlying transcript still
-    // owns the lines so a later F5 toggle brings them back without
-    // re-asking the model.
-    let lines: Vec<Line> = state
-        .transcript
-        .iter()
-        .filter(|l| state.show_thinking || l.kind != TranscriptKind::ThinkingText)
-        .flat_map(|line| split_for_render(line, palette))
-        .collect();
+    // Stash the pane bounds so mouse handlers can translate event
+    // coordinates back into rendered-row indices.
+    state.transcript_area.set(area);
+    let width = area.width as usize;
 
-    // Pre-slicing on logical lines is wrong once `Paragraph::wrap`
-    // gets involved — a single logical line can occupy several
-    // rendered rows after word wrap. Instead: hand every line to
-    // the Paragraph, ask for its wrapped row count, then `.scroll`
-    // to either:
-    //   - the latest bottom (tail / follow mode, default), or
-    //   - an absolute frozen row when the user has paged up.
-    // Writing the metrics back into `state.render_metrics` lets
-    // `on_key` handle PgUp / PgDn / End / Home correctly when they
-    // need to know about the current wrapped row count.
-    let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
-    let total_rows = paragraph.line_count(area.width);
+    // Pre-wrap with `textwrap::wrap` instead of relying on
+    // `Paragraph::wrap`: we need the wrapped output as plain text so
+    // mouse handlers + selection highlighting can compute precise
+    // (row, col) coordinates. Doing our own wrap also lets us track
+    // each row's `TranscriptKind` for per-row styling.
+    let mut rendered: Vec<crate::app::RenderedRow> = Vec::new();
+    for line in &state.transcript {
+        if !state.show_thinking && line.kind == TranscriptKind::ThinkingText {
+            continue;
+        }
+        let prefix = prefix_for_kind(line.kind);
+        let continuation = "  ";
+        for (seg_i, segment) in line.text.split('\n').enumerate() {
+            let initial_prefix = if seg_i == 0 { prefix } else { continuation };
+            // Reserve room for the prefix so wrapped chunks fit the
+            // visible column budget. `inner` must be ≥ 1 to keep
+            // textwrap from looping on a width of 0.
+            let inner = width.saturating_sub(initial_prefix.len()).max(1);
+            let wrapped: Vec<String> = if segment.is_empty() {
+                vec![String::new()]
+            } else {
+                textwrap::wrap(segment, inner)
+                    .into_iter()
+                    .map(|c| c.into_owned())
+                    .collect()
+            };
+            for (frag_i, frag) in wrapped.into_iter().enumerate() {
+                let p = if frag_i == 0 {
+                    initial_prefix
+                } else {
+                    continuation
+                };
+                rendered.push(crate::app::RenderedRow {
+                    text: format!("{p}{frag}"),
+                    kind: line.kind,
+                });
+            }
+        }
+    }
+
+    let total_rows = rendered.len();
     let visible = area.height as usize;
     state.render_metrics.set(crate::app::RenderMetrics {
         total_rows,
@@ -160,30 +181,66 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette:
     let skip = if state.follow_bottom {
         total_rows.saturating_sub(visible)
     } else {
-        // Clamp to a sane range so a stale offset can't push the
-        // view past the new end.
-        state
-            .scroll_offset
-            .min(total_rows.saturating_sub(visible))
+        state.scroll_offset.min(total_rows.saturating_sub(visible))
     };
-    frame.render_widget(paragraph.scroll((skip as u16, 0)), area);
+
+    // Build the visible ratatui `Line`s with selection-aware
+    // highlighting. Only the slice [skip, skip+visible) renders.
+    let lines: Vec<Line> = rendered
+        .iter()
+        .enumerate()
+        .skip(skip)
+        .take(visible)
+        .map(|(idx, row)| build_line(row, idx, state.selection, palette))
+        .collect();
+
+    // Hand the wrapped rows over to AppState — mouse handlers consume
+    // them on the next event (translate / extract-on-mouse-up).
+    state.rendered_rows.replace(rendered);
+
+    // No `.wrap()` here — we already wrapped to `area.width` so
+    // ratatui's word-wrap is unnecessary (and would re-wrap our
+    // already-sized rows).
+    let paragraph = Paragraph::new(Text::from(lines));
+    frame.render_widget(paragraph, area);
 }
 
-fn split_for_render(line: &TranscriptLine, palette: &Palette) -> Vec<Line<'static>> {
-    let style = style_for_kind(line.kind, palette);
-    let prefix = prefix_for_kind(line.kind);
-    let mut lines = Vec::new();
-    for (i, segment) in line.text.split('\n').enumerate() {
-        if i == 0 {
-            lines.push(Line::from(vec![
-                Span::styled(prefix.to_string(), style.add_modifier(Modifier::BOLD)),
-                Span::styled(segment.to_string(), style),
-            ]));
-        } else {
-            lines.push(Line::from(Span::styled(format!("  {segment}"), style)));
+/// Build one rendered `Line` with the kind's base style + optional
+/// selection-background highlight.
+fn build_line(
+    row: &crate::app::RenderedRow,
+    idx: usize,
+    selection: Option<crate::app::Selection>,
+    palette: &Palette,
+) -> Line<'static> {
+    let style = style_for_kind(row.kind, palette);
+    let highlight = selection.and_then(|s| s.col_range_for_row(idx, row.text.len()));
+    let Some((lo, hi)) = highlight else {
+        return Line::from(Span::styled(row.text.clone(), style));
+    };
+    // Snap to UTF-8 char boundaries; multi-byte chars must stay intact.
+    let lo = clamp_char_boundary(&row.text, lo);
+    let hi = clamp_char_boundary(&row.text, hi);
+    let highlight_style = style.bg(palette.surface);
+    Line::from(vec![
+        Span::styled(row.text[..lo].to_string(), style),
+        Span::styled(row.text[lo..hi].to_string(), highlight_style),
+        Span::styled(row.text[hi..].to_string(), style),
+    ])
+}
+
+fn clamp_char_boundary(s: &str, idx: usize) -> usize {
+    let idx = idx.min(s.len());
+    if s.is_char_boundary(idx) {
+        idx
+    } else {
+        // Walk back to the nearest boundary.
+        let mut i = idx.saturating_sub(1);
+        while i > 0 && !s.is_char_boundary(i) {
+            i -= 1;
         }
+        i
     }
-    lines
 }
 
 fn style_for_kind(kind: TranscriptKind, palette: &Palette) -> Style {
@@ -542,7 +599,11 @@ fn draw_overlay(
 
     let (title, body): (&str, OverlayBody) = match overlay {
         Overlay::Help => ("help", OverlayBody::Text(HELP_TEXT.to_string())),
-        Overlay::Doctor { report, query, scroll } => {
+        Overlay::Doctor {
+            report,
+            query,
+            scroll,
+        } => {
             return draw_doctor(frame, inner, report, query, *scroll, palette);
         }
         Overlay::Skills(skills) => ("skills", OverlayBody::Skills(skills)),
@@ -593,9 +654,7 @@ fn draw_overlay(
                     .map(|(name, desc, disabled)| {
                         let mut spans = vec![Span::styled(
                             format!("• {name}"),
-                            Style::default()
-                                .fg(palette.fg)
-                                .add_modifier(Modifier::BOLD),
+                            Style::default().fg(palette.fg).add_modifier(Modifier::BOLD),
                         )];
                         if *disabled {
                             spans.push(Span::styled(
@@ -697,8 +756,7 @@ fn draw_doctor(
         report
             .lines()
             .filter(|line| {
-                line.trim().starts_with("===")
-                    || line.to_ascii_lowercase().contains(&needle)
+                line.trim().starts_with("===") || line.to_ascii_lowercase().contains(&needle)
             })
             .collect()
     };
@@ -723,9 +781,7 @@ fn draw_doctor(
             } else if needle.is_empty() {
                 Style::default().fg(palette.fg)
             } else if line.to_ascii_lowercase().contains(&needle) {
-                Style::default()
-                    .fg(palette.fg)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(palette.fg).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(palette.fg)
             };
@@ -803,15 +859,7 @@ fn draw_provider_picker(
             .providers
             .iter()
             .enumerate()
-            .map(|(i, p)| {
-                provider_picker_row(
-                    i,
-                    p,
-                    focused,
-                    state.current_provider_idx,
-                    palette,
-                )
-            })
+            .map(|(i, p)| provider_picker_row(i, p, focused, state.current_provider_idx, palette))
             .collect();
         let visible = body_area.height as usize;
         let total = lines.len();
@@ -856,11 +904,7 @@ fn provider_picker_row(
     let status_tag = if usable {
         match &profile.auth {
             grain_llm_genai::ProviderAuth::ApiKey { env } => {
-                if std::env::var(env)
-                    .ok()
-                    .filter(|v| !v.is_empty())
-                    .is_some()
-                {
+                if std::env::var(env).ok().filter(|v| !v.is_empty()).is_some() {
                     "[ready]".to_string()
                 } else {
                     "[no key]".to_string()
@@ -998,6 +1042,7 @@ const HELP_TEXT: &str = "\
   Ctrl-C          abort current turn while streaming; quit when idle
   F1 / F2 / F3    help · doctor · skills
   F5              toggle thinking visibility (show/hide reasoning lines)
+  F6              toggle mouse capture (scroll wheel vs native text selection)
   ←/→/Home/End    move cursor in input
   ↑/↓             history (no palette) · navigate (palette / picker)
   PgUp / PgDn     scroll transcript (freezes view; PgDn catches up to tail)
