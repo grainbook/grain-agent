@@ -34,6 +34,7 @@ pub mod extensions;
 pub mod migrations;
 pub mod plugin_manager;
 pub mod plugin_spec;
+pub mod plugin_ui;
 pub mod plugins;
 pub mod prompt;
 pub mod runtime;
@@ -81,6 +82,7 @@ pub use plugin_spec::{
     PluginSpec, PluginSpecFile, SourceKind, SyncReport, default_spec_path, detect_source_kind,
     load_plugin_spec, resolve_local_src, sync_plugins,
 };
+pub use plugin_ui::{FormField, ModalSeverity, OverlayDescriptor, UiCommand};
 pub use plugin_manager::{
     InstallOutcome, ManagerError, RemoveOutcome, UpdateOutcome, install, remove, update,
 };

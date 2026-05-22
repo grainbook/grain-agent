@@ -38,6 +38,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::plugin_ui::UiCommand;
 use crate::skills::{SkillsError, find_skills};
 use grain_agent_harness::Skill;
 
@@ -60,6 +61,22 @@ pub struct PluginManifest {
     pub description: String,
     #[serde(default)]
     pub author: String,
+    /// Declarative UI extensions. Each entry registers a footer hint
+    /// + key binding on an existing overlay (today: `"plugins"`);
+    /// pressing the key dispatches to the named Rhai handler.
+    ///
+    /// TOML form (note `[[ui_command]]`, singular, to match
+    /// `array-of-tables` convention):
+    ///
+    /// ```toml
+    /// [[ui_command]]
+    /// target  = "plugins"
+    /// key     = "i"
+    /// label   = "Install"
+    /// handler = "ui_install_prompt"
+    /// ```
+    #[serde(default, rename = "ui_command")]
+    pub ui_commands: Vec<UiCommand>,
 }
 
 /// One discovered plugin: parsed manifest + the directory it lives in.
@@ -636,6 +653,45 @@ mod tests {
         assert!(out.contains("base policy"));
         assert!(out.contains("\n## Plugin: rust-helper\n"));
         assert!(out.contains("always run clippy"));
+    }
+
+    #[test]
+    fn manifest_parses_ui_command_blocks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_root = tmp.path().join("uihost");
+        write_manifest(
+            &plugin_root,
+            "uihost",
+            r#"
+[[ui_command]]
+target = "plugins"
+key = "i"
+label = "Install"
+handler = "ui_install_prompt"
+
+[[ui_command]]
+target = "plugins"
+key = "d"
+label = "Remove"
+handler = "ui_remove_prompt"
+"#,
+        );
+        let plugins = discover_plugins(tmp.path());
+        assert_eq!(plugins.len(), 1);
+        let cmds = &plugins[0].manifest.ui_commands;
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0].key, "i");
+        assert_eq!(cmds[0].handler, "ui_install_prompt");
+        assert_eq!(cmds[1].key, "d");
+        assert_eq!(cmds[1].handler, "ui_remove_prompt");
+    }
+
+    #[test]
+    fn manifest_without_ui_commands_yields_empty_vec() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_plugin(tmp.path(), "noui");
+        let plugins = discover_plugins(tmp.path());
+        assert!(plugins[0].manifest.ui_commands.is_empty());
     }
 
     #[test]
