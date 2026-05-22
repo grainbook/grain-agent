@@ -391,6 +391,10 @@ pub enum Command {
 pub struct RenderMetrics {
     pub total_rows: usize,
     pub visible_rows: usize,
+    /// Full terminal area from the most recent frame. Used by
+    /// `set_overlay` to size effect rects when the exact overlay
+    /// bounds aren't cheaply available.
+    pub full_area: Rect,
 }
 
 /// One terminal row's worth of rendered transcript content, after our
@@ -904,6 +908,35 @@ impl AppState {
         &self.themes[self.current_theme_idx]
     }
 
+    /// Transition the overlay, pushing open / close effects when the
+    /// presence changes (None→Some or Some→None).
+    pub fn set_overlay(&mut self, next: Option<Overlay>) {
+        use crate::anim::{EffectKind, FxDuration, fx};
+        let palette = &self.themes[self.current_theme_idx].palette;
+        match (&self.overlay, &next) {
+            (None, Some(_)) => {
+                // Opening — fade from background color over full area.
+                self.effects.clear_kind(EffectKind::OverlayClose);
+                self.effects.push(
+                    EffectKind::OverlayOpen,
+                    fx::fade_from_fg(palette.surface, FxDuration::from_millis(200)),
+                    self.render_metrics.get().full_area,
+                );
+            }
+            (Some(_), None) => {
+                // Closing — fade to background color.
+                self.effects.clear_kind(EffectKind::OverlayOpen);
+                self.effects.push(
+                    EffectKind::OverlayClose,
+                    fx::fade_to_fg(palette.surface, FxDuration::from_millis(150)),
+                    self.render_metrics.get().full_area,
+                );
+            }
+            _ => {}
+        }
+        self.overlay = next;
+    }
+
     /// Shared scroll-up step. Used by PgUp and mouse-wheel-up. Same
     /// semantics: tail-follow → freeze at current bottom, then step
     /// back `amount` rows. Already-frozen → just step back.
@@ -1293,22 +1326,22 @@ impl AppState {
                 if let Some(Overlay::Doctor { query, scroll, .. }) = &self.overlay {
                     let query = query.clone();
                     let scroll = *scroll;
-                    self.overlay = Some(Overlay::Doctor {
+                    self.set_overlay(Some(Overlay::Doctor {
                         report: text,
                         query,
                         scroll,
-                    });
+                    }));
                 } else {
-                    self.overlay = Some(Overlay::Doctor {
+                    self.set_overlay(Some(Overlay::Doctor {
                         report: text,
                         query: String::new(),
                         scroll: 0,
-                    });
+                    }));
                 }
                 Vec::new()
             }
             TuiEvent::OverlaySkills(skills) => {
-                self.overlay = Some(Overlay::Skills(skills));
+                self.set_overlay(Some(Overlay::Skills(skills)));
                 Vec::new()
             }
             TuiEvent::SkillsLoaded(skills) => {
@@ -1396,7 +1429,7 @@ impl AppState {
             }
             TuiEvent::UiOverlay(descriptor) => {
                 use grain_ai_agent_headless::OverlayDescriptor as D;
-                self.overlay = Some(match descriptor {
+                self.set_overlay(Some(match descriptor {
                     D::Form {
                         title,
                         fields,
@@ -1478,7 +1511,7 @@ impl AppState {
                         label,
                     },
                     D::Stack { title, children } => Overlay::DynamicStack { title, children },
-                });
+                }));
                 Vec::new()
             }
             TuiEvent::UiHandlerError(msg) => {
@@ -1669,7 +1702,7 @@ impl AppState {
         }
         if key.code == KeyCode::Esc {
             if self.overlay.is_some() {
-                self.overlay = None;
+                self.set_overlay(None);
                 return Vec::new();
             }
             // If the transcript cursor is engaged, the first Esc
@@ -1754,19 +1787,19 @@ impl AppState {
         }
         match key.code {
             KeyCode::F(1) => {
-                self.overlay = Some(Overlay::Help);
+                self.set_overlay(Some(Overlay::Help));
                 Vec::new()
             }
             KeyCode::F(2) => {
-                self.overlay = Some(Overlay::Doctor {
+                self.set_overlay(Some(Overlay::Doctor {
                     report: "Running diagnostics…".into(),
                     query: String::new(),
                     scroll: 0,
-                });
+                }));
                 vec![Command::ReturnDoctor]
             }
             KeyCode::F(3) => {
-                self.overlay = Some(Overlay::Skills(Vec::new()));
+                self.set_overlay(Some(Overlay::Skills(Vec::new())));
                 vec![Command::ReturnSkills]
             }
             KeyCode::F(5) => {
@@ -2013,17 +2046,17 @@ impl AppState {
             }
             KeyCode::Enter => {
                 if self.providers.is_empty() {
-                    self.overlay = None;
+                    self.set_overlay(None);
                     return Vec::new();
                 }
                 let chosen = *focused;
                 // Phase 1: API-key profiles apply via the worker;
                 // OAuth profiles surface a clear "not wired" line so
                 // the user knows what's happening.
-                let profile = &self.providers[chosen];
-                if !profile.auth.is_usable() {
-                    self.overlay = None;
-                    let name = profile.name.clone();
+                let is_usable = self.providers[chosen].auth.is_usable();
+                if !is_usable {
+                    let name = self.providers[chosen].name.clone();
+                    self.set_overlay(None);
                     self.push(
                         TranscriptKind::Info,
                         format!(
@@ -2034,7 +2067,7 @@ impl AppState {
                     );
                     return Vec::new();
                 }
-                self.overlay = None;
+                self.set_overlay(None);
                 vec![Command::ApplyProvider(chosen)]
             }
             _ => Vec::new(),
@@ -2072,10 +2105,10 @@ impl AppState {
             KeyCode::Enter => {
                 if let Some((model_id, _)) = models.get(*focused) {
                     let model_id = model_id.clone();
-                    self.overlay = None;
+                    self.set_overlay(None);
                     return vec![Command::SetModel(model_id)];
                 }
-                self.overlay = None;
+                self.set_overlay(None);
             }
             _ => {}
         }
@@ -2161,10 +2194,10 @@ impl AppState {
                         TranscriptKind::Info,
                         format!("(resuming session: {})", path.display()),
                     );
-                    self.overlay = None;
+                    self.set_overlay(None);
                     return vec![Command::ResumeSession(path)];
                 }
-                self.overlay = None;
+                self.set_overlay(None);
             }
             _ => {}
         }
@@ -2234,7 +2267,7 @@ impl AppState {
                         serde_json::Value::String(f.value.clone()),
                     );
                 }
-                self.overlay = None;
+                self.set_overlay(None);
                 vec![Command::InvokePluginUi {
                     handler,
                     args: serde_json::Value::Object(obj),
@@ -2264,7 +2297,7 @@ impl AppState {
         match self.overlay.as_ref() {
             Some(Overlay::DynamicModal { .. }) => {
                 if matches!(key.code, KeyCode::Enter) {
-                    self.overlay = None;
+                    self.set_overlay(None);
                 }
                 Vec::new()
             }
@@ -2274,11 +2307,11 @@ impl AppState {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                     let handler = on_yes.clone();
                     let args = yes_args.clone();
-                    self.overlay = None;
+                    self.set_overlay(None);
                     vec![Command::InvokePluginUi { handler, args }]
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') => {
-                    self.overlay = None;
+                    self.set_overlay(None);
                     Vec::new()
                 }
                 _ => Vec::new(),
@@ -2325,7 +2358,7 @@ impl AppState {
                 let handler = on_select.clone();
                 let value = items.get(*focused).cloned().unwrap_or_default();
                 let index = *focused;
-                self.overlay = None;
+                self.set_overlay(None);
                 match handler {
                     Some(handler) => vec![Command::InvokePluginUi {
                         handler,
@@ -2376,7 +2409,7 @@ impl AppState {
                 let handler = on_select.clone();
                 let row = rows.get(*focused).cloned().unwrap_or_default();
                 let index = *focused;
-                self.overlay = None;
+                self.set_overlay(None);
                 match handler {
                     Some(handler) => vec![Command::InvokePluginUi {
                         handler,
@@ -2451,7 +2484,7 @@ impl AppState {
                 let chosen = *focused;
                 let name = self.themes[chosen].name.clone();
                 self.current_theme_idx = chosen;
-                self.overlay = None;
+                self.set_overlay(None);
                 self.push(TranscriptKind::Info, format!("(theme: {name})"));
             }
             _ => {}
@@ -2499,7 +2532,7 @@ impl AppState {
         }
         match head {
             "help" | "?" => {
-                self.overlay = Some(Overlay::Help);
+                self.set_overlay(Some(Overlay::Help));
                 Vec::new()
             }
             "clear" | "reset" => {
@@ -2507,23 +2540,23 @@ impl AppState {
                 vec![Command::Reset]
             }
             "doctor" => {
-                self.overlay = Some(Overlay::Doctor {
+                self.set_overlay(Some(Overlay::Doctor {
                     report: "Running diagnostics…".into(),
                     query: String::new(),
                     scroll: 0,
-                });
+                }));
                 vec![Command::ReturnDoctor]
             }
             "skills" => {
-                self.overlay = Some(Overlay::Skills(Vec::new()));
+                self.set_overlay(Some(Overlay::Skills(Vec::new())));
                 vec![Command::ReturnSkills]
             }
             "theme" | "themes" => {
                 // Open the picker focused on the active theme so
                 // up/down feel natural from the user's current pick.
-                self.overlay = Some(Overlay::ThemePicker {
+                self.set_overlay(Some(Overlay::ThemePicker {
                     focused: self.current_theme_idx,
-                });
+                }));
                 Vec::new()
             }
             "provider" | "providers" => {
@@ -2537,7 +2570,7 @@ impl AppState {
                     return Vec::new();
                 }
                 let focused = self.current_provider_idx.unwrap_or(0);
-                self.overlay = Some(Overlay::ProviderPicker { focused });
+                self.set_overlay(Some(Overlay::ProviderPicker { focused }));
                 Vec::new()
             }
             "model" | "models" => {
@@ -2550,20 +2583,20 @@ impl AppState {
                     );
                     return Vec::new();
                 };
-                self.overlay = Some(Overlay::ModelPicker {
+                self.set_overlay(Some(Overlay::ModelPicker {
                     focused: 0,
                     models: Vec::new(),
-                });
+                }));
                 vec![Command::ListModels(provider)]
             }
             "resume" => {
                 // Open the picker immediately with an empty list;
                 // the worker scans disk and replies via
                 // `TuiEvent::SessionsListed`, which swaps the list in.
-                self.overlay = Some(Overlay::SessionResume {
+                self.set_overlay(Some(Overlay::SessionResume {
                     focused: 0,
                     sessions: Vec::new(),
-                });
+                }));
                 vec![Command::ReturnSessions]
             }
             "log" | "logs" => {
@@ -2576,7 +2609,7 @@ impl AppState {
                     );
                     return Vec::new();
                 }
-                self.overlay = Some(Overlay::Log { scroll: 0 });
+                self.set_overlay(Some(Overlay::Log { scroll: 0 }));
                 Vec::new()
             }
             "compact" => {
@@ -2593,10 +2626,10 @@ impl AppState {
                 // Open the overlay immediately with an empty list;
                 // the worker scans disk and replies via
                 // `TuiEvent::PluginsListed`, which swaps the list in.
-                self.overlay = Some(Overlay::Plugins {
+                self.set_overlay(Some(Overlay::Plugins {
                     plugins: Vec::new(),
                     ui_commands: Vec::new(),
-                });
+                }));
                 vec![Command::ReturnPlugins]
             }
             "install" => {
@@ -3436,6 +3469,7 @@ mod tests {
         s.render_metrics.set(RenderMetrics {
             total_rows: 50,
             visible_rows: 20,
+            ..Default::default()
         });
         assert!(s.follow_bottom, "default is tail follow");
 
@@ -3472,6 +3506,7 @@ mod tests {
         s.render_metrics.set(RenderMetrics {
             total_rows: 100,
             visible_rows: 20,
+            ..Default::default()
         });
         s.on_event(TuiEvent::Key(press(KeyCode::PageUp)));
         let frozen = s.scroll_offset;
@@ -3479,6 +3514,7 @@ mod tests {
         s.render_metrics.set(RenderMetrics {
             total_rows: 130,
             visible_rows: 20,
+            ..Default::default()
         });
         // No key event — scroll_offset is unchanged. Ui renders
         // from this same anchor regardless of where the new bottom is.
@@ -3498,6 +3534,7 @@ mod tests {
         s.render_metrics.set(RenderMetrics {
             total_rows: 100,
             visible_rows: 20,
+            ..Default::default()
         });
         s.on_event(TuiEvent::Key(press(KeyCode::PageUp)));
         let frozen = s.scroll_offset;

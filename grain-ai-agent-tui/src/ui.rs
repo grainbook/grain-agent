@@ -51,6 +51,12 @@ const FOOTER_MAX_ROWS: u16 = 5;
 
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState, elapsed: crate::anim::FxDuration) {
     let area = frame.area();
+    // Stash full frame area early so set_overlay can size effect rects.
+    {
+        let mut m = state.render_metrics.get();
+        m.full_area = area;
+        state.render_metrics.set(m);
+    }
     let palette = &state.theme().palette;
 
     let palette_rows = palette_height(state);
@@ -328,6 +334,7 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette:
     state.render_metrics.set(crate::app::RenderMetrics {
         total_rows,
         visible_rows: visible,
+        full_area: state.render_metrics.get().full_area,
     });
     let skip = if state.follow_bottom {
         total_rows.saturating_sub(visible)
