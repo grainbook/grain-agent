@@ -42,7 +42,7 @@ pub use compaction::{
     DEFAULT_MESSAGE_THRESHOLD, MessageCountPolicy, compact_transcript,
     compaction_prepare_next_turn,
 };
-pub use context_guard::{ContextGuard, ContextGuardPolicy, TokenEstimator};
+pub use context_guard::{ActiveModelHandle, ContextGuard, ContextGuardPolicy, TokenEstimator};
 pub use messages::{
     BRANCH_SUMMARY_PREFIX, BRANCH_SUMMARY_SUFFIX, COMPACTION_SUMMARY_PREFIX,
     COMPACTION_SUMMARY_SUFFIX, BranchSummaryMessage, CompactionSummaryMessage, CustomMessage,

@@ -26,7 +26,7 @@
 //! ```
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use grain_agent_core::{
     AgentMessage, AssistantContent, Message, ToolResultMessage, TransformContextFn,
@@ -147,11 +147,19 @@ impl TokenEstimator {
     }
 }
 
+/// Shared handle to the active model id. Both [`ContextGuard`] and
+/// [`crate::compaction::TokenBudgetPolicy`] read from the same handle so
+/// a model switch mid-session is immediately visible to both subsystems.
+pub type ActiveModelHandle = Arc<RwLock<String>>;
+
 /// Builder + factory for a context-guard [`TransformContextFn`].
 #[derive(Debug, Clone)]
 pub struct ContextGuard {
     registry: Arc<Registry>,
-    model_id: String,
+    /// Shared mutable model id — read on every invocation of the
+    /// produced [`TransformContextFn`] so a mid-session model switch
+    /// takes effect immediately.
+    model_handle: ActiveModelHandle,
     policy: ContextGuardPolicy,
     estimator: TokenEstimator,
     /// Tokens reserved for the system prompt + the model's response.
@@ -167,14 +175,46 @@ impl ContextGuard {
     pub fn new(registry: Arc<Registry>, model_id: impl Into<String>) -> Self {
         ContextGuard {
             registry,
-            model_id: model_id.into(),
+            model_handle: Arc::new(RwLock::new(model_id.into())),
             policy: ContextGuardPolicy::default(),
             estimator: TokenEstimator::approximate(),
             headroom_tokens: 1024,
         }
     }
 
-    /// Set the guard policy (default: [`ContextGuardPolicy::TruncateHead`]).
+    /// Create a guard that reads from a pre-existing shared model handle.
+    ///
+    /// Use this when you need multiple subsystems (context guard, compaction
+    /// policy) to track the same active model — pass the same
+    /// [`ActiveModelHandle`] to each.
+    pub fn with_active_model_handle(
+        registry: Arc<Registry>,
+        handle: ActiveModelHandle,
+    ) -> Self {
+        ContextGuard {
+            registry,
+            model_handle: handle,
+            policy: ContextGuardPolicy::default(),
+            estimator: TokenEstimator::approximate(),
+            headroom_tokens: 1024,
+        }
+    }
+
+    /// Update the active model id. Takes effect on the next invocation
+    /// of the [`TransformContextFn`] produced by [`Self::into_transform_fn`].
+    pub fn set_active_model(&self, id: impl Into<String>) {
+        if let Ok(mut guard) = self.model_handle.write() {
+            *guard = id.into();
+        }
+    }
+
+    /// Return a clone of the shared model handle. Useful for passing to
+    /// other subsystems that need to read the same active model.
+    pub fn model_handle(&self) -> ActiveModelHandle {
+        self.model_handle.clone()
+    }
+
+    /// Set the guard policy (default: [`ContextGuardPolicy::DropOldest`]).
     pub fn with_policy(mut self, policy: ContextGuardPolicy) -> Self {
         self.policy = policy;
         self
@@ -198,14 +238,19 @@ impl ContextGuard {
     pub fn into_transform_fn(self) -> TransformContextFn {
         let ContextGuard {
             registry,
-            model_id,
+            model_handle,
             policy,
             estimator,
             headroom_tokens,
         } = self;
         Arc::new(move |messages, _cancel| {
             let registry = registry.clone();
-            let model_id = model_id.clone();
+            // Read the *current* model id on every invocation — not a
+            // stale snapshot from construction time.
+            let model_id = model_handle
+                .read()
+                .map(|g| g.clone())
+                .unwrap_or_default();
             let policy = policy.clone();
             Box::pin(async move {
                 let budget = match registry.lookup(&model_id) {
@@ -314,4 +359,149 @@ fn remove_orphan_tool_results(messages: &mut Vec<AgentMessage>) {
         idx += 1;
         k
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grain_agent_core::{TextContent, UserContent, UserMessage};
+    use grain_llm_models::descriptor::{ApiKind, ModelDescriptor, ProviderId};
+    use tokio_util::sync::CancellationToken;
+
+    fn make_registry(models: Vec<ModelDescriptor>) -> Arc<Registry> {
+        Arc::new(Registry::from_descriptors(models).unwrap())
+    }
+
+    fn test_descriptor(id: &str, name: &str, context_window: u64) -> ModelDescriptor {
+        use grain_llm_models::descriptor::{Capabilities, ThinkingProfile};
+        ModelDescriptor {
+            id: id.into(),
+            name: name.into(),
+            provider: ProviderId::Other { id: "test".into() },
+            api: ApiKind::OpenAi,
+            context_window,
+            max_output_tokens: 4096,
+            cost: grain_agent_core::Cost::default(),
+            capabilities: Capabilities::default(),
+            thinking: ThinkingProfile::default(),
+            extra: serde_json::Value::Null,
+        }
+    }
+
+    fn small_model() -> ModelDescriptor {
+        test_descriptor("test/small", "Small", 1000)
+    }
+
+    fn big_model() -> ModelDescriptor {
+        test_descriptor("test/big", "Big", 1_000_000)
+    }
+
+    fn user_msg(text: &str) -> AgentMessage {
+        AgentMessage::user(UserMessage {
+            content: vec![UserContent::Text(TextContent { text: text.into() })],
+            timestamp: 0,
+        })
+    }
+
+    /// Build a transcript whose estimated token count exceeds `small_model`'s
+    /// context window (1000 tokens) but fits `big_model` (1M tokens).
+    fn large_transcript() -> Vec<AgentMessage> {
+        // Each message ~1000 chars → ~250 tokens at 4 chars/token.
+        // 6 messages → ~1500 tokens, exceeds the small model's 1000-token budget.
+        (0..6)
+            .map(|i| user_msg(&format!("msg{i}: {}", "x".repeat(1000))))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn guard_uses_current_model_not_construction_time() {
+        let registry = make_registry(vec![small_model(), big_model()]);
+        let guard = ContextGuard::new(registry, "test/small")
+            .with_policy(ContextGuardPolicy::DropOldest)
+            .with_headroom_tokens(0);
+
+        let transform = guard.into_transform_fn();
+        let messages = large_transcript();
+
+        // With small model (1000 token window), the transcript should be truncated.
+        let result = transform(messages.clone(), CancellationToken::new()).await;
+        assert!(
+            result.len() < messages.len(),
+            "small model should truncate: got {} messages, expected fewer than {}",
+            result.len(),
+            messages.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn set_active_model_switches_budget_dynamically() {
+        let registry = make_registry(vec![small_model(), big_model()]);
+        let guard = ContextGuard::new(registry, "test/small")
+            .with_policy(ContextGuardPolicy::DropOldest)
+            .with_headroom_tokens(0);
+
+        // Grab a handle before consuming the guard.
+        let handle = guard.model_handle();
+        let transform = guard.into_transform_fn();
+        let messages = large_transcript();
+
+        // Small model → truncation.
+        let result = transform(messages.clone(), CancellationToken::new()).await;
+        assert!(result.len() < messages.len(), "small model should truncate");
+
+        // Switch to big model via the handle.
+        {
+            let mut w = handle.write().unwrap();
+            *w = "test/big".into();
+        }
+
+        // Big model → no truncation.
+        let result = transform(messages.clone(), CancellationToken::new()).await;
+        assert_eq!(
+            result.len(),
+            messages.len(),
+            "big model should NOT truncate"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_active_model_handle_shares_state() {
+        let registry = make_registry(vec![small_model(), big_model()]);
+        let shared_handle: ActiveModelHandle =
+            Arc::new(RwLock::new("test/small".into()));
+
+        let guard = ContextGuard::with_active_model_handle(
+            registry,
+            shared_handle.clone(),
+        )
+        .with_policy(ContextGuardPolicy::DropOldest)
+        .with_headroom_tokens(0);
+
+        let transform = guard.into_transform_fn();
+        let messages = large_transcript();
+
+        // Verify truncation with small model.
+        let result = transform(messages.clone(), CancellationToken::new()).await;
+        assert!(result.len() < messages.len());
+
+        // External code writes through the shared handle.
+        *shared_handle.write().unwrap() = "test/big".into();
+
+        // Transform now sees the big model.
+        let result = transform(messages.clone(), CancellationToken::new()).await;
+        assert_eq!(result.len(), messages.len());
+    }
+
+    #[tokio::test]
+    async fn unknown_model_is_noop() {
+        let registry = make_registry(vec![small_model()]);
+        let guard = ContextGuard::new(registry, "nonexistent/model")
+            .with_policy(ContextGuardPolicy::DropOldest)
+            .with_headroom_tokens(0);
+
+        let transform = guard.into_transform_fn();
+        let messages = large_transcript();
+        let result = transform(messages.clone(), CancellationToken::new()).await;
+        assert_eq!(result.len(), messages.len(), "unknown model should be no-op");
+    }
 }
