@@ -11,6 +11,7 @@ members = [
     "grain-pi-compat",
     "grain-deepseek-pack",
     "lazy-gagent",
+    "grain-script-rhai",
 ]
 
 [workspace.package]
@@ -50,9 +51,11 @@ grain-script-boa = { path = "grain-script-boa" }
 grain-pi-compat = { path = "grain-pi-compat" }
 grain-deepseek-pack = { path = "grain-deepseek-pack" }
 lazy-gagent = { path = "lazy-gagent" }
+grain-script-rhai = { path = "grain-script-rhai" }
 ratatui = "0.29"
 crossterm = "0.28"
 unicode-width = "0.2"
 boa_engine = "0.21"
+rhai = { version = "1", features = ["sync"] }
 arboard = { version = "3", default-features = false }
 textwrap = "0.16"
