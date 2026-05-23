@@ -665,6 +665,70 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         bundle
     };
 
+    // --- WASM plugin tools (optional, behind `wasm-plugins` feature) ------
+    // Walk discovered plugins for those with a `.wasm` module, load them
+    // via wasmtime, and append their tools to the tool list.
+    #[cfg(feature = "wasm-plugins")]
+    {
+        use std::sync::Arc as StdArc;
+        match grain_plugin_wasm::WasmPluginRuntime::new() {
+            Ok(runtime) => {
+                let runtime = StdArc::new(runtime);
+                for plugin in &discovered_plugins {
+                    let Some(wasm_path) = plugin.wasm_module() else {
+                        continue;
+                    };
+                    let caps =
+                        grain_plugin_wasm::Capabilities::from_list(&plugin.wasm_capabilities());
+                    let plugin_id = plugin.manifest.name.clone();
+                    let plugin_name = plugin.manifest.name.clone();
+                    match tokio::runtime::Handle::current()
+                        .block_on(runtime.load(&wasm_path, &plugin_id, caps, &plugin_name))
+                    {
+                        Ok(loaded) => {
+                            eprintln!(
+                                "[info] wasm plugin '{}' v{}: {} tool(s)",
+                                loaded.info.name,
+                                loaded.info.version,
+                                loaded.tool_defs.len()
+                            );
+                            for td in &loaded.tool_defs {
+                                tools.push(StdArc::new(grain_plugin_wasm::WasmTool::new(
+                                    runtime.clone(),
+                                    &plugin_id,
+                                    td,
+                                )));
+                            }
+                        }
+                        Err(e) => {
+                            let msg = format!(
+                                "wasm plugin '{}' load failed: {e}",
+                                plugin.manifest.name
+                            );
+                            eprintln!("[warn] {msg}");
+                            deferred_warnings.push(msg);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                let msg = format!("wasmtime runtime init failed: {e}");
+                eprintln!("[warn] {msg}");
+                deferred_warnings.push(msg);
+            }
+        }
+    }
+    #[cfg(not(feature = "wasm-plugins"))]
+    {
+        let any_wasm = discovered_plugins.iter().any(|p| p.wasm_module().is_some());
+        if any_wasm {
+            eprintln!(
+                "[warn] wasm plugin(s) found but binary was built without \
+                 --features wasm-plugins; ignoring"
+            );
+        }
+    }
+
     // --- Shared active-model handle -----------------------------------------
     // Both ContextGuard and TokenBudgetPolicy read from the same handle
     // so a mid-session model switch immediately updates context-window

@@ -76,10 +76,10 @@ pub use session_discovery::{
 };
 pub use skills::{DEFAULT_SKILLS_DIR, SkillsError, find_skills, resolve_skills_dir};
 pub use plugins::{
-    Plugin, PluginInfo, PluginManifest, PromptFragment, compose_system_prompt_with_plugins,
-    default_plugins_dir, discover_plugins, discover_plugins_with_spec, find_skills_with_plugins,
-    parse_manifest, plugin_info, plugin_script_dirs, read_plugin_prompt_fragments,
-    summarize_plugin,
+    Plugin, PluginInfo, PluginManifest, PromptFragment, WasmConfig,
+    compose_system_prompt_with_plugins, default_plugins_dir, discover_plugins,
+    discover_plugins_with_spec, find_skills_with_plugins, parse_manifest, plugin_info,
+    plugin_script_dirs, read_plugin_prompt_fragments, summarize_plugin,
 };
 pub use plugin_spec::{
     PluginSpec, PluginSpecFile, SourceKind, SyncReport, default_spec_path, detect_source_kind,

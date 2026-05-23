@@ -29,6 +29,7 @@ serde = { workspace = true }
 toml = { workspace = true }
 grain-script-boa = { workspace = true, optional = true }
 grain-script-rhai = { workspace = true, optional = true }
+grain-plugin-wasm = { workspace = true, optional = true }
 # Direct rhai dep so `build_rhai_bundle`'s host-fn closures can
 # return `rhai::Dynamic` (e.g. `plugins_list() -> Array<Map>`).
 # Activated by the `scripts-rhai` feature alongside the
@@ -56,6 +57,9 @@ scripts-boa = ["dep:grain-script-boa"]
 # as host native functions so in-plugin Rhai scripts can manage other
 # plugins without round-tripping through TUI slash commands.
 scripts-rhai = ["dep:grain-script-rhai", "dep:rhai"]
+# WebAssembly Component Model plugin support. Passes through to
+# `grain-ai-agent-headless/wasm-plugins`.
+wasm-plugins = ["grain-ai-agent-headless/wasm-plugins", "dep:grain-plugin-wasm"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

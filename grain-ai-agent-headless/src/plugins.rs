@@ -91,6 +91,41 @@ pub struct PluginManifest {
     /// ```
     #[serde(default, rename = "slash_command")]
     pub slash_commands: Vec<SlashCommand>,
+    /// Optional WebAssembly Component Model configuration. When
+    /// present (or when `<root>/plugin.wasm` exists on disk), the
+    /// plugin engine loads the `.wasm` module and registers the
+    /// tools it exports via the `grain:plugin` WIT world.
+    ///
+    /// ```toml
+    /// [wasm]
+    /// module       = "plugin.wasm"
+    /// capabilities = ["log"]
+    /// ```
+    #[serde(default)]
+    pub wasm: Option<WasmConfig>,
+}
+
+/// WebAssembly plugin configuration block inside `plugin.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WasmConfig {
+    /// Path to the `.wasm` module, relative to the plugin root.
+    /// Defaults to `"plugin.wasm"`.
+    #[serde(default = "default_wasm_module")]
+    pub module: PathBuf,
+    /// Subset of host capabilities the plugin needs. Host calls
+    /// into anything not listed here return an error.
+    /// Valid: `["log", "env", "http"]`. Default: `["log"]` only.
+    #[serde(default = "default_wasm_capabilities")]
+    pub capabilities: Vec<String>,
+}
+
+fn default_wasm_module() -> PathBuf {
+    PathBuf::from("plugin.wasm")
+}
+
+fn default_wasm_capabilities() -> Vec<String> {
+    vec!["log".to_string()]
 }
 
 /// One discovered plugin: parsed manifest + the directory it lives in.
@@ -129,6 +164,30 @@ impl Plugin {
     pub fn prompts_dir(&self) -> Option<PathBuf> {
         let p = self.root.join("prompts");
         p.is_dir().then_some(p)
+    }
+
+    /// Resolved path to the plugin's `.wasm` module, if one exists.
+    ///
+    /// Resolution order:
+    /// 1. If `[wasm]` is set in the manifest, use `<root>/<wasm.module>`.
+    /// 2. Otherwise, fall back to `<root>/plugin.wasm`.
+    ///
+    /// Returns `Some(path)` only when the file actually exists on disk.
+    pub fn wasm_module(&self) -> Option<PathBuf> {
+        let path = match &self.manifest.wasm {
+            Some(cfg) => self.root.join(&cfg.module),
+            None => self.root.join("plugin.wasm"),
+        };
+        path.is_file().then_some(path)
+    }
+
+    /// Declared wasm capabilities. Falls back to `["log"]` when no
+    /// `[wasm]` block is present.
+    pub fn wasm_capabilities(&self) -> Vec<String> {
+        match &self.manifest.wasm {
+            Some(cfg) => cfg.capabilities.clone(),
+            None => default_wasm_capabilities(),
+        }
     }
 }
 
@@ -288,6 +347,9 @@ pub struct PluginInfo {
     pub themes: usize,
     pub scripts: usize,
     pub prompts: usize,
+    /// Whether the plugin has a `.wasm` module on disk.
+    #[serde(default)]
+    pub wasm: bool,
 }
 
 /// Derive a [`PluginInfo`] snapshot from a [`Plugin`].
@@ -310,15 +372,17 @@ pub fn plugin_info(plugin: &Plugin) -> PluginInfo {
         themes: count_dir(plugin.themes_dir()),
         scripts: count_dir(plugin.scripts_dir()),
         prompts: count_dir(plugin.prompts_dir()),
+        wasm: plugin.wasm_module().is_some(),
     }
 }
 
 /// One-line summary for the startup log.
 pub fn summarize_plugin(plugin: &Plugin) -> String {
     let info = plugin_info(plugin);
+    let wasm_tag = if info.wasm { ", wasm: yes" } else { "" };
     format!(
-        "plugin '{}' (skills: {}, themes: {}, scripts: {}, prompts: {})",
-        info.name, info.skills, info.themes, info.scripts, info.prompts
+        "plugin '{}' (skills: {}, themes: {}, scripts: {}, prompts: {}{})",
+        info.name, info.skills, info.themes, info.scripts, info.prompts, wasm_tag
     )
 }
 

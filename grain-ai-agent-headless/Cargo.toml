@@ -13,6 +13,10 @@ rig = ["dep:rig", "dep:anyhow"]
 # `<workspace>/.grain/scripts/`. Off by default — the Boa runtime is
 # ~5MB compile cost users without scripts shouldn't pay.
 scripts-boa = ["dep:grain-script-boa"]
+# WebAssembly Component Model plugin support. Loads `.wasm` files from
+# plugins that declare a `[wasm]` block (or ship a `plugin.wasm`).
+# Off by default — wasmtime adds ~15MB binary size and ~20s compile.
+wasm-plugins = ["dep:grain-plugin-wasm"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -34,6 +38,7 @@ uuid = { workspace = true }
 rig = { version = "0.37", default-features = false, features = ["derive"], optional = true, package = "rig-core" }
 anyhow = { workspace = true, optional = true }
 grain-script-boa = { workspace = true, optional = true }
+grain-plugin-wasm = { workspace = true, optional = true }
 grain-agent-core = { workspace = true }
 grain-agent-harness = { workspace = true }
 grain-deepseek-pack = { workspace = true }
