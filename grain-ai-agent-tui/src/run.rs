@@ -118,6 +118,7 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
     let (themes, initial_idx) =
         resolve_themes(&themes_dir, &plugin_theme_dirs, &requested_theme);
 
+    install_panic_hook();
     let mut terminal = init_terminal()?;
     let result = event_loop(
         &mut terminal,
@@ -234,6 +235,20 @@ fn resolve_themes(
             0
         });
     (all, idx)
+}
+
+/// Restore the terminal from inside a panic handler **before** the
+/// default panic printer runs, so the stack trace lands on a normal
+/// (non-alt) screen with raw mode disabled. Without this the alt
+/// screen swallows the trace and the user sees "process exits silently"
+/// — which is exactly what was masking the markdown-render panics.
+fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        default(info);
+    }));
 }
 
 fn init_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
