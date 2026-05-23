@@ -8,11 +8,11 @@ use grain_agent_core::{AgentEvent, Cost};
 
 /// Tagged union of every event the TUI main loop knows how to consume.
 ///
-/// `AgentEvent`'s `MessageUpdate` carries a full streaming partial,
-/// which makes the union ~470 bytes — the same size trade-off
-/// `grain_agent_core::AgentEvent` itself takes. We cross-pollinate the
-/// `#[allow]` so the TUI doesn't pay a `Box` allocation per key press.
-#[allow(clippy::large_enum_variant)]
+/// `AgentEvent`'s `MessageUpdate` carries a full streaming partial
+/// (~470 bytes). Boxing it keeps `TuiEvent` compact for the common
+/// case (a `Key` event at 16 bytes) while still avoiding a separate
+/// allocation per agent event — each `AgentEvent` already involves
+/// heap allocations for message content.
 #[derive(Debug, Clone)]
 pub enum TuiEvent {
     /// One key press from the terminal (release events are filtered out
@@ -26,7 +26,7 @@ pub enum TuiEvent {
     /// can invalidate it.
     Resize(u16, u16),
     /// One [`AgentEvent`] received from the running agent worker.
-    Agent(AgentEvent),
+    Agent(Box<AgentEvent>),
     /// Worker computed a doctor report on a background thread. Carries
     /// the already-rendered string so the UI doesn't need access to the
     /// `Workspace` / `Registry`.

@@ -260,7 +260,7 @@ pub enum TranscriptKind {
 /// completion or an error). Used by block grouping, turn-boundary
 /// detection, and the message counter to treat both end-of-call
 /// variants uniformly.
-pub fn is_tool_call_terminator(kind: TranscriptKind) -> bool {
+pub(crate) fn is_tool_call_terminator(kind: TranscriptKind) -> bool {
     matches!(kind, TranscriptKind::ToolCallEnd | TranscriptKind::ToolCallError)
 }
 
@@ -330,7 +330,7 @@ impl TranscriptBlock {
 /// `first_line` values stay stable as new lines are appended to
 /// the buffer, so fold-state stored against those ids survives
 /// every subsequent render.
-pub fn build_transcript_blocks(transcript: &[TranscriptLine]) -> Vec<TranscriptBlock> {
+pub(crate) fn build_transcript_blocks(transcript: &[TranscriptLine]) -> Vec<TranscriptBlock> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < transcript.len() {
@@ -386,6 +386,72 @@ pub fn build_transcript_blocks(transcript: &[TranscriptLine]) -> Vec<TranscriptB
         }
     }
     out
+}
+
+impl AppState {
+    /// Returns the cached transcript blocks, rebuilding the cache
+    /// only when new lines have been appended since the last build.
+    /// The transcript is append-only, so previously-computed blocks
+    /// stay valid across frames.
+    /// Returns a clone of the cached transcript blocks, rebuilding
+    /// the cache only when new lines have been appended since the
+    /// last build. Returns an owned `Vec` so callers can freely
+    /// access other `AppState` fields without borrow conflicts.
+    pub(crate) fn cached_blocks(&mut self) -> Vec<TranscriptBlock> {
+        if self.cached_blocks.is_empty() || self.transcript_len_cached != self.transcript.len() {
+            self.cached_blocks = build_transcript_blocks(&self.transcript);
+            self.transcript_len_cached = self.transcript.len();
+            // Pre-compute block summaries so the hot render path
+            // avoids `format!()` per frame.
+            self.block_summary_cache.clear();
+            for block in &self.cached_blocks {
+                let summary = Self::compute_block_summary(block, &self.transcript);
+                self.block_summary_cache.insert(block.id(), summary);
+            }
+        }
+        self.cached_blocks.clone()
+    }
+
+    /// Returns a pre-computed one-line display summary for `block`.
+    /// Callers must have called [`Self::cached_blocks`] at least
+    /// once this frame so the cache is populated.
+    pub(crate) fn block_summary(&self, block: &TranscriptBlock) -> &str {
+        self.block_summary_cache
+            .get(&block.id())
+            .map(|s| s.as_str())
+            .unwrap_or("")
+    }
+
+    /// Build the display summary string for a single block.
+    /// Mirrors the old `ui::block_summary` free function.
+    fn compute_block_summary(
+        block: &TranscriptBlock,
+        transcript: &[TranscriptLine],
+    ) -> String {
+        let count = block.line_count();
+        match block.kind {
+            BlockKind::ToolCall => {
+                let head = transcript
+                    .get(block.first_line)
+                    .map(|l| l.text.as_str())
+                    .unwrap_or("");
+                let cleaned = head.trim_start_matches("● ").trim();
+                let trimmed = truncate_oneline(cleaned, 60);
+                if count > 1 {
+                    format!("tool: {trimmed} ({count} lines)")
+                } else {
+                    format!("tool: {trimmed}")
+                }
+            }
+            BlockKind::Thinking => {
+                format!("thinking ({count} line{})", if count == 1 { "" } else { "s" })
+            }
+            BlockKind::Plain => transcript
+                .get(block.first_line)
+                .map(|l| l.text.clone())
+                .unwrap_or_default(),
+        }
+    }
 }
 
 /// Commands the agent worker should execute on behalf of the UI.
@@ -610,7 +676,7 @@ pub enum PaletteAction {
 
 /// Built-in slash commands shown in the palette dropdown. Order is the
 /// presentation order when the input is just `/`.
-pub const SLASH_CATALOG: &[CommandCatalogItem] = &[
+pub(crate) const SLASH_CATALOG: &[CommandCatalogItem] = &[
     CommandCatalogItem {
         trigger: "/help",
         description: "show key bindings and slash commands",
@@ -693,14 +759,17 @@ pub struct Capabilities {
 #[derive(Debug)]
 pub struct AppState {
     pub transcript: Vec<TranscriptLine>,
-    pub input: String,
+        // ── Input ──────────────────────────────────────────────────
+pub input: String,
     pub cursor: usize,
     pub focus: Focus,
-    pub overlay: Option<Overlay>,
+        // ── Overlay & Focus ───────────────────────────────────────
+pub overlay: Option<Overlay>,
     /// Scroll position when `!follow_bottom`. Counted as "rendered
     /// rows from the top of the wrapped transcript" so new content
     /// arriving doesn't shift the user's frozen view.
-    pub scroll_offset: usize,
+        // ── Scroll & View ─────────────────────────────────────────
+pub scroll_offset: usize,
     /// `true` = anchor the transcript view to the bottom (tail mode,
     /// the default). `false` = freeze at `scroll_offset` so prior
     /// content stays put while new messages arrive offscreen below.
@@ -711,7 +780,8 @@ pub struct AppState {
     /// absolute `scroll_offset`. `Cell` keeps it interior-mutable
     /// without breaking the `&AppState` render contract.
     pub render_metrics: Cell<RenderMetrics>,
-    pub streaming: bool,
+        // ── Streaming / Token tracking ────────────────────────────
+pub streaming: bool,
     /// Wall-clock start of the current agent run. Reset on
     /// `AgentStart`; cleared on `AgentEnd`. The footer renders an
     /// elapsed counter against this whenever it's set.
@@ -748,7 +818,8 @@ pub struct AppState {
     /// `Some(rate)` ⇒ render `¥X.XX` instead, multiplied by `rate`.
     /// Set from `--cny-rate` or auto-detected from `$LANG` at startup.
     pub cny_rate: Option<f64>,
-    pub pending_tool_calls: usize,
+        // ── Model Info ────────────────────────────────────────────
+pub pending_tool_calls: usize,
     pub model_id: String,
     /// Per-million-token pricing for the active model. Driven from the
     /// embedded `models.dev` snapshot at startup, refreshed on
@@ -768,7 +839,8 @@ pub struct AppState {
     /// `TuiEvent::Info` contains "compacted". Rendered as
     /// `[compact N]` in the footer when > 0.
     pub compaction_count: u32,
-    pub workspace_display: String,
+        // ── Capabilities & Config ─────────────────────────────────
+pub workspace_display: String,
     pub capabilities: Capabilities,
     pub show_thinking: bool,
     pub last_error: Option<String>,
@@ -778,10 +850,12 @@ pub struct AppState {
     /// the slot doesn't linger across turns. Used today by
     /// `retry-on-overflow` to surface mid-turn retry progress without
     /// corrupting the alt screen via stderr.
-    pub ephemeral_status: Option<String>,
+        // ── Status ────────────────────────────────────────────────
+pub ephemeral_status: Option<String>,
     /// Available themes (built-ins + user). Index 0 is the default
     /// chosen at startup; the picker walks this list.
-    pub themes: Vec<Theme>,
+        // ── Themes & Providers ─────────────────────────────────────
+pub themes: Vec<Theme>,
     /// Index of the currently applied theme within [`Self::themes`].
     pub current_theme_idx: usize,
     /// Provider profiles loaded from disk (workspace + user fallback).
@@ -795,7 +869,8 @@ pub struct AppState {
     /// types `/<trigger>`, this list is consulted **before** the
     /// built-in slash table; a match dispatches into the plugin's
     /// Rhai handler via [`Command::InvokePluginUi`].
-    pub plugin_slashes: Vec<grain_ai_agent_headless::BoundPluginSlashCommand>,
+        // ── Plugins & Skills ───────────────────────────────────────
+pub plugin_slashes: Vec<grain_ai_agent_headless::BoundPluginSlashCommand>,
     /// Skills loaded from `.claude/skills/` at startup. Used in the
     /// slash palette for prompt injection alongside built-in commands.
     pub skills: Vec<grain_agent_harness::Skill>,
@@ -807,7 +882,8 @@ pub struct AppState {
     /// input pane has focus and the slash palette isn't visible.
     /// Bounded by [`MAX_HISTORY`] to keep memory tidy in long
     /// sessions.
-    pub history: Vec<String>,
+        // ── History ────────────────────────────────────────────────
+pub history: Vec<String>,
     /// Position inside [`Self::history`] while the user is walking
     /// it. `None` means "fresh input — not recalling anything", in
     /// which case the buffer is whatever the user typed live.
@@ -827,7 +903,8 @@ pub struct AppState {
     /// Toggled at runtime by F6. The main loop in `run::event_loop`
     /// observes changes and re-issues `EnableMouseCapture` /
     /// `DisableMouseCapture` on the terminal.
-    pub mouse_capture_on: bool,
+        // ── Render state (interior-mutable / frame-local) ─────────
+pub mouse_capture_on: bool,
     /// Wrapped transcript rows from the most recent frame. Built by
     /// `ui::draw_transcript`, consumed by mouse handlers to translate
     /// `(terminal_row, terminal_col)` into a position inside the
@@ -850,7 +927,8 @@ pub struct AppState {
     pub request_log: VecDeque<String>,
     /// Default fold state for tool-call blocks. From
     /// `config.toml::fold_tool_calls` (defaults `true`).
-    pub fold_tool_calls_default: bool,
+        // ── Fold state ─────────────────────────────────────────────
+pub fold_tool_calls_default: bool,
     /// Default fold state for thinking blocks. From
     /// `config.toml::fold_thinking` (defaults `true`).
     pub fold_thinking_default: bool,
@@ -867,33 +945,61 @@ pub struct AppState {
     pub transcript_cursor: Option<usize>,
     /// Active tachyonfx visual effects. Processed each frame in
     /// `ui::draw`; finished effects are auto-retired.
-    pub effects: EffectManager,
+        // ── Effects & Caches ───────────────────────────────────────
+pub effects: EffectManager,
     /// Caches pre-parsed markdown spans for completed transcript
     /// lines so they aren't re-parsed every frame. The last streaming
     /// line is always re-parsed; everything before it hits this cache.
     pub markdown_cache: MarkdownCache,
+/// Cached result of [`build_transcript_blocks`]. Invalidated
+/// whenever new lines are appended to the transcript (which is
+/// append-only), so the hot render path avoids re-scanning the
+/// entire buffer each frame.
+cached_blocks: Vec<TranscriptBlock>,
+/// Number of transcript lines at the time [`Self::cached_blocks`]
+/// was last computed. When this differs from `transcript.len()`,
+/// the cache is stale and gets rebuilt on the next access.
+transcript_len_cached: usize,
+/// Pre-computed display summaries for each block, keyed by
+/// `block.id()` (= `first_line`). Populated alongside
+/// [`Self::cached_blocks`] so the renderer doesn't
+/// `format!()` per frame.
+block_summary_cache: std::collections::HashMap<usize, String>,
 }
 
 /// Cap on the in-memory prompt history. Old entries get truncated
 /// from the front once we exceed this so long sessions don't grow
 /// unbounded.
-pub const MAX_HISTORY: usize = 200;
+/// Trim a string to `max` chars, replacing newlines with spaces.
+/// If the string exceeds `max`, truncates and appends a `…`.
+fn truncate_oneline(s: &str, max: usize) -> String {
+    let s = s.replace('\n', " ");
+    if s.chars().count() <= max {
+        s
+    } else {
+        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
+pub(crate) const MAX_HISTORY: usize = 200;
 
 /// Cap on the in-memory request-body log ring buffer (entries kept
 /// in [`AppState::request_log`]). Each entry is a pretty-printed
 /// JSON Message[] array — typically 2–20 KB. 20 entries keeps the
 /// ring well under 500 KB even on heavy turns.
-pub const MAX_REQUEST_LOG: usize = 20;
+pub(crate) const MAX_REQUEST_LOG: usize = 20;
 
 /// Default USD → CNY rate when `--cny-rate` is unset but a `zh_*`
 /// locale is detected. Picked as a stable round number; users in
 /// rate-sensitive workflows should pass `--cny-rate` explicitly.
-pub const DEFAULT_CNY_RATE: f64 = 7.20;
+pub(crate) const DEFAULT_CNY_RATE: f64 = 7.20;
 
 /// Resolve the CNY rate from CLI override + locale env var. Pure —
 /// takes the env value as an argument so tests don't need to mutate
 /// process state.
-pub fn resolve_cny_rate(cli_override: Option<f64>, lang_env: Option<&str>) -> Option<f64> {
+pub(crate) fn resolve_cny_rate(cli_override: Option<f64>, lang_env: Option<&str>) -> Option<f64> {
     if let Some(rate) = cli_override
         && rate > 0.0
     {
@@ -907,17 +1013,17 @@ pub fn resolve_cny_rate(cli_override: Option<f64>, lang_env: Option<&str>) -> Op
 /// Per-turn hit rate at-or-above which a turn counts toward the
 /// "healthy baseline" streak. Picked empirically — most long coding
 /// sessions with stable prefixes sit above 90%, so 80% is a soft cut.
-pub const CACHE_HIGH_RATE: f64 = 0.80;
+pub(crate) const CACHE_HIGH_RATE: f64 = 0.80;
 
 /// Per-turn hit rate below which (after a healthy baseline) we flag
 /// a "cache drop". A 30+ percentage-point drop relative to the
 /// baseline is almost always a prefix-mutation bug.
-pub const CACHE_LOW_RATE: f64 = 0.50;
+pub(crate) const CACHE_LOW_RATE: f64 = 0.50;
 
 /// Number of consecutive healthy turns required before drop detection
 /// arms. Without this minimum, the first turn (mostly miss) would
 /// trip the alarm.
-pub const CACHE_HIGH_STREAK_THRESHOLD: u8 = 3;
+pub(crate) const CACHE_HIGH_STREAK_THRESHOLD: u8 = 3;
 
 /// Pure helper for [`AppState::on_agent_event`] cache-drop tracking.
 /// Returns `(new_streak, new_dropped)`.
@@ -931,7 +1037,7 @@ pub const CACHE_HIGH_STREAK_THRESHOLD: u8 = 3;
 ///   streak had armed the alarm (`prev_streak >= threshold`), the
 ///   `dropped` flag stays set forever (or until `AgentStart`).
 /// - Anything in between (50% – 80%) is "neutral" — leaves both alone.
-pub fn update_cache_drop_state(
+pub(crate) fn update_cache_drop_state(
     prev_streak: u8,
     prev_dropped: bool,
     per_turn_input: u64,
@@ -953,7 +1059,7 @@ pub fn update_cache_drop_state(
 
 /// Filter and sort models by a case-insensitive query. Models are sorted
 /// by provider (inferred from the id prefix) then by name.
-pub fn filter_models(models: &[(String, String)], query: &str) -> Vec<(String, String)> {
+pub(crate) fn filter_models(models: &[(String, String)], query: &str) -> Vec<(String, String)> {
     let needle = query.to_ascii_lowercase();
     let mut filtered: Vec<(String, String)> = models
         .iter()
@@ -1048,6 +1154,9 @@ impl AppState {
             transcript_cursor: None,
             effects: EffectManager::new(),
             markdown_cache: MarkdownCache::new(),
+            cached_blocks: Vec::new(),
+            transcript_len_cached: 0,
+            block_summary_cache: std::collections::HashMap::new(),
         };
         s.push(
             TranscriptKind::Info,
@@ -1520,7 +1629,7 @@ impl AppState {
             TuiEvent::Tick => Vec::new(),
             TuiEvent::Resize(_, _) => Vec::new(),
             TuiEvent::Agent(e) => {
-                self.on_agent_event(e);
+                self.on_agent_event(*e);
                 Vec::new()
             }
             TuiEvent::OverlayDoctor(text) => {
@@ -3414,7 +3523,7 @@ fn clamp_to_char_boundary(s: &str, idx: usize) -> usize {
 /// Walk the wrapped-row buffer between `selection.anchor` and `active`
 /// and pluck out the substring under the highlight. Newlines join
 /// rows. Pure — testable without a real clipboard.
-pub fn extract_selection(rendered: &[RenderedRow], selection: Selection) -> String {
+pub(crate) fn extract_selection(rendered: &[RenderedRow], selection: Selection) -> String {
     let (min_r, max_r, _, _) = selection.normalized();
     let mut out = String::new();
     for idx in min_r..=max_r {
@@ -3438,7 +3547,7 @@ pub fn extract_selection(rendered: &[RenderedRow], selection: Selection) -> Stri
 /// stringified — callers surface it to the user via a transcript info
 /// line rather than propagating, because clipboard failure shouldn't
 /// abort the agent loop.
-pub fn write_clipboard(text: &str) -> Result<(), String> {
+pub(crate) fn write_clipboard(text: &str) -> Result<(), String> {
     let mut clip = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     clip.set_text(text.to_string()).map_err(|e| e.to_string())
 }
@@ -4322,22 +4431,22 @@ mod tests {
 
         // Each TextDelta carries the *canonical* partial — the handler
         // pulls the full assistant text from `partial.content`.
-        s.on_event(TuiEvent::Agent(AgentEvent::MessageUpdate {
+        s.on_event(TuiEvent::Agent(Box::new(AgentEvent::MessageUpdate {
             message: make("Hello, "),
             assistant_message_event: AssistantMessageEvent::TextDelta {
                 partial: make("Hello, "),
                 content_index: 0,
                 delta: "Hello, ".into(),
             },
-        }));
-        s.on_event(TuiEvent::Agent(AgentEvent::MessageUpdate {
+        })));
+        s.on_event(TuiEvent::Agent(Box::new(AgentEvent::MessageUpdate {
             message: make("Hello, world!"),
             assistant_message_event: AssistantMessageEvent::TextDelta {
                 partial: make("Hello, world!"),
                 content_index: 0,
                 delta: "world!".into(),
             },
-        }));
+        })));
 
         let last = s.transcript.last().expect("text line");
         assert_eq!(last.kind, TranscriptKind::AssistantText);
@@ -4347,13 +4456,13 @@ mod tests {
     #[test]
     fn tool_call_events_increment_then_decrement_pending() {
         let mut s = fresh();
-        s.on_event(TuiEvent::Agent(AgentEvent::ToolExecutionStart {
+        s.on_event(TuiEvent::Agent(Box::new(AgentEvent::ToolExecutionStart {
             tool_call_id: "1".into(),
             tool_name: "read".into(),
             args: serde_json::json!({ "path": "x" }),
-        }));
+        })));
         assert_eq!(s.pending_tool_calls, 1);
-        s.on_event(TuiEvent::Agent(AgentEvent::ToolExecutionEnd {
+        s.on_event(TuiEvent::Agent(Box::new(AgentEvent::ToolExecutionEnd {
             tool_call_id: "1".into(),
             tool_name: "read".into(),
             result: grain_agent_core::AgentToolResult {
@@ -4362,7 +4471,7 @@ mod tests {
                 terminate: None,
             },
             is_error: false,
-        }));
+        })));
         assert_eq!(s.pending_tool_calls, 0);
         assert!(
             s.transcript
@@ -5341,7 +5450,7 @@ mod tests {
         let mut s = fresh();
         s.streaming = true;
         s.pending_tool_calls = 3;
-        s.on_event(TuiEvent::Agent(AgentEvent::AgentEnd { messages: vec![] }));
+        s.on_event(TuiEvent::Agent(Box::new(AgentEvent::AgentEnd { messages: vec![] })));
         assert!(!s.streaming);
         assert_eq!(s.pending_tool_calls, 0);
     }
@@ -5402,7 +5511,7 @@ mod tests {
         let mut s = fresh();
         s.cache_high_streak = 5;
         s.cache_dropped = true;
-        s.on_event(TuiEvent::Agent(AgentEvent::AgentStart));
+        s.on_event(TuiEvent::Agent(Box::new(AgentEvent::AgentStart)));
         assert_eq!(s.cache_high_streak, 0);
         assert!(!s.cache_dropped);
     }
@@ -5465,7 +5574,7 @@ mod tests {
         s.tokens_in = 5_000;
         s.tokens_out = 1_200;
 
-        s.on_event(TuiEvent::Agent(AgentEvent::AgentStart));
+        s.on_event(TuiEvent::Agent(Box::new(AgentEvent::AgentStart)));
 
         // Per-run counters reset to 0.
         assert_eq!(s.tokens_in, 0);
@@ -5521,14 +5630,14 @@ mod tests {
             error_message: None,
             timestamp: 0,
         };
-        s.on_event(TuiEvent::Agent(AgentEvent::MessageUpdate {
+        s.on_event(TuiEvent::Agent(Box::new(AgentEvent::MessageUpdate {
             message: am.clone(),
             assistant_message_event: AssistantMessageEvent::ThinkingDelta {
                 partial: am,
                 content_index: 0,
                 delta: "thinking-text".into(),
             },
-        }));
+        })));
         // Even with show_thinking off, the underlying transcript
         // holds the line — the renderer is what filters it out.
         assert!(
@@ -5643,4 +5752,58 @@ mod tests {
             "disabled skill should not appear"
         );
     }
+
+    // ── Cached blocks ──────────────────────────────────────────
+
+    #[test]
+    fn cached_blocks_rebuilds_when_transcript_grows() {
+        let mut s = fresh();
+        // Initial cache is empty; first access builds it.
+        let blocks = s.cached_blocks().to_vec();
+        let initial_len = blocks.len();
+
+        // Append a user prompt line.
+        s.push(TranscriptKind::UserPrompt, "hello".into());
+
+        // Cache should rebuild since transcript grew.
+        let new_blocks = s.cached_blocks().to_vec();
+        assert!(new_blocks.len() > initial_len, "cache must rebuild on growth");
+    }
+
+    #[test]
+    fn cached_blocks_is_stable_when_transcript_unchanged() {
+        let mut s = fresh();
+        let blocks1 = s.cached_blocks().to_vec();
+        let blocks2 = s.cached_blocks().to_vec();
+        assert_eq!(blocks1, blocks2, "same transcript => same blocks");
+    }
+
+    #[test]
+    fn block_summary_tool_call_includes_line_count() {
+        let mut s = fresh();
+        s.push(TranscriptKind::ToolCallStart, "● read(\"foo.rs\")".into());
+        s.push(TranscriptKind::AssistantText, "result line".into());
+        s.push(TranscriptKind::ToolCallEnd, "⎿ read complete".into());
+
+        let blocks = s.cached_blocks().to_vec();
+        // Find the tool-call block.
+        let tc = blocks.iter().find(|b| b.kind == BlockKind::ToolCall).unwrap();
+        let summary = s.block_summary(tc);
+        assert!(summary.contains("tool:"), "summary identifies tool");
+        assert!(summary.contains("(3 lines)"), "summary includes line count: {summary}");
+    }
+
+    #[test]
+    fn block_summary_thinking() {
+        let mut s = fresh();
+        s.push(TranscriptKind::ThinkingText, "Hmm...".into());
+        s.push(TranscriptKind::ThinkingText, "Let me think more...".into());
+
+        let blocks = s.cached_blocks().to_vec();
+        let th = blocks.iter().find(|b| b.kind == BlockKind::Thinking).unwrap();
+        let summary = s.block_summary(th);
+        assert!(summary.contains("thinking"), "summary identifies thinking: {summary}");
+        assert!(summary.contains("2 lines"), "summary includes line count: {summary}");
+    }
+
 }
