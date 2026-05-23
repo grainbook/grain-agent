@@ -1356,20 +1356,28 @@ impl AppState {
                 for c in &a.content {
                     match c {
                         AssistantContent::Text(t) => {
-                            // Multi-line assistant text: split into
-                            // lines so soft-wrap and scroll work.
-                            for line in t.text.lines() {
+                            // Push the full assistant text as ONE
+                            // entry per turn. The renderer wraps the
+                            // multi-paragraph content correctly via
+                            // `textwrap`, so the historical "split
+                            // every `\n` into its own row" code only
+                            // fragmented the transcript — turning a
+                            // 5-paragraph reply into 5 lines that
+                            // each looked like a separate response,
+                            // exactly what the user saw as "repeated
+                            // rendering" after a session resume.
+                            if !t.text.is_empty() {
                                 self.push(
                                     TranscriptKind::AssistantText,
-                                    line.to_string(),
+                                    t.text.clone(),
                                 );
                             }
                         }
                         AssistantContent::Thinking(t) => {
-                            for line in t.thinking.lines() {
+                            if !t.thinking.is_empty() {
                                 self.push(
                                     TranscriptKind::ThinkingText,
-                                    line.to_string(),
+                                    t.thinking.clone(),
                                 );
                             }
                         }
