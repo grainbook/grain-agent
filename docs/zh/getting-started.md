@@ -56,11 +56,31 @@ cargo build --release -p grain-ai-agent-headless --bin grain-headless
 
 ### 2.2 — 设置 API key
 
+**方法 A（推荐新手）：** 在项目里创建 `.grain/config.toml`，把 key 写进去：
+
+```bash
+mkdir -p .grain
+```
+
+然后编辑 `.grain/config.toml`：
+
+```toml
+[[provider]]
+name  = "anthropic"
+kind  = "anthropic"
+model = "anthropic/claude-sonnet-4-5"
+auth  = { kind = "api_key", env = "ANTHROPIC_API_KEY", value = "sk-ant-你的key" }
+```
+
+就这样——不需要 `export`。系统启动时读到 `value` 会自动帮你把环境变量设好。
+
+**方法 B（传统方式）：** 在 shell 里 export：
+
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Grain 会按环境变量自动识别 key。其它支持的：`OPENAI_API_KEY`、`GEMINI_API_KEY`、`DEEPSEEK_API_KEY`、`MOONSHOT_API_KEY` 等——完整表见 [llm-genai.md](./llm-genai.md)。
+两种方式都行。方法 A 的好处是换个终端也不用重新 export。完整配置参考：[config.md](./config.md)。
 
 ### 2.3 — 让它读一个真实项目
 

@@ -38,7 +38,7 @@ name = "openai-work"
 kind = "openai-compat"
 base_url = "https://api.openai.com/v1"
 model = "openai/gpt-4o"
-auth = { kind = "api_key", env = "OPENAI_API_KEY_WORK" }
+auth = { kind = "api_key", env = "OPENAI_API_KEY_WORK", value = "sk-..." }
 
 [[profile]]
 name = "kimi-trial"
@@ -51,7 +51,7 @@ auth = { kind = "api_key", env = "MOONSHOT_API_KEY" }
 name = "anthropic-default"
 kind = "anthropic"
 model = "anthropic/claude-sonnet-4-5"
-auth = { kind = "api_key", env = "ANTHROPIC_API_KEY" }
+auth = { kind = "api_key", env = "ANTHROPIC_API_KEY", value = "sk-ant-..." }
 
 [[profile]]
 name = "claude-pro"
@@ -68,6 +68,7 @@ auth = { kind = "anthropic_oauth" }
 | `model` | 是 | `grain-llm-models` 注册表里的 id (e.g. `openai/gpt-4o`) |
 | `auth.kind` | 是 | `api_key`（可用） 或 `anthropic_oauth`（Phase 2 stub） |
 | `auth.env` | `api_key` 时必填 | 调用时读这个 env var |
+| `auth.value` | 否 | API key 明文。写了启动时自动设环境变量，不需要手动 `export`。不写则从 shell 环境读取 |
 
 格式错的条目 `[warn]` 一行跳过，文件里其他条目继续加载。
 

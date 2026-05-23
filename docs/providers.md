@@ -40,7 +40,7 @@ name = "openai-work"
 kind = "openai-compat"
 base_url = "https://api.openai.com/v1"
 model = "openai/gpt-4o"
-auth = { kind = "api_key", env = "OPENAI_API_KEY_WORK" }
+auth = { kind = "api_key", env = "OPENAI_API_KEY_WORK", value = "sk-..." }
 
 [[profile]]
 name = "kimi-trial"
@@ -53,7 +53,7 @@ auth = { kind = "api_key", env = "MOONSHOT_API_KEY" }
 name = "anthropic-default"
 kind = "anthropic"
 model = "anthropic/claude-sonnet-4-5"
-auth = { kind = "api_key", env = "ANTHROPIC_API_KEY" }
+auth = { kind = "api_key", env = "ANTHROPIC_API_KEY", value = "sk-ant-..." }
 
 [[profile]]
 name = "claude-pro"
@@ -69,7 +69,10 @@ auth = { kind = "anthropic_oauth" }
 | `base_url` | required for `openai-compat` | Ignored for native kinds. |
 | `model` | yes | `grain-llm-models` registry id (e.g. `openai/gpt-4o`). |
 | `auth.kind` | yes | `api_key` (works today) or `anthropic_oauth` (Phase 2 — parsed and stubbed). |
-| `auth.env` | required when `auth.kind = api_key` | Env var name to read the key from at use time. |
+| `auth.env` | required when `auth.kind = api_key` | Env var name to read the key from. |
+| `auth.value` | optional | Inline API key value. When set, `auth.env` is auto-populated at startup so you don't need to `export` it beforehand. If omitted, the key is read from the shell environment as usual. |
+
+> 🔐 **Security note on `auth.value`:** Storing API keys in plaintext config files means anyone who can read the file can use your key. If you prefer not to, omit `value` and keep using `export` in your shell — the `env` field still tells grain which variable to look for. See [config.md](./config.md) for the recommended per-project config setup.
 
 A malformed entry is skipped with a `[warn]` line — the rest of the file still loads.
 

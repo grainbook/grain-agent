@@ -130,6 +130,13 @@ pub struct AuthEntry {
     pub kind: String,
     #[serde(default)]
     pub env: Option<String>,
+    /// Optional literal API key value. When set, `env` is populated
+    /// with this value at profile-load time so the rest of the stack
+    /// (genai auth resolver, etc.) reads it as if it were an
+    /// environment variable. This lets users inline keys in
+    /// config.toml instead of pre-exporting env vars.
+    #[serde(default)]
+    pub value: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +232,18 @@ pub fn profile_from_entry(entry: ProfileEntry) -> Result<ProviderProfile, String
                     entry.name
                 )
             })?;
+            // If a literal value is provided in config, inject it into
+            // the process environment now so downstream auth resolvers
+            // (which read `std::env::var`) find it without the user
+            // having to pre-export the env var.
+            //
+            // SAFETY: called during single-threaded boot (profile
+            // loading), before any other threads read the env.
+            if let Some(val) = &entry.auth.value {
+                if !val.is_empty() {
+                    unsafe { std::env::set_var(&env, val); }
+                }
+            }
             ProviderAuth::ApiKey { env }
         }
         "anthropic_oauth" => ProviderAuth::AnthropicOauth,
@@ -295,6 +314,56 @@ auth = { kind = "api_key", env = "OPENAI_API_KEY_WORK" }
             &profiles[0].auth,
             ProviderAuth::ApiKey { env } if env == "OPENAI_API_KEY_WORK"
         ));
+    }
+
+    #[test]
+    fn loads_api_key_profile_and_injects_value_into_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_providers(
+            tmp.path(),
+            r#"
+[[profile]]
+name = "inline-key"
+kind = "anthropic"
+model = "anthropic/claude-sonnet-4-5"
+auth = { kind = "api_key", env = "GRAIN_TEST_INLINE_KEY", value = "sk-ant-test-123" }
+"#,
+        );
+        // The env var should NOT be set before loading.
+        unsafe { std::env::remove_var("GRAIN_TEST_INLINE_KEY"); }
+        let (profiles, warnings) = load_profiles(&path);
+        assert!(warnings.is_empty(), "no warnings: {:?}", warnings);
+        assert_eq!(profiles.len(), 1);
+        assert!(matches!(
+            &profiles[0].auth,
+            ProviderAuth::ApiKey { env } if env == "GRAIN_TEST_INLINE_KEY"
+        ));
+        // The value should have been injected into the process env.
+        assert_eq!(
+            std::env::var("GRAIN_TEST_INLINE_KEY").as_deref(),
+            Ok("sk-ant-test-123")
+        );
+        // Clean up so the test doesn't leak into downstream tests.
+        unsafe { std::env::remove_var("GRAIN_TEST_INLINE_KEY"); }
+    }
+
+    #[test]
+    fn api_key_with_value_but_no_env_still_requires_env() {
+        // `env` is always required for `api_key` — the `value` is
+        // just an optional seed that auto-populates that env var.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_providers(
+            tmp.path(),
+            r#"
+[[profile]]
+name = "no-env"
+kind = "anthropic"
+model = "anthropic/claude-sonnet-4-5"
+auth = { kind = "api_key", value = "sk-no-env" }
+"#,
+        );
+        let (_profiles, warnings) = load_profiles(&path);
+        assert!(warnings.iter().any(|w| w.contains("requires auth.env")));
     }
 
     #[test]

@@ -11,4 +11,5 @@ author = "grain"
 # `http` — host_http_get / host_http_post  (REQUIRED: Exa API + fetch)
 # `env`  — host_env_get                    (REQUIRED: read EXA_API_KEY)
 # `log`  — host_log                        (recommended: see plugin logs)
+module = "target/wasm32-wasip1/release/web_search_plugin.wasm"
 capabilities = ["http", "env", "log"]

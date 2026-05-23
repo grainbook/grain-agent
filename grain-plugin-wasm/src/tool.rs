@@ -66,16 +66,16 @@ impl AgentTool for WasmTool {
         let plugin_id = self.plugin_id.clone();
         let tool_name = self.definition.name.clone();
 
+        // Capture the outer (multi-thread) runtime handle BEFORE
+        // spawn_blocking. Host imports (http-get/http-post) submit
+        // their async work to this handle from the blocking thread.
+        let host_rt_handle = tokio::runtime::Handle::current();
+
         // Run wasmtime in a blocking task so we don't block the
         // async agent loop. Select against cancellation.
         let handle = tokio::task::spawn_blocking(move || {
-            // Build a current-thread runtime for the blocking context
-            // so host HTTP calls can use async reqwest internally.
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| AgentToolError::msg(format!("spawn runtime: {e}")))?;
-            rt.block_on(runtime.call_tool(&plugin_id, &tool_name, &args_json))
+            runtime
+                .call_tool_blocking(&plugin_id, &tool_name, &args_json, host_rt_handle)
                 .map_err(|e| AgentToolError::msg(e.to_string()))
         });
 

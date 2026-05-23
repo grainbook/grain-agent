@@ -764,6 +764,7 @@ mod tests {
             m.insert("themes".into(), rhai::Dynamic::from(0_i64));
             m.insert("scripts".into(), rhai::Dynamic::from(1_i64));
             m.insert("prompts".into(), rhai::Dynamic::from(0_i64));
+            m.insert("wasm".into(), rhai::Dynamic::from(false));
             rhai::Dynamic::from(vec![rhai::Dynamic::from(m)])
         });
         let ext = RhaiExtension::from_scripts_dirs_with_engine(engine, &[script_dir]).unwrap();

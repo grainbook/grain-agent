@@ -44,7 +44,7 @@ We'll use both. Start with the CLI to see it work, then write your own agent.
 
 ### 2.1 — Build it
 
-You need Rust (stable) and an Anthropic API key (any provider works — we'll use Claude here because the default model is Claude).
+You need Rust (stable, any recent version) and an LLM API key (Anthropic recommended — the default model is Claude).
 
 ```bash
 git clone <this-repo> grain-agent
@@ -54,13 +54,33 @@ cargo build --release -p grain-ai-agent-headless --bin grain-headless
 
 The binary lands at `./target/release/grain-headless`. Symlink it onto your PATH if you like, or use the full path.
 
-### 2.2 — Set your key
+### 2.2 — Feed it your API key
+
+**Method A (recommended for beginners):** Create `.grain/config.toml` in your project with the key inline:
+
+```bash
+mkdir -p .grain
+```
+
+Then write `.grain/config.toml`:
+
+```toml
+[[provider]]
+name  = "anthropic"
+kind  = "anthropic"
+model = "anthropic/claude-sonnet-4-5"
+auth  = { kind = "api_key", env = "ANTHROPIC_API_KEY", value = "sk-ant-你的key" }
+```
+
+That's it — no `export` needed. The engine reads the value at startup and injects it into the process environment automatically.
+
+**Method B (traditional):** Export the key in your shell:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Grain auto-detects keys by environment variable. Other supported providers: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `MOONSHOT_API_KEY`, more — see [llm-genai.md](./llm-genai.md) for the full table.
+Both methods work. Method A means you never have to remember to re-export when opening a new terminal. See [config.md](./config.md) for the full config reference.
 
 ### 2.3 — Ask it about a real project
 

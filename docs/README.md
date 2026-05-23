@@ -96,11 +96,30 @@ Rust port of [`@earendil-works/pi-agent-core`](https://github.com/earendil-works
 
 ```bash
 cargo build --release -p grain-ai-agent-headless --bin grain-headless
+```
+
+**Method A — put your key in `.grain/config.toml` (no `export` needed):**
+
+```bash
+mkdir -p .grain
+cat > .grain/config.toml << 'EOF'
+[[provider]]
+name  = "anthropic"
+kind  = "anthropic"
+model = "anthropic/claude-sonnet-4-5"
+auth  = { kind = "api_key", env = "ANTHROPIC_API_KEY", value = "sk-ant-你的key" }
+EOF
+./target/release/grain-headless -C ./my-project --prompt "What does main.rs do?"
+```
+
+**Method B — traditional env var:**
+
+```bash
 export ANTHROPIC_API_KEY=...
 ./target/release/grain-headless -C ./my-project --prompt "What does main.rs do?"
 ```
 
-Add `--allow-write` to let it edit; `--allow-bash` to let it run shell; `--interactive` for multi-turn chat. Full reference: [headless-cli.md](./headless-cli.md).
+Add `--allow-write` to let it edit; `--allow-bash` to let it run shell; `--interactive` for multi-turn chat. Full reference: [headless-cli.md](./headless-cli.md). Config reference: [config.md](./config.md).
 
 ### Build your own agent in code
 

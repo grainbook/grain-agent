@@ -18,7 +18,10 @@
 //! to the guest.
 
 use std::collections::HashSet;
+use std::net::IpAddr;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::Mutex;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
@@ -28,6 +31,16 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 mod tool;
 
 pub use tool::WasmTool;
+
+/// Host log callback. Called for every `log` host import the guest
+/// invokes (after the `log` capability gate). Arguments: severity tag
+/// (`"debug" | "info" | "warn" | "error"`), plugin name, message.
+///
+/// When unset, the runtime falls back to `eprintln!` — fine for
+/// headless / CLI use, but the TUI MUST install a sink that routes
+/// to its event channel; otherwise plugin log writes clobber the
+/// alt-screen.
+pub type LogSink = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // Bindgen: generate Rust types + trait from the WIT contract
@@ -44,6 +57,8 @@ wasmtime::component::bindgen!({
 //   grain::plugin::host::{Host, LogLevel, HttpResponse}
 pub use exports::grain::plugin::plugin as wit_plugin;
 pub use grain::plugin::host as wit_host;
+
+const HOST_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // Host state carried in the wasmtime Store
@@ -77,6 +92,9 @@ pub struct PluginState {
     plugin_name: String,
     /// Tokio runtime handle for running async HTTP inside sync host fns.
     rt_handle: tokio::runtime::Handle,
+    /// Optional sink for `log` host imports. When `None`, the host
+    /// falls back to `eprintln!` — see [`LogSink`].
+    log_sink: Option<LogSink>,
 }
 
 impl WasiView for PluginState {
@@ -103,7 +121,14 @@ impl wit_host::Host for PluginState {
             wit_host::LogLevel::Warn => "warn",
             wit_host::LogLevel::Error => "error",
         };
-        eprintln!("[{tag}] wasm plugin '{}': {msg}", self.plugin_name);
+        if let Some(sink) = &self.log_sink {
+            sink(tag, &self.plugin_name, &msg);
+        } else {
+            // No sink installed — fall back to stderr. In TUI mode this
+            // would clobber the alt-screen, so the TUI is expected to
+            // build the runtime with `WasmPluginRuntime::with_log_sink`.
+            eprintln!("[{tag}] wasm plugin '{}': {msg}", self.plugin_name);
+        }
     }
 
     fn env_get(&mut self, key: String) -> Option<String> {
@@ -145,7 +170,11 @@ async fn do_http_request(
     headers: &[(String, String)],
     body: Option<&str>,
 ) -> Result<wit_host::HttpResponse, String> {
-    let client = reqwest::Client::new();
+    let mut client = reqwest::Client::builder().timeout(HOST_HTTP_TIMEOUT);
+    if should_bypass_proxy_for_url(url) {
+        client = client.no_proxy();
+    }
+    let client = client.build().map_err(|e| e.to_string())?;
     let mut builder = match method {
         "POST" => client.post(url),
         _ => client.get(url),
@@ -169,6 +198,20 @@ async fn do_http_request(
         headers: resp_headers,
         body: resp_body,
     })
+}
+
+fn should_bypass_proxy_for_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +268,9 @@ pub struct WasmPluginRuntime {
     linker: Linker<PluginState>,
     /// Component entries — kept so we can re-instantiate per call.
     components: Mutex<Vec<PluginEntry>>,
+    /// Optional host log sink. Cloned into every `PluginState` we
+    /// build, so guest `log` imports route through one shared callback.
+    log_sink: Option<LogSink>,
 }
 
 struct PluginEntry {
@@ -254,7 +300,16 @@ impl WasmPluginRuntime {
             engine,
             linker,
             components: Mutex::new(Vec::new()),
+            log_sink: None,
         })
+    }
+
+    /// Install a [`LogSink`]. Builder form so callers can chain on
+    /// the result of `new()`. The sink is cloned into every plugin
+    /// instance the runtime builds — set it before loading plugins.
+    pub fn with_log_sink(mut self, sink: LogSink) -> Self {
+        self.log_sink = Some(sink);
+        self
     }
 
     /// Load a `.wasm` component file. Calls the plugin's `init`
@@ -277,6 +332,7 @@ impl WasmPluginRuntime {
             capabilities: capabilities.clone(),
             plugin_name: plugin_name.to_string(),
             rt_handle: tokio::runtime::Handle::current(),
+            log_sink: self.log_sink.clone(),
         };
         let mut store = Store::new(&self.engine, state);
         let bindings = GrainPlugin::instantiate(&mut store, &component, &self.linker)?;
@@ -314,15 +370,49 @@ impl WasmPluginRuntime {
         Ok(LoadedPlugin { info, tool_defs })
     }
 
-    /// Call a tool on a loaded plugin. Creates a fresh Store per call
-    /// (isolation — no shared mutable state between invocations).
+    /// Call a tool on a loaded plugin from async code. Creates a fresh
+    /// Store per call (isolation — no shared mutable state between
+    /// invocations).
+    ///
+    /// This wrapper is intended for lightweight direct callers. The
+    /// [`WasmTool`] adapter uses [`Self::call_tool_blocking`] inside
+    /// `tokio::task::spawn_blocking` so wasmtime execution never
+    /// blocks the async agent loop.
+    ///
+    /// `host_rt_handle` is the runtime handle that the host imports
+    /// (http-get/http-post) will use to drive async work.
     pub async fn call_tool(
         &self,
         plugin_id: &str,
         tool_name: &str,
         args_json: &str,
+        host_rt_handle: tokio::runtime::Handle,
     ) -> Result<CallToolResult, WasmPluginError> {
-        let entries = self.components.lock().await;
+        std::thread::scope(|scope| {
+            scope
+                .spawn(move || {
+                    self.call_tool_blocking(plugin_id, tool_name, args_json, host_rt_handle)
+                })
+                .join()
+                .map_err(|_| WasmPluginError::ToolCallFailed("tool call panicked".into()))?
+        })
+    }
+
+    /// Synchronous tool call used from a plain blocking thread.
+    ///
+    /// This is the safe path for sync wasmtime guest execution plus
+    /// sync host imports that need to run async HTTP. The caller must
+    /// invoke it outside a Tokio runtime context; then `http-get` /
+    /// `http-post` can use `host_rt_handle.block_on(...)` without
+    /// tripping Tokio's nested-runtime guard.
+    pub fn call_tool_blocking(
+        &self,
+        plugin_id: &str,
+        tool_name: &str,
+        args_json: &str,
+        host_rt_handle: tokio::runtime::Handle,
+    ) -> Result<CallToolResult, WasmPluginError> {
+        let entries = self.components.blocking_lock();
         let entry = entries
             .iter()
             .find(|e| e.id == plugin_id)
@@ -336,7 +426,8 @@ impl WasmPluginRuntime {
             table: ResourceTable::new(),
             capabilities: entry.capabilities.clone(),
             plugin_name: entry.plugin_name.clone(),
-            rt_handle: tokio::runtime::Handle::current(),
+            rt_handle: host_rt_handle,
+            log_sink: self.log_sink.clone(),
         };
         let mut store = Store::new(&self.engine, state);
         let bindings = GrainPlugin::instantiate(&mut store, &entry.component, &self.linker)?;

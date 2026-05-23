@@ -281,6 +281,16 @@ pub fn render_md_to_spans(source: &str) -> Vec<MdStyledSpan> {
                 TagEnd::List(_) => {} // no-op
                 TagEnd::Item => {
                     stack.retain(|e| !matches!(e, StackEntry::ListItem));
+                    if !out
+                        .last()
+                        .map(|s: &MdStyledSpan| s.text.ends_with('\n'))
+                        .unwrap_or(true)
+                    {
+                        out.push(MdStyledSpan {
+                            text: "\n".into(),
+                            style_kind: MdStyleKind::Body,
+                        });
+                    }
                 }
                 TagEnd::BlockQuote(_) => {
                     stack.retain(|e| !matches!(e, StackEntry::Blockquote));
@@ -567,6 +577,13 @@ mod tests {
             code.iter().any(|s| s.text.contains("fn main")),
             "should contain code body: {spans:?}"
         );
+    }
+
+    #[test]
+    fn tight_list_items_render_on_separate_lines() {
+        let spans = render_md_to_spans("- `one`\n- `two`\n");
+        let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert!(text.contains("  • one\n  • two\n"), "{text:?}");
     }
 
     #[test]

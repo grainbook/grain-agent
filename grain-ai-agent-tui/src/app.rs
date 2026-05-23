@@ -193,8 +193,22 @@ pub enum TranscriptKind {
     ThinkingText,
     ToolCallStart,
     ToolCallEnd,
+    /// A tool-call result line that came back with `is_error == true`.
+    /// Renders the same `⎿  …` continuation as [`Self::ToolCallEnd`]
+    /// but styled with the error palette so failures jump out. Treated
+    /// as a tool-call terminator everywhere — see
+    /// [`is_tool_call_terminator`].
+    ToolCallError,
     Info,
     Error,
+}
+
+/// True when `kind` ends a tool-call block (either a normal
+/// completion or an error). Used by block grouping, turn-boundary
+/// detection, and the message counter to treat both end-of-call
+/// variants uniformly.
+pub fn is_tool_call_terminator(kind: TranscriptKind) -> bool {
+    matches!(kind, TranscriptKind::ToolCallEnd | TranscriptKind::ToolCallError)
 }
 
 /// Does this transcript kind warrant a fade-in animation when it
@@ -209,6 +223,7 @@ fn kind_should_fade(kind: TranscriptKind) -> bool {
             | TranscriptKind::ThinkingText
             | TranscriptKind::ToolCallStart
             | TranscriptKind::ToolCallEnd
+            | TranscriptKind::ToolCallError
     )
 }
 
@@ -289,7 +304,7 @@ pub fn build_transcript_blocks(transcript: &[TranscriptLine]) -> Vec<TranscriptB
                 let mut k = i + 1;
                 while k < transcript.len() {
                     end = k;
-                    if transcript[k].kind == TranscriptKind::ToolCallEnd {
+                    if is_tool_call_terminator(transcript[k].kind) {
                         break;
                     }
                     k += 1;
@@ -1383,13 +1398,15 @@ impl AppState {
                         }
                         AssistantContent::ToolCall(tc) => {
                             let args_preview = preview_json(&tc.arguments, 120);
+                            // Claude-Code-style header. The matching
+                            // ToolCallEnd / ToolCallError line is
+                            // emitted later when the corresponding
+                            // `Message::ToolResult` is replayed below,
+                            // so the rendered block ends up shaped
+                            // exactly like a live tool call.
                             self.push(
                                 TranscriptKind::ToolCallStart,
-                                format!("→ {}({args_preview})", tc.name),
-                            );
-                            self.push(
-                                TranscriptKind::ToolCallEnd,
-                                format!("  [tool call id: {}]", tc.id),
+                                format!("● {}({args_preview})", tc.name),
                             );
                         }
                         _ => {}
@@ -1406,15 +1423,16 @@ impl AppState {
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
-                let label = if tr.is_error { "✖" } else { "✓" };
-                let tool_name = &tr.tool_name;
-                // Truncate for readability — tool results can be
-                // very large.
                 let preview = truncate(&text, 500);
-                self.push(
-                    TranscriptKind::Info,
-                    format!("{label} {tool_name}: {preview}"),
-                );
+                let (kind, line) = if tr.is_error {
+                    (
+                        TranscriptKind::ToolCallError,
+                        format!("  ⎿  [error] {preview}"),
+                    )
+                } else {
+                    (TranscriptKind::ToolCallEnd, format!("  ⎿  {preview}"))
+                };
+                self.push(kind, line);
             }
         }
     }
@@ -2903,10 +2921,12 @@ impl AppState {
             },
             AgentEvent::MessageEnd { message } => {
                 if let AgentMessage::Standard(Message::Assistant(am)) = &message {
-                    self.tokens_in = self.tokens_in.saturating_add(am.usage.input);
-                    self.tokens_out = self.tokens_out.saturating_add(am.usage.output);
-                    self.tokens_cache_read =
-                        self.tokens_cache_read.saturating_add(am.usage.cache_read);
+                    // Update current run usage metrics to match the latest turn's physical context occupancy.
+                    // Do not accumulate inputs/outputs across turns here, as multi-turn sessions inherently
+                    // carry previous history (accumulating them causes quadratic double-counting).
+                    self.tokens_in = am.usage.input;
+                    self.tokens_out = am.usage.output;
+                    self.tokens_cache_read = am.usage.cache_read;
                     // Session-cumulative — never resets, so footer
                     // can show `Σ $0.43` even when idle.
                     self.session_usage.input =
@@ -2945,12 +2965,11 @@ impl AppState {
                 let preview = preview_json(&args, 120);
                 self.push(
                     TranscriptKind::ToolCallStart,
-                    format!("→ {tool_name}({preview})"),
+                    format!("● {tool_name}({preview})"),
                 );
             }
             AgentEvent::ToolExecutionUpdate { .. } => {}
             AgentEvent::ToolExecutionEnd {
-                tool_name,
                 is_error,
                 result,
                 ..
@@ -2968,13 +2987,20 @@ impl AppState {
                     .next()
                     .map(|t| truncate(t, 200))
                     .unwrap_or_default();
-                self.push(
-                    TranscriptKind::ToolCallEnd,
-                    format!(
-                        "← {tool_name}{} {preview}",
-                        if is_error { " [error]" } else { "" }
-                    ),
-                );
+                // Claude-Code-style continuation: `  ⎿  result` (or
+                // `  ⎿  [error] result` for failures). The matching
+                // ToolCallStart already named the tool, so we don't
+                // repeat it here. Error tag promotes the row to
+                // `ToolCallError` so the renderer can color it red.
+                let (kind, line) = if is_error {
+                    (
+                        TranscriptKind::ToolCallError,
+                        format!("  ⎿  [error] {preview}"),
+                    )
+                } else {
+                    (TranscriptKind::ToolCallEnd, format!("  ⎿  {preview}"))
+                };
+                self.push(kind, line);
             }
             AgentEvent::TurnEnd { message, .. } => {
                 if let Some(err) = &message.error_message {
@@ -3034,10 +3060,9 @@ impl AppState {
                 line.text.push_str(canonical);
                 return;
             }
-            if matches!(
-                line.kind,
-                TranscriptKind::UserPrompt | TranscriptKind::ToolCallEnd
-            ) {
+            if matches!(line.kind, TranscriptKind::UserPrompt)
+                || is_tool_call_terminator(line.kind)
+            {
                 break;
             }
         }

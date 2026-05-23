@@ -38,6 +38,11 @@
 //! kind     = "anthropic"
 //! model    = "anthropic/claude-sonnet-4-5"
 //! auth     = { kind = "api_key", env = "ANTHROPIC_API_KEY" }
+//!
+//! # The `value` field (optional) auto-populates the env var at
+//! # startup so you don't need to `export` it beforehand:
+//! auth     = { kind = "api_key", env = "ANTHROPIC_API_KEY",
+//!              value = "sk-ant-..." }
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -434,14 +439,24 @@ name  = "anthropic"
 kind  = "anthropic"
 model = "anthropic/claude-sonnet-4-5"
 auth  = { kind = "api_key", env = "ANTHROPIC_API_KEY" }
+
+[[provider]]
+name  = "openai-work"
+kind  = "openai"
+model = "openai/gpt-4o"
+auth  = { kind = "api_key", env = "OPENAI_API_KEY", value = "sk-openai-123" }
 "#,
         );
         let cfg = ConfigFile::load(dir.path()).unwrap();
-        assert_eq!(cfg.providers.len(), 1);
+        assert_eq!(cfg.providers.len(), 2);
         assert_eq!(cfg.providers[0].name, "anthropic");
         assert_eq!(cfg.providers[0].kind, "anthropic");
         assert_eq!(cfg.providers[0].auth.kind, "api_key");
         assert_eq!(cfg.providers[0].auth.env.as_deref(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(cfg.providers[0].auth.value.as_deref(), None);
+        assert_eq!(cfg.providers[1].name, "openai-work");
+        assert_eq!(cfg.providers[1].auth.env.as_deref(), Some("OPENAI_API_KEY"));
+        assert_eq!(cfg.providers[1].auth.value.as_deref(), Some("sk-openai-123"));
     }
 
     #[test]

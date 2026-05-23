@@ -43,11 +43,12 @@ const INPUT_PREFIX_COLS: u16 = 2;
 /// growing; the transcript needs the room.
 const HEADER_MAX_ROWS: u16 = 3;
 
-/// Cap on footer height when status + key-bind hint wraps. The footer
-/// can carry a *lot* of content during a turn (spinner + tokens +
-/// cache rate + cost + tool count + session-Σ + hint), so we allow
-/// it to grow more than the header before clamping.
-const FOOTER_MAX_ROWS: u16 = 5;
+/// Cap on footer height when the status chip row wraps. The hint
+/// text now lives in `/help` (F1), so on standard-width terminals
+/// everything fits on a single line; we still allow a second row
+/// for very narrow widths or when many chips (spinner + tokens +
+/// cost + tool count + Σ + ctx + msg + compact) are active at once.
+const FOOTER_MAX_ROWS: u16 = 2;
 
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState, elapsed: crate::anim::FxDuration) {
     let area = frame.area();
@@ -457,11 +458,25 @@ fn wrap_one_line(
     rendered: &mut Vec<crate::app::RenderedRow>,
     md_spans: Option<&[crate::md_render::MdStyledSpan]>,
 ) {
-
     let prefix = prefix_for_kind(line.kind);
     let continuation = "  ";
     let prefix_width = UnicodeWidthStr::width(prefix);
     let cont_width = UnicodeWidthStr::width(continuation);
+
+    if let Some(md_spans) = md_spans {
+        wrap_markdown_line(
+            line.kind,
+            width,
+            chrome_for_block,
+            rendered,
+            md_spans,
+            prefix,
+            continuation,
+            prefix_width,
+            cont_width,
+        );
+        return;
+    }
 
     for (seg_i, segment) in line.text.split('\n').enumerate() {
         let initial_prefix = if seg_i == 0 { prefix } else { continuation };
@@ -479,33 +494,6 @@ fn wrap_one_line(
                 .collect()
         };
 
-        // Track cumulative character offset within the original
-        // `segment` so we can map fragments back to source spans.
-        // Use `.chars().count()` because textwrap wraps by display
-        // width, but we need byte offsets for slicing.
-        //
-        // Build a mapping: for each wrapped fragment, determine its
-        // byte range [start, end) in `segment`.
-        let mut char_offset = 0usize;
-        let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(wrapped.len());
-        for frag in &wrapped {
-            let frag_chars = frag.chars().count();
-            // Byte range: from the start of this fragment to the start
-            // of the next one.
-            let start_byte = segment
-                .char_indices()
-                .nth(char_offset)
-                .map(|(i, _)| i)
-                .unwrap_or(segment.len());
-            let end_byte = segment
-                .char_indices()
-                .nth(char_offset + frag_chars)
-                .map(|(i, _)| i)
-                .unwrap_or(segment.len());
-            ranges.push((start_byte, end_byte));
-            char_offset += frag_chars;
-        }
-
         for (frag_i, frag) in wrapped.into_iter().enumerate() {
             let p = if frag_i == 0 {
                 initial_prefix
@@ -513,18 +501,95 @@ fn wrap_one_line(
                 continuation
             };
             let text = format!("{p}{frag}");
-            let md = md_spans.map(|spans| {
-                let (frag_start, frag_end) = ranges[frag_i];
-                (spans.to_vec(), frag_start, frag_end)
-            });
             rendered.push(crate::app::RenderedRow {
                 text,
                 kind: line.kind,
                 chrome_for_block,
-                md_spans: md,
+                md_spans: None,
             });
         }
     }
+}
+
+fn wrap_markdown_line(
+    kind: TranscriptKind,
+    width: usize,
+    chrome_for_block: Option<usize>,
+    rendered: &mut Vec<crate::app::RenderedRow>,
+    md_spans: &[crate::md_render::MdStyledSpan],
+    prefix: &str,
+    continuation: &str,
+    prefix_width: usize,
+    cont_width: usize,
+) {
+    let display_text = markdown_plain_text(md_spans);
+
+    let mut segment_start = 0usize;
+    for (seg_i, segment) in display_text.split('\n').enumerate() {
+        let initial_prefix = if seg_i == 0 { prefix } else { continuation };
+        let initial_prefix_width = if seg_i == 0 { prefix_width } else { cont_width };
+        let inner = width
+            .saturating_sub(initial_prefix_width)
+            .max(1);
+        let wrapped: Vec<String> = if segment.is_empty() {
+            vec![String::new()]
+        } else {
+            textwrap::wrap(segment, inner)
+                .into_iter()
+                .map(|c| c.into_owned())
+                .collect()
+        };
+        let ranges = wrapped_fragment_ranges(segment, &wrapped);
+
+        for (frag_i, frag) in wrapped.into_iter().enumerate() {
+            let p = if frag_i == 0 {
+                initial_prefix
+            } else {
+                continuation
+            };
+            let (frag_start, frag_end) = ranges[frag_i];
+            rendered.push(crate::app::RenderedRow {
+                text: format!("{p}{frag}"),
+                kind,
+                chrome_for_block,
+                md_spans: Some((
+                    md_spans.to_vec(),
+                    segment_start + frag_start,
+                    segment_start + frag_end,
+                )),
+            });
+        }
+
+        segment_start = segment_start
+            .saturating_add(segment.len())
+            .saturating_add(1);
+    }
+}
+
+fn markdown_plain_text(spans: &[crate::md_render::MdStyledSpan]) -> String {
+    spans.iter().map(|s| s.text.as_str()).collect()
+}
+
+fn wrapped_fragment_ranges(segment: &str, wrapped: &[String]) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::with_capacity(wrapped.len());
+    let mut search_from = 0usize;
+    for frag in wrapped {
+        if frag.is_empty() {
+            ranges.push((
+                search_from.min(segment.len()),
+                search_from.min(segment.len()),
+            ));
+            continue;
+        }
+        let start = segment
+            .get(search_from..)
+            .and_then(|tail| tail.find(frag).map(|rel| search_from + rel))
+            .unwrap_or_else(|| search_from.min(segment.len()));
+        let end = start.saturating_add(frag.len()).min(segment.len());
+        ranges.push((start, end));
+        search_from = end;
+    }
+    ranges
 }
 
 /// One-line summary of a foldable block. Shape:
@@ -545,9 +610,9 @@ fn block_summary(
                 .get(block.first_line)
                 .map(|l| l.text.as_str())
                 .unwrap_or("");
-            // Strip the leading "→ " arrow if present so the
+            // Strip the leading "● " bullet if present so the
             // collapsed glyph carries the navigation cue alone.
-            let cleaned = head.trim_start_matches("→ ").trim();
+            let cleaned = head.trim_start_matches("● ").trim();
             let trimmed = truncate_oneline(cleaned, 60);
             if count > 1 {
                 format!("tool: {trimmed}  ({count} lines)")
@@ -603,6 +668,17 @@ fn build_line(
     if let Some((ref spans, frag_start, frag_end)) = row.md_spans {
         let mut sub_spans =
             crate::md_render::spans_for_fragment(spans, frag_start, frag_end, style, palette);
+        let content_len: usize = sub_spans.iter().map(|span| span.content.len()).sum();
+        let prefix_len = clamp_char_boundary(
+            &row.text,
+            row.text.len().saturating_sub(content_len),
+        );
+        if prefix_len > 0 {
+            sub_spans.insert(
+                0,
+                Span::styled(row.text[..prefix_len].to_string(), style),
+            );
+        }
         // Apply selection highlight across the sub-spans if needed.
         if let Some(s) = selection {
             if let Some((lo, hi)) = s.col_range_for_row(idx, row.text.len()) {
@@ -696,8 +772,19 @@ fn style_for_kind(kind: TranscriptKind, palette: &Palette) -> Style {
         TranscriptKind::ThinkingText => Style::default()
             .fg(palette.muted)
             .add_modifier(Modifier::ITALIC),
-        TranscriptKind::ToolCallStart => Style::default().fg(palette.warning),
-        TranscriptKind::ToolCallEnd => Style::default().fg(palette.warning),
+        // Claude-Code-style tool-call rendering. The `●` bullet is
+        // already embedded in the line text, so coloring the whole
+        // row tints the bullet too. Success row uses `success` so the
+        // bullet reads as green; the `⎿` continuation rides on
+        // `muted` for subdued read; failures get the full red error
+        // palette via `ToolCallError`.
+        TranscriptKind::ToolCallStart => Style::default()
+            .fg(palette.success)
+            .add_modifier(Modifier::BOLD),
+        TranscriptKind::ToolCallEnd => Style::default().fg(palette.muted),
+        TranscriptKind::ToolCallError => Style::default()
+            .fg(palette.error)
+            .add_modifier(Modifier::BOLD),
         TranscriptKind::Info => Style::default().fg(palette.muted),
         TranscriptKind::Error => Style::default()
             .fg(palette.error)
@@ -710,8 +797,11 @@ fn prefix_for_kind(kind: TranscriptKind) -> &'static str {
         TranscriptKind::UserPrompt => "› ",
         TranscriptKind::AssistantText => "",
         TranscriptKind::ThinkingText => "· ",
+        // Tool-call rows already carry their own visual prefix
+        // (`● ` / `  ⎿  `) in the line text, so no extra glyph here.
         TranscriptKind::ToolCallStart => "",
         TranscriptKind::ToolCallEnd => "",
+        TranscriptKind::ToolCallError => "",
         TranscriptKind::Info => "· ",
         TranscriptKind::Error => "✖ ",
     }
@@ -944,8 +1034,10 @@ fn build_footer_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
         spans.push(Span::raw("  "));
     }
     // Context-window usage chip: [ctx N%]. Color: green <=60, yellow 60-85, red >85.
+    // Both input and output tokens occupy the physical context window, so include both in the numerator.
     if state.context_window > 0 && state.tokens_in > 0 {
-        let pct = (state.tokens_in as f64 / state.context_window as f64 * 100.0)
+        let total_tokens = state.tokens_in.saturating_add(state.tokens_out);
+        let pct = (total_tokens as f64 / state.context_window as f64 * 100.0)
             .clamp(0.0, 100.0) as u64;
         let ctx_color = if pct <= 60 {
             palette.success
@@ -970,6 +1062,7 @@ fn build_footer_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
                 TranscriptKind::UserPrompt
                     | TranscriptKind::AssistantText
                     | TranscriptKind::ToolCallEnd
+                    | TranscriptKind::ToolCallError
             ))
             .count();
         if msg_count > 0 {
@@ -988,12 +1081,16 @@ fn build_footer_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
         ));
         spans.push(Span::raw("  "));
     }
+    // Minimal hint pointer — full keybind / slash-command catalog
+    // lives in the `/help` overlay (F1). Keeping the footer compact
+    // means status chips stay on one line even on narrow terminals,
+    // and the user isn't drowning in shortcuts they already know.
     spans.push(Span::styled(
-        "↑↓ history · Tab complete · PgUp/PgDn scroll · End tail · F1 help · F5 thinking · / cmds · Ctrl-C abort · Esc clear/quit",
+        "F1 help",
         Style::default().fg(palette.muted),
     ));
     Paragraph::new(Line::from(spans))
-        .alignment(ratatui::layout::Alignment::Right)
+        .alignment(ratatui::layout::Alignment::Left)
         .wrap(Wrap { trim: false })
 }
 
@@ -3014,5 +3111,62 @@ mod ui_format_tests {
         // All characters preserved across the wrapped rows.
         let joined: String = lines.concat();
         assert_eq!(joined, "abcd");
+    }
+
+    #[test]
+    fn markdown_wrapping_uses_rendered_offsets_after_hard_breaks() {
+        let source = "有的。我有两个网络相关工具：\n\n- `web_search` — 通过 Exa 搜索引擎搜索网页\n- `web_fetch` — 获取网页内容\n";
+        let md_spans = crate::md_render::render_md_to_spans(source);
+        let line = TranscriptLine {
+            kind: TranscriptKind::AssistantText,
+            text: source.into(),
+        };
+        let mut rendered = Vec::new();
+
+        wrap_one_line(&line, 160, None, &mut rendered, Some(&md_spans));
+
+        let palette = crate::theme::builtin_themes()[0].palette;
+        let rendered_text: Vec<String> = rendered
+            .iter()
+            .map(|row| {
+                build_line(row, 0, None, &palette)
+                    .spans
+                    .into_iter()
+                    .map(|span| span.content.into_owned())
+                    .collect::<String>()
+            })
+            .collect();
+
+        assert_eq!(rendered_text[0], "有的。我有两个网络相关工具：");
+        assert!(rendered_text[1].starts_with("    • web_search"));
+        assert!(rendered_text[2].starts_with("    • web_fetch"));
+        assert!(
+            rendered_text[1..]
+                .iter()
+                .all(|row| !row.starts_with("有的。我有两个网络相关工具：")),
+            "markdown rows must not restart from the first paragraph: {rendered_text:?}"
+        );
+    }
+
+    #[test]
+    fn markdown_line_preserves_non_empty_prefix() {
+        let source = "**thinking**\n";
+        let md_spans = crate::md_render::render_md_to_spans(source);
+        let line = TranscriptLine {
+            kind: TranscriptKind::ThinkingText,
+            text: source.into(),
+        };
+        let mut rendered = Vec::new();
+
+        wrap_one_line(&line, 80, None, &mut rendered, Some(&md_spans));
+
+        let palette = crate::theme::builtin_themes()[0].palette;
+        let first = build_line(&rendered[0], 0, None, &palette)
+            .spans
+            .into_iter()
+            .map(|span| span.content.into_owned())
+            .collect::<String>();
+
+        assert_eq!(first, "· thinking");
     }
 }

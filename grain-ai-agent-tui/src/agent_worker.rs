@@ -671,8 +671,22 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     #[cfg(feature = "wasm-plugins")]
     {
         use std::sync::Arc as StdArc;
+        // Route guest `log` host imports through the TUI event channel
+        // (single ephemeral-status row above the input) instead of the
+        // default `eprintln!`, which would clobber the alt-screen. Each
+        // new log line replaces the previous one; `Status` sink already
+        // animates the swap.
+        let evt_tx_for_wasm_log = evt_tx.clone();
+        let wasm_log_sink: grain_plugin_wasm::LogSink = StdArc::new(
+            move |level: &str, plugin: &str, msg: &str| {
+                let _ = evt_tx_for_wasm_log.send(TuiEvent::Status(format!(
+                    "[{level}] wasm '{plugin}': {msg}"
+                )));
+            },
+        );
         match grain_plugin_wasm::WasmPluginRuntime::new() {
             Ok(runtime) => {
+                let runtime = runtime.with_log_sink(wasm_log_sink);
                 let runtime = StdArc::new(runtime);
                 for plugin in &discovered_plugins {
                     let Some(wasm_path) = plugin.wasm_module() else {
@@ -688,12 +702,16 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                     // Just `.await` the plugin load directly.
                     match runtime.load(&wasm_path, &plugin_id, caps, &plugin_name).await {
                         Ok(loaded) => {
-                            eprintln!(
-                                "[info] wasm plugin '{}' v{}: {} tool(s)",
+                            // Boot-time load summary: route through the
+                            // event channel as an `Info` line so it
+                            // lands in the transcript scrollback, not
+                            // bleeding to stderr.
+                            let _ = evt_tx.send(TuiEvent::Info(format!(
+                                "wasm plugin '{}' v{}: {} tool(s)",
                                 loaded.info.name,
                                 loaded.info.version,
                                 loaded.tool_defs.len()
-                            );
+                            )));
                             for td in &loaded.tool_defs {
                                 tools.push(StdArc::new(grain_plugin_wasm::WasmTool::new(
                                     runtime.clone(),
@@ -707,7 +725,6 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                                 "wasm plugin '{}' load failed: {e}",
                                 plugin.manifest.name
                             );
-                            eprintln!("[warn] {msg}");
                             deferred_warnings.push(msg);
                         }
                     }
@@ -715,7 +732,6 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             }
             Err(e) => {
                 let msg = format!("wasmtime runtime init failed: {e}");
-                eprintln!("[warn] {msg}");
                 deferred_warnings.push(msg);
             }
         }
@@ -724,9 +740,9 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     {
         let any_wasm = discovered_plugins.iter().any(|p| p.wasm_module().is_some());
         if any_wasm {
-            eprintln!(
-                "[warn] wasm plugin(s) found but binary was built without \
-                 --features wasm-plugins; ignoring"
+            deferred_warnings.push(
+                "wasm plugin(s) found but binary was built without \
+                 --features wasm-plugins; ignoring".to_string()
             );
         }
     }

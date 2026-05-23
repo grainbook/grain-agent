@@ -105,10 +105,117 @@ async fn load_nonexistent_file_returns_error() {
 #[tokio::test]
 async fn call_tool_on_unknown_plugin_returns_error() {
     let rt = WasmPluginRuntime::new().unwrap();
-    let result = rt.call_tool("nonexistent", "echo", "{}").await;
+    let result = rt
+        .call_tool(
+            "nonexistent",
+            "echo",
+            "{}",
+            tokio::runtime::Handle::current(),
+        )
+        .await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("not loaded"), "error: {err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_web_fetch_plugin_does_not_reenter_tokio_runtime() {
+    use grain_agent_core::AgentTool;
+    use grain_plugin_wasm::WasmTool;
+    use std::io::{ErrorKind, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio_util::sync::CancellationToken;
+
+    let wasm = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/web-search/target/wasm32-wasip1/release/web_search_plugin.wasm");
+    if !wasm.exists() {
+        eprintln!("skipping web-search wasm e2e: {} missing", wasm.display());
+        return;
+    }
+
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => {
+            eprintln!("skipping web-search wasm e2e: local bind denied by sandbox");
+            return;
+        }
+        Err(e) => panic!("bind local test server: {e}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(pair) => break pair,
+                Err(e)
+                    if e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("accept local test connection: {e}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut buf = [0_u8; 1024];
+        let _ = stream.read(&mut buf).unwrap();
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 15\r\n\r\nhello from test",
+            )
+            .unwrap();
+    });
+
+    let rt = Arc::new(WasmPluginRuntime::new().unwrap());
+    let loaded = rt
+        .load(
+            &wasm,
+            "web-search",
+            Capabilities {
+                log: false,
+                env: false,
+                http: true,
+            },
+            "web-search",
+        )
+        .await
+        .unwrap();
+    let fetch_def = loaded
+        .tool_defs
+        .iter()
+        .find(|td| td.name == "web_fetch")
+        .expect("web_fetch tool")
+        .clone();
+    let tool = WasmTool::new(rt, "web-search", &fetch_def);
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        tool.execute(
+            "fetch",
+            serde_json::json!({ "url": format!("http://{addr}/") }),
+            CancellationToken::new(),
+            Arc::new(|_: grain_agent_core::AgentToolResult| {}),
+        ),
+    )
+    .await
+    .expect("web_fetch plugin call timed out")
+    .unwrap();
+
+    server.join().unwrap();
+    let body = result
+        .content
+        .iter()
+        .filter_map(|c| match c {
+            grain_agent_core::UserContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(body.contains("hello from test"), "{body}");
 }
 
 // ---------------------------------------------------------------------------

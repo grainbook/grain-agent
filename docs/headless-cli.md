@@ -21,10 +21,15 @@ cargo build --release -p grain-ai-agent-headless --bin grain-headless --features
 ## One-line usage
 
 ```bash
+# 方式 A：key 写在 .grain/config.toml 里（推荐新手）
+grain-headless -C ./my-project --prompt "What does main.rs do?"
+
+# 方式 B：传统环境变量
+export ANTHROPIC_API_KEY=sk-ant-...
 grain-headless -C ./my-project --prompt "What does main.rs do?"
 ```
 
-The agent runs read-only by default and prints a streaming event log to stdout.
+The agent runs read-only by default and prints a streaming event log to stdout. See [config.md](./config.md) for the full config reference and how to inline API keys.
 
 ## Flags
 
@@ -139,7 +144,7 @@ Boolean fields are honored in both directions — `allow_bash = false` in config
 
 ## Environment variables
 
-The genai builder auto-detects API keys by provider:
+The genai builder auto-detects API keys by provider. You can either set them as shell environment variables, or write them directly into `.grain/config.toml` (see [config.md](./config.md)).
 
 | Provider | Variable |
 |---------|----------|
@@ -155,4 +160,4 @@ The genai builder auto-detects API keys by provider:
 | SiliconFlow | `SILICONFLOW_API_KEY` |
 | Zhipu (BigModel) | `ZHIPU_API_KEY` |
 
-Run `grain-headless --doctor` to see which keys are detected in your shell.
+Run `grain-headless --doctor` to see which keys are detected in your environment.
