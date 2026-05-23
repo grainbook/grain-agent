@@ -1016,8 +1016,8 @@ fn draw_overlay(
         Overlay::ProviderPicker { focused } => {
             return draw_provider_picker(frame, inner, *focused, state, palette);
         }
-        Overlay::ModelPicker { focused, models } => {
-            return draw_model_picker(frame, inner, *focused, models, state, palette);
+        Overlay::ModelPicker { focused, models, query } => {
+            return draw_model_picker(frame, inner, *focused, models, query, state, palette);
         }
         Overlay::Log { scroll } => {
             return draw_log(frame, inner, *scroll, state, palette);
@@ -2363,6 +2363,7 @@ fn draw_model_picker(
     popup: Rect,
     focused: usize,
     models: &[(String, String)],
+    query: &str,
     state: &AppState,
     palette: &Palette,
 ) {
@@ -2370,6 +2371,8 @@ fn draw_model_picker(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // title
+            Constraint::Length(1), // pad
+            Constraint::Length(1), // search input
             Constraint::Length(1), // pad
             Constraint::Min(1),    // list
             Constraint::Length(1), // hint
@@ -2391,68 +2394,126 @@ fn draw_model_picker(
     ]);
     frame.render_widget(Paragraph::new(title_line), chunks[0]);
 
-    let body_area = chunks[2];
-    if models.is_empty() {
+    // Search bar with caret. Empty query shows a placeholder.
+    let search_line = if query.is_empty() {
+        Line::from(vec![
+            Span::styled("⌕ ", Style::default().fg(palette.accent)),
+            Span::styled(
+                "type to search models …",
+                Style::default().fg(palette.muted),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("⌕ ", Style::default().fg(palette.accent)),
+            Span::styled(query.to_string(), Style::default().fg(palette.fg)),
+            Span::styled("▌", Style::default().fg(palette.accent)),
+        ])
+    };
+    frame.render_widget(Paragraph::new(search_line), chunks[2]);
+
+    let body_area = chunks[4];
+
+    // Filter, sort, and group by provider.
+    let filtered = crate::app::filter_models(models, query);
+
+    if filtered.is_empty() {
         let line = Line::from(Span::styled(
-            "(loading models…)",
+            if models.is_empty() {
+                "(loading models…)"
+            } else {
+                "(no models match your search)"
+            },
             Style::default().fg(palette.muted),
         ));
         frame.render_widget(Paragraph::new(line), body_area);
     } else {
-        let lines: Vec<Line> = models
+        #[derive(Debug, Clone)]
+        enum Row {
+            Header(String),
+            Item { idx: usize, id: String, name: String },
+        }
+
+        let mut rows: Vec<Row> = Vec::new();
+        let mut last_provider = "";
+        for (idx, (id, name)) in filtered.iter().enumerate() {
+            let provider = id.split('/').next().unwrap_or("");
+            if provider != last_provider {
+                rows.push(Row::Header(provider.to_string()));
+                last_provider = provider;
+            }
+            rows.push(Row::Item {
+                idx,
+                id: id.clone(),
+                name: name.clone(),
+            });
+        }
+
+        // Find the display row index of the focused item.
+        let focused_row = rows
             .iter()
-            .enumerate()
-            .map(|(i, (id, name))| {
-                model_picker_row(i, id, name, focused, &state.model_id, palette)
-            })
-            .collect();
+            .position(|r| matches!(r, Row::Item { idx, .. } if *idx == focused))
+            .unwrap_or(0);
+
         let visible = body_area.height as usize;
-        let total = lines.len();
+        let total = rows.len();
         let start = if total > visible {
-            focused.saturating_sub(visible / 2).min(total - visible)
+            focused_row.saturating_sub(visible / 2).min(total - visible)
         } else {
             0
         };
         let end = (start + visible).min(total);
-        let slice: Vec<Line> = lines[start..end].to_vec();
+
+        let lines: Vec<Line> = rows[start..end]
+            .iter()
+            .map(|row| match row {
+                Row::Header(provider) => Line::from(vec![
+                    Span::styled(
+                        format!("{provider}/"),
+                        Style::default()
+                            .fg(palette.secondary)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Row::Item { idx, id, name } => {
+                    let is_focused = *idx == focused;
+                    let cursor = if is_focused { "▶ " } else { "  " };
+                    let mark = if id == &state.model_id { "✓ " } else { "  " };
+                    let row_style = if is_focused {
+                        Style::default()
+                            .fg(palette.accent)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(palette.fg)
+                    };
+                    Line::from(vec![
+                        Span::styled(format!("{cursor}{mark}"), row_style),
+                        Span::styled(name.to_string(), row_style),
+                        Span::raw("  "),
+                        Span::styled(id.to_string(), Style::default().fg(palette.muted)),
+                    ])
+                }
+            })
+            .collect();
+
         frame.render_widget(
-            Paragraph::new(Text::from(slice)).wrap(Wrap { trim: false }),
+            Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
             body_area,
         );
     }
 
+    let hint = if query.is_empty() {
+        "↑↓ navigate · Enter apply · Esc cancel".to_string()
+    } else {
+        format!("↑↓ navigate · Enter apply · Esc cancel · {} matches", filtered.len())
+    };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "↑↓ navigate · Enter apply · Esc cancel",
+            hint,
             Style::default().fg(palette.muted),
         ))),
-        chunks[3],
+        chunks[5],
     );
-}
-
-fn model_picker_row(
-    i: usize,
-    id: &str,
-    name: &str,
-    focused: usize,
-    current_model_id: &str,
-    palette: &Palette,
-) -> Line<'static> {
-    let cursor = if i == focused { "▶ " } else { "  " };
-    let mark = if id == current_model_id { "✓ " } else { "  " };
-    let row_style = if i == focused {
-        Style::default()
-            .fg(palette.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(palette.fg)
-    };
-    Line::from(vec![
-        Span::styled(format!("{cursor}{mark}"), row_style),
-        Span::styled(name.to_string(), row_style),
-        Span::raw("  "),
-        Span::styled(id.to_string(), Style::default().fg(palette.muted)),
-    ])
 }
 
 fn draw_theme_picker(
