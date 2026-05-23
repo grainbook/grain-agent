@@ -38,7 +38,10 @@ rhai = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
 
 [features]
-default = []
+# Default to all optional engines on. `--no-default-features` strips
+# them out for users who want a minimal binary (~5 MB vs ~25 MB) and
+# faster compile. Individual features below document their cost.
+default = ["wasm-plugins", "scripts-boa", "scripts-rhai", "hot-reload"]
 # Watch plugin script dirs for changes and live-reload the Rhai
 # engine + agent tool catalog. Requires `scripts-rhai`. Off by
 # default — adds ~150KB compile cost and one extra OS thread for

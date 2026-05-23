@@ -6,7 +6,10 @@ license.workspace = true
 description = "Headless coding-agent toolkit built on grain-agent-core + grain-agent-harness + grain-llm-genai. v1 ships the four read-only filesystem tools and a single-prompt CLI driver (`grain-headless`); write tools / shell / interactive loop / rig-backed semantic search land in follow-up PRs."
 
 [features]
-default = []
+# Default to scripting + WASM plugin support on. `rig` stays opt-in
+# since it pulls a much heavier dep tree. `--no-default-features`
+# gets you a minimal headless binary.
+default = ["scripts-boa", "wasm-plugins"]
 rig = ["dep:rig", "dep:anyhow"]
 # Wires the Boa-backed JS scripting layer in: registers `BoaExtension`
 # when the user passes `--scripts-dir <DIR>` or drops scripts into
