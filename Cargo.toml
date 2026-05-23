@@ -52,7 +52,7 @@ grain-pi-compat = { path = "grain-pi-compat" }
 grain-deepseek-pack = { path = "grain-deepseek-pack" }
 lazy-gagent = { path = "lazy-gagent" }
 grain-script-rhai = { path = "grain-script-rhai" }
-ratatui = "0.29"
+ratatui = { version = "0.30", features = ["crossterm_0_28"] }
 crossterm = "0.28"
 unicode-width = "0.2"
 boa_engine = "0.21"
