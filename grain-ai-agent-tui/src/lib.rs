@@ -17,6 +17,18 @@
 //!   render loop together. `src/bin/grain_tui.rs` is a tiny entry point
 //!   that calls into it.
 
+// Lint philosophy: be strict about correctness, warn on common mistakes,
+// and let pedantic lints be opt-in so they don't turn into noise.
+#![deny(clippy::correctness)]
+#![warn(clippy::suspicious)]
+#![warn(clippy::style)]
+#![warn(clippy::complexity)]
+#![warn(clippy::perf)]
+#![warn(clippy::undocumented_unsafe_blocks)]
+// missing_docs is noisy for a binary-first crate with many internal
+// modules; enable selectively on the public API surface once that
+// surface stabilises.
+// #![warn(missing_docs)]
 pub mod agent_worker;
 pub mod anim;
 pub mod app;

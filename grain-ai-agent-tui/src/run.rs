@@ -92,7 +92,7 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
         .unwrap_or_else(|| args.workspace.join(".grain").join("themes"));
     // Theme fallback chain:
     //   1. `--theme <name>` CLI flag (explicit user intent)
-    //   2. `persisted.last_theme` (previous session's choice)
+    //   2. `ctx.persisted.last_theme` (previous session's choice)
     //   3. "default"
     let requested_theme: String = if args.theme != "default" {
         args.theme.clone()
@@ -120,18 +120,22 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
 
     install_panic_hook();
     let mut terminal = init_terminal()?;
+    let mut ctx = EventLoopCtx {
+        terminal: &mut terminal,
+        tick_ms: args.tick_ms,
+        cmd_tx: &cmd_tx,
+        persist_path,
+        persisted,
+    };
     let result = event_loop(
-        &mut terminal,
+        &mut ctx,
         &args,
         &handles,
         &mut evt_rx,
-        &cmd_tx,
         themes,
         initial_idx,
         profiles,
         initial_profile_idx,
-        persist_path,
-        persisted,
     )
     .await;
     restore_terminal(&mut terminal)?;
@@ -274,19 +278,26 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Re
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Bundles the mutable terminal / config / channels carried across
+/// iterations of the event loop. Extracted from the old 11-parameter
+/// signature for readability.
+struct EventLoopCtx<'a> {
+    terminal: &'a mut Terminal<CrosstermBackend<Stdout>>,
+    tick_ms: u64,
+    cmd_tx: &'a mpsc::UnboundedSender<crate::app::Command>,
+    persist_path: std::path::PathBuf,
+    persisted: PersistedState,
+}
+
 async fn event_loop(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ctx: &mut EventLoopCtx<'_>,
     args: &Args,
     handles: &crate::agent_worker::WorkerHandles,
     evt_rx: &mut mpsc::UnboundedReceiver<TuiEvent>,
-    cmd_tx: &mpsc::UnboundedSender<crate::app::Command>,
     themes: Vec<Theme>,
     initial_theme_idx: usize,
     providers: Vec<ProviderProfile>,
     initial_provider_idx: Option<usize>,
-    persist_path: std::path::PathBuf,
-    mut persisted: PersistedState,
 ) -> Result<(), TuiError> {
     // Resolve CNY rate once at startup: explicit `--cny-rate` wins,
     // otherwise auto-detect from `$LANG`. Pure: see
@@ -318,7 +329,7 @@ async fn event_loop(
     let term_tx_clone = term_tx.clone();
     std::thread::spawn(move || forward_terminal_events(term_tx_clone));
 
-    let mut ticker = interval(Duration::from_millis(args.tick_ms.max(16)));
+    let mut ticker = interval(Duration::from_millis(ctx.tick_ms.max(16)));
 
     // Track the last mouse-capture state we applied to the terminal so
     // we can re-issue Enable/Disable when the user toggles via F6.
@@ -326,7 +337,7 @@ async fn event_loop(
     let mut mouse_capture_applied = true;
 
     // Tracks the theme idx that's currently reflected in
-    // `persisted.last_theme`. After each `on_event`, divergence here
+    // `ctx.persisted.last_theme`. After each `on_event`, divergence here
     // means the user just picked a new theme via the picker — save
     // the choice so the next launch resumes it.
     let mut last_persisted_theme_idx = initial_theme_idx;
@@ -336,7 +347,7 @@ async fn event_loop(
     let mut last_tick = std::time::Instant::now();
 
     // Initial draw.
-    terminal.draw(|f| {
+    ctx.terminal.draw(|f| {
         ui::draw(f, &mut state, crate::anim::FxDuration::from_millis(0));
     })?;
 
@@ -402,7 +413,7 @@ async fn event_loop(
 
         let commands = state.on_event(event);
         for cmd in commands {
-            if cmd_tx.send(cmd).is_err() {
+            if ctx.cmd_tx.send(cmd).is_err() {
                 // worker is gone — wind down gracefully.
                 return Ok(());
             }
@@ -410,7 +421,7 @@ async fn event_loop(
         if let Some(ev) = leftover {
             let commands = state.on_event(ev);
             for cmd in commands {
-                if cmd_tx.send(cmd).is_err() {
+                if ctx.cmd_tx.send(cmd).is_err() {
                     return Ok(());
                 }
             }
@@ -418,9 +429,9 @@ async fn event_loop(
         if state.current_theme_idx != last_persisted_theme_idx {
             last_persisted_theme_idx = state.current_theme_idx;
             if let Some(theme) = state.themes.get(state.current_theme_idx) {
-                persisted.last_theme = Some(theme.name.clone());
-                if let Err(e) = persisted.save(&persist_path) {
-                    eprintln!("[warn] tui-state save {}: {e}", persist_path.display());
+                ctx.persisted.last_theme = Some(theme.name.clone());
+                if let Err(e) = ctx.persisted.save(&ctx.persist_path) {
+                    eprintln!("[warn] tui-state save {}: {e}", ctx.persist_path.display());
                 }
             }
         }
@@ -430,23 +441,23 @@ async fn event_loop(
         let current_provider = state.current_provider_idx
             .and_then(|i| state.providers.get(i))
             .map(|p| p.name.clone());
-        if current_provider != persisted.last_provider {
-            persisted.last_provider = current_provider;
-            if let Err(e) = persisted.save(&persist_path) {
-                eprintln!("[warn] tui-state save {}: {e}", persist_path.display());
+        if current_provider != ctx.persisted.last_provider {
+            ctx.persisted.last_provider = current_provider;
+            if let Err(e) = ctx.persisted.save(&ctx.persist_path) {
+                eprintln!("[warn] tui-state save {}: {e}", ctx.persist_path.display());
             }
         }
-        if persisted.last_model.as_deref() != Some(&state.model_id) {
-            persisted.last_model = Some(state.model_id.clone());
-            if let Err(e) = persisted.save(&persist_path) {
-                eprintln!("[warn] tui-state save {}: {e}", persist_path.display());
+        if ctx.persisted.last_model.as_deref() != Some(&state.model_id) {
+            ctx.persisted.last_model = Some(state.model_id.clone());
+            if let Err(e) = ctx.persisted.save(&ctx.persist_path) {
+                eprintln!("[warn] tui-state save {}: {e}", ctx.persist_path.display());
             }
         }
         if state.should_quit {
             return Ok(());
         }
         if state.mouse_capture_on != mouse_capture_applied {
-            apply_mouse_capture(terminal, state.mouse_capture_on)?;
+            apply_mouse_capture(ctx.terminal, state.mouse_capture_on)?;
             mouse_capture_applied = state.mouse_capture_on;
         }
         let now = std::time::Instant::now();
@@ -454,7 +465,7 @@ async fn event_loop(
             (now - last_tick).as_millis() as u32,
         );
         last_tick = now;
-        terminal.draw(|f| ui::draw(f, &mut state, fx_elapsed))?;
+        ctx.terminal.draw(|f| ui::draw(f, &mut state, fx_elapsed))?;
 
         // When effects are animating or the agent is streaming, run
         // at ~60 fps so transitions stay smooth. Otherwise block on

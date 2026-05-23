@@ -291,7 +291,7 @@ async fn install_subscriptions(
         .subscribe(Arc::new(move |event, _signal| {
             let tx = fan_tx.clone();
             Box::pin(async move {
-                let _ = tx.send(TuiEvent::Agent(event));
+                let _ = tx.send(TuiEvent::Agent(Box::new(event)));
             })
         }))
         .await;

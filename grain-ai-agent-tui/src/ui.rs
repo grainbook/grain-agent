@@ -167,7 +167,7 @@ fn wrap_input_to_lines(input: &str, area_width: u16) -> Vec<String> {
             lines.push(String::new());
             col = 0;
         }
-        lines.last_mut().unwrap().push(ch);
+        lines.last_mut().expect("just pushed").push(ch);
         col += w;
     }
     lines
@@ -283,9 +283,9 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, pale
     // blocks (tool calls, thinking) render either as one collapsed
     // summary line or as an expanded header + child lines, driven
     // by `AppState::is_block_expanded`.
-    let blocks = crate::app::build_transcript_blocks(&state.transcript);
+    let blocks = state.cached_blocks();
     let mut rendered: Vec<crate::app::RenderedRow> = Vec::new();
-    for block in &blocks {
+    for block in blocks {
         // Hard-hide thinking blocks when the legacy `show_thinking`
         // toggle is off — that key (F5) historically removed them
         // from the buffer entirely; fold semantics still apply to
@@ -294,7 +294,7 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, pale
             continue;
         }
         let foldable = block.is_foldable();
-        let expanded = state.is_block_expanded(block);
+        let expanded = state.is_block_expanded(&block);
         let focused = state.transcript_cursor == Some(block.id());
         // Cursor mark renders as "▶" before the fold glyph so the
         // user can see at a glance which block the next Space
@@ -304,7 +304,7 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, pale
             // Single summary line replaces the whole block.
             let summary = format!(
                 "{cursor_mark}▸ {}",
-                block_summary(block, &state.transcript)
+                state.block_summary(&block)
             );
             wrap_one_line(
                 &TranscriptLine {
@@ -324,7 +324,7 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, pale
             // each indented.
             let header = format!(
                 "{cursor_mark}▾ {}",
-                block_summary(block, &state.transcript)
+                state.block_summary(&block)
             );
             wrap_one_line(
                 &TranscriptLine {
@@ -340,7 +340,7 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, pale
         for idx in block.first_line..=block.last_line {
             let line = state.transcript.get(idx).cloned();
             if let Some(line) = line {
-                let md = md_spans_for_line(&line, idx, block, state);
+                let md = md_spans_for_line(&line, idx, &block, state);
                 wrap_one_line(&line, width, None, &mut rendered, md.as_deref());
             }
         }
@@ -592,43 +592,6 @@ fn wrapped_fragment_ranges(segment: &str, wrapped: &[String]) -> Vec<(usize, usi
     ranges
 }
 
-/// One-line summary of a foldable block. Shape:
-/// `tool: read · foo.rs · 2 lines` or `thinking · 5 lines`.
-/// The leading `▸` / `▾` glyph is added by the caller so the same
-/// summary works for both collapsed + expanded headers.
-fn block_summary(
-    block: &crate::app::TranscriptBlock,
-    transcript: &[TranscriptLine],
-) -> String {
-    let count = block.line_count();
-    match block.kind {
-        crate::app::BlockKind::ToolCall => {
-            // Extract the head line ("→ tool(args)") and use up to
-            // the first newline as the headline. Truncate so the
-            // summary stays single-line.
-            let head = transcript
-                .get(block.first_line)
-                .map(|l| l.text.as_str())
-                .unwrap_or("");
-            // Strip the leading "● " bullet if present so the
-            // collapsed glyph carries the navigation cue alone.
-            let cleaned = head.trim_start_matches("● ").trim();
-            let trimmed = truncate_oneline(cleaned, 60);
-            if count > 1 {
-                format!("tool: {trimmed}  ({count} lines)")
-            } else {
-                format!("tool: {trimmed}")
-            }
-        }
-        crate::app::BlockKind::Thinking => {
-            format!("thinking  ({count} line{})", if count == 1 { "" } else { "s" })
-        }
-        crate::app::BlockKind::Plain => transcript
-            .get(block.first_line)
-            .map(|l| l.text.clone())
-            .unwrap_or_default(),
-    }
-}
 
 /// Pick a chrome `TranscriptKind` for a synthetic fold header /
 /// summary line. We borrow an existing kind so style mapping +
@@ -638,17 +601,6 @@ fn block_chrome_kind(kind: crate::app::BlockKind) -> TranscriptKind {
         crate::app::BlockKind::ToolCall => TranscriptKind::ToolCallStart,
         crate::app::BlockKind::Thinking => TranscriptKind::ThinkingText,
         crate::app::BlockKind::Plain => TranscriptKind::Info,
-    }
-}
-
-fn truncate_oneline(s: &str, max: usize) -> String {
-    let s = s.replace('\n', " ");
-    if s.chars().count() <= max {
-        s
-    } else {
-        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-        out.push('…');
-        out
     }
 }
 
