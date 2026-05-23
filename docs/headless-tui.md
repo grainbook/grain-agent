@@ -71,7 +71,7 @@ Type `/` to open the autocomplete dropdown above the input. Narrows live as you 
 
 ### `/resume` picker
 
-Opens a centered overlay listing past sessions from `--sessions-dir` (default: `<workspace>/.grain/sessions/`). Each row shows the first user prompt (title), model, message count, and mtime. ↑↓ navigates; Enter prints a relaunch hint to the transcript:
+Opens a centered overlay listing past sessions from `--sessions-dir` (default: `<workspace>/.grain/sessions/`). Each row shows the last user prompt (title), model, message count, and mtime. ↑↓ navigates; Enter prints a relaunch hint to the transcript:
 
 ```
 (to resume: relaunch with `grain-tui --session /path/to/<uuid>.jsonl` — in-place /resume coming in Phase 4)

@@ -77,7 +77,7 @@ FOOTER         快捷键提示
 
 ### `/resume` 会话恢复
 
-打开居中弹层，列出 `--sessions-dir`（默认 `<workspace>/.grain/sessions/`）中的历史会话。每行显示第一条用户 prompt（标题）、模型、消息数、修改时间。↑↓ 导航；Enter 向 transcript 输出一条重启提示：
+打开居中弹层，列出 `--sessions-dir`（默认 `<workspace>/.grain/sessions/`）中的历史会话。每行显示最后一条用户 prompt（标题）、模型、消息数、修改时间。↑↓ 导航；Enter 向 transcript 输出一条重启提示：
 
 ```
 (to resume: relaunch with `grain-tui --session /path/to/<uuid>.jsonl` — in-place /resume coming in Phase 4)

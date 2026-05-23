@@ -218,6 +218,15 @@ impl CompactionPolicy for TokenBudgetPolicy {
             return None;
         }
 
+        // 2.5 Derive working-set pins: messages that mention currently-
+        //     active file paths or contain error/patch markers are pulled
+        //     into the kept tail so the summary never loses them.
+        let working_set_paths = derive_working_set_paths(messages);
+        let pinned: Vec<bool> = messages
+            .iter()
+            .map(|m| should_pin_message(m, &working_set_paths))
+            .collect();
+
         // 3. Walk backward from tail accumulating tokens until we've
         //    kept at least `keep_recent_tokens`. Include per-message
         //    framing in each entry so the running total matches what
@@ -233,8 +242,16 @@ impl CompactionPolicy for TokenBudgetPolicy {
         for i in (0..messages.len()).rev() {
             tail_tokens += per_msg[i];
             keep_start = i;
-            if tail_tokens >= keep_recent {
+            if tail_tokens >= keep_recent && !pinned[i] {
                 break;
+            }
+        }
+
+        // 3.5 Walk forward from keep_start through the prefix; any pinned
+        //     message pulls the boundary backward to include it.
+        for i in (0..keep_start).rev() {
+            if pinned[i] {
+                keep_start = i;
             }
         }
 
@@ -280,6 +297,224 @@ impl CompactionPolicy for TokenBudgetPolicy {
 
         Some(prefix_len)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Working-set path extraction (model-agnostic, model after DeepSeek-TUI's
+// compaction.rs)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of recent messages to scan for working-set paths.
+const RECENT_WORKING_SET_WINDOW: usize = 12;
+
+/// Maximum number of unique paths in the working set.
+const MAX_WORKING_SET_PATHS: usize = 24;
+
+/// Extract file paths from an agent message (tool arguments, tool results,
+/// and assistant/user text that mentions paths like `src/main.rs` or
+/// `Cargo.toml`).
+fn extract_paths_from_message(msg: &AgentMessage) -> Vec<String> {
+    let mut out = Vec::new();
+    match msg {
+        AgentMessage::Standard(Message::Assistant(a)) => {
+            for c in &a.content {
+                match c {
+                    AssistantContent::Text(t) => extract_paths_from_text(&t.text, &mut out),
+                    AssistantContent::Thinking(t) => extract_paths_from_text(&t.thinking, &mut out),
+                    AssistantContent::ToolCall(tc) => {
+                        for key in ["path", "file", "target", "cwd", "file_path"] {
+                            if let Some(v) = tc.arguments.get(key).and_then(|v| v.as_str()) {
+                                out.push(v.to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        AgentMessage::Standard(Message::User(u)) => {
+            for c in &u.content {
+                if let UserContent::Text(t) = c {
+                    extract_paths_from_text(&t.text, &mut out);
+                }
+            }
+        }
+        AgentMessage::Standard(Message::ToolResult(tr)) => {
+            for c in &tr.content {
+                if let UserContent::Text(t) = c {
+                    extract_paths_from_text(&t.text, &mut out);
+                }
+            }
+        }
+        AgentMessage::Custom(_) => {}
+    }
+    out
+}
+
+/// Scan `text` for path-like strings (e.g. `src/main.rs`, `Cargo.toml`,
+/// `docs/README.md`) and append them to `out`.
+fn extract_paths_from_text(text: &str, out: &mut Vec<String>) {
+    // Quick regex-like scan: look for sequences that look like file paths.
+    // Two patterns:
+    //   a) root-level names: Cargo.toml, README.md, AGENTS.md, etc.
+    //   b) dir/.../name.ext with typical code extensions.
+    for word in text.split_whitespace() {
+        let w = word.trim_matches(|c: char| c == '`' || c == '"' || c == '\'' || c == ',');
+        if w.is_empty() {
+            continue;
+        }
+        if is_root_name(w) || looks_like_path(w) {
+            out.push(w.to_string());
+        }
+    }
+}
+
+fn is_root_name(s: &str) -> bool {
+    matches!(
+        s,
+        "Cargo.toml"
+            | "Cargo.lock"
+            | "README.md"
+            | "CHANGELOG.md"
+            | "AGENTS.md"
+            | "Makefile"
+            | "Dockerfile"
+            | "package.json"
+            | "go.mod"
+            | "pyproject.toml"
+            | "config.example.toml"
+    )
+}
+
+fn looks_like_path(s: &str) -> bool {
+    if !s.contains('/') && !s.contains('\\') {
+        return false;
+    }
+    // Must end with a plausible extension or be a known directory prefix.
+    let has_ext = s
+        .rsplit('.')
+        .next()
+        .is_some_and(|ext| ext.len() >= 2 && ext.len() <= 6 && ext.chars().all(|c| c.is_alphanumeric()));
+    let known_dir = s.starts_with("src/")
+        || s.starts_with("tests/")
+        || s.starts_with("docs/")
+        || s.starts_with("crates/")
+        || s.starts_with(".grain/")
+        || s.starts_with(".github/");
+    has_ext || known_dir
+}
+
+/// Build a working set of file paths from the most recent messages.
+fn derive_working_set_paths(messages: &[AgentMessage]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut paths = Vec::new();
+    for msg in messages.iter().rev().take(RECENT_WORKING_SET_WINDOW) {
+        for p in extract_paths_from_message(msg) {
+            if seen.insert(p.clone()) {
+                paths.push(p);
+                if paths.len() >= MAX_WORKING_SET_PATHS {
+                    return paths;
+                }
+            }
+        }
+    }
+    paths
+}
+
+/// Whether a message should be pinned (kept in the tail) during compaction.
+/// Returns true when the message mentions a file in the working set or
+/// contains error / patch markers.
+fn should_pin_message(msg: &AgentMessage, working_set_paths: &[String]) -> bool {
+    let text = message_text(msg);
+    let lower = text.to_lowercase();
+
+    // Working-set path hits.
+    for path in working_set_paths {
+        if text.contains(path.as_str()) {
+            return true;
+        }
+    }
+
+    // Error markers.
+    for marker in [
+        "error:",
+        "error ",
+        "failed",
+        "panic",
+        "traceback",
+        "stack trace",
+        "assertion failed",
+        "test failed",
+    ] {
+        if lower.contains(marker) {
+            return true;
+        }
+    }
+
+    // Patch / diff markers.
+    for marker in [
+        "diff --git",
+        "+++ b/",
+        "--- a/",
+        "*** begin patch",
+        "*** update file:",
+        "*** add file:",
+        "*** delete file:",
+        "```diff",
+        "apply_patch",
+    ] {
+        if lower.contains(marker) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Render an agent message to a plain-text string for pinning heuristics.
+fn message_text(msg: &AgentMessage) -> String {
+    let mut text = String::new();
+    match msg {
+        AgentMessage::Standard(Message::Assistant(a)) => {
+            for c in &a.content {
+                match c {
+                    AssistantContent::Text(t) => {
+                        text.push_str(&t.text);
+                        text.push('\n');
+                    }
+                    AssistantContent::Thinking(t) => {
+                        text.push_str(&t.thinking);
+                        text.push('\n');
+                    }
+                    AssistantContent::ToolCall(tc) => {
+                        use std::fmt::Write;
+                        let _ = write!(text, "[tool_call:{}] {}\n", tc.name, tc.arguments);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        AgentMessage::Standard(Message::User(u)) => {
+            for c in &u.content {
+                if let UserContent::Text(t) = c {
+                    text.push_str(&t.text);
+                    text.push('\n');
+                }
+            }
+        }
+        AgentMessage::Standard(Message::ToolResult(tr)) => {
+            for c in &tr.content {
+                if let UserContent::Text(t) = c {
+                    text.push_str(&t.text);
+                    text.push('\n');
+                }
+            }
+        }
+        AgentMessage::Custom(v) => {
+            text.push_str(&serde_json::to_string(v).unwrap_or_default());
+        }
+    }
+    text
 }
 
 #[derive(Debug, Error)]
@@ -561,6 +796,255 @@ fn current_time_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Tool-result turn-end truncation (model-agnostic)
+// ---------------------------------------------------------------------------
+
+/// Default cap in **characters** for a single tool-result text block at
+/// turn end. Mirrors Reasonix's `TURN_END_RESULT_CAP_TOKENS` (~3000 tokens,
+/// ~12 000 chars at 4 chars/token). The model saw the full result for the
+/// turn that used it; subsequent turns only need a compacted reminder.
+/// A re-read is one tool call away and far cheaper than carrying the full
+/// payload through every future context window.
+pub const DEFAULT_TOOL_RESULT_TRUNCATION_CAP_CHARS: usize = 12_000;
+
+/// Truncate every tool-result message in `messages` whose text content
+/// exceeds `cap_chars` chars, keeping the head and tail so the model can
+/// still see what file / command was involved and its outcome.
+///
+/// Returns the number of messages that were truncated (for logging).
+pub fn truncate_tool_results(messages: &mut [AgentMessage], cap_chars: usize) -> usize {
+    let mut truncated = 0usize;
+    if cap_chars == 0 {
+        return 0;
+    }
+    let head_chars = cap_chars * 3 / 4; // keep 75% head
+    let tail_chars = cap_chars.saturating_sub(head_chars);
+    for msg in messages {
+        let AgentMessage::Standard(Message::ToolResult(tr)) = msg else {
+            continue;
+        };
+        for c in &mut tr.content {
+            let UserContent::Text(t) = c else {
+                continue;
+            };
+            let len = t.text.chars().count();
+            if len <= cap_chars {
+                continue;
+            }
+            let head: String = t.text.chars().take(head_chars).collect();
+            let tail: String = t
+                .text
+                .chars()
+                .rev()
+                .take(tail_chars)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            t.text = format!(
+                "{head}\n\n... [{len} total chars, truncated to {cap_chars} at turn end; \
+                 use `read` to re-fetch the full content if needed] ...\n\n{tail}",
+            );
+            truncated += 1;
+        }
+    }
+    truncated
+}
+
+/// Build a [`PrepareNextTurnFn`] that truncates every tool-result message
+/// exceeding `cap_chars` after each turn. Chain this *before* the
+/// compaction hook (via [`super::chain_prepare_next_turn`]) so compaction
+/// summarises already-truncated results rather than the original blobs.
+pub fn tool_result_truncation_hook(cap_chars: usize) -> PrepareNextTurnFn {
+    Arc::new(move |ctx: PrepareNextTurnContext| {
+        let cap = cap_chars;
+        Box::pin(async move {
+            let mut new_messages = (*ctx.context.messages).to_vec();
+            let n_truncated = truncate_tool_results(&mut new_messages, cap);
+            let n_compressed = semantic_compress_tool_results(&mut new_messages);
+            if n_truncated == 0 && n_compressed == 0 {
+                return None;
+            }
+            Some(AgentLoopTurnUpdate {
+                context: Some(AgentContext {
+                    system_prompt: ctx.context.system_prompt.clone(),
+                    messages: new_messages,
+                    tools: ctx.context.tools.clone(),
+                }),
+                ..Default::default()
+            })
+        })
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Rule-based semantic compression (model-agnostic, based on oh-my-pi's
+// semantic-compression skill)
+// ---------------------------------------------------------------------------
+
+/// Conservative semantic compression of tool-result text. Removes
+/// grammatical scaffolding that LLMs reconstruct from content words while
+/// preserving meaning-carrying content. Returns the number of messages
+/// that were compressed.
+///
+/// Rules (ordered for safety):
+///   - Delete leading articles (The, A, An) at sentence start
+///   - Delete copula phrases ("is a", "are the", "was a", etc.)
+///   - Delete "There is/are/was/were" and "It is/was" expletive subjects
+///   - Delete pure intensifiers (very, quite, rather, really, extremely)
+///   - Delete "that" complementizers before verbs
+///   - Collapse redundant phrases ("in order to" → "to")
+///
+/// We do NOT compress: error messages, code blocks, path references,
+/// numbers, or any line shorter than 30 chars (likely a key-value pair).
+pub fn semantic_compress(text: &str) -> String {
+    if text.len() < 30 {
+        return text.to_string();
+    }
+
+    // Stage 1: per-line compression (safe — doesn't merge lines).
+    let lines: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if line.len() < 30 {
+                return line.to_string();
+            }
+            compress_line(line)
+        })
+        .collect();
+
+    lines.join("\n")
+}
+
+/// Compress a single line of English text. Never changes line semantics.
+fn compress_line(line: &str) -> String {
+    let mut s = line.to_string();
+
+    // Delete redundant phrases (full-word, case-insensitive).
+    for (phrase, replacement) in [
+        ("in order to", "to"),
+        ("due to the fact that", "because"),
+        ("in terms of", ""),
+        ("a number of", "several"),
+        ("the majority of", "most"),
+        ("at this point in time", "now"),
+        ("on a regular basis", "regularly"),
+    ] {
+        // Case-insensitive replace.
+        if s.to_lowercase().contains(phrase) {
+            // Use a simple approach: find and replace preserving original casing where possible.
+            s = replace_phrase(&s, phrase, replacement);
+        }
+    }
+
+    // Delete "There is/are/was/were" at line start.
+    for prefix in ["there is ", "there are ", "there was ", "there were ",
+                   "There is ", "There are ", "There was ", "There were "] {
+        if s.starts_with(prefix) {
+            s = s[prefix.len()..].to_string();
+            break;
+        }
+    }
+
+    // Delete "It is/was" at line start when followed by adjective/noun.
+    for prefix in ["it is ", "it was ", "It is ", "It was "] {
+        if s.starts_with(prefix) {
+            s = s[prefix.len()..].to_string();
+            break;
+        }
+    }
+
+    // Delete pure intensifiers (standalone word, no meaning change).
+    for intensifier in ["very ", "quite ", "rather ", "really ", "extremely ",
+                        "Very ", "Quite ", "Rather ", "Really ", "Extremely "] {
+        s = s.replace(intensifier, "");
+    }
+
+    // Delete comma-separated interjections.
+    s = s.replace(" of course,", "");
+    s = s.replace(" Of course,", "");
+    s = s.replace(" indeed,", "");
+    s = s.replace(" Indeed,", "");
+
+    // Delete "that" as complementizer before a new clause (heuristic:
+    // the word before "that" is a verb like "said"/"reported"/"showed").
+    s = remove_complementizer_that(&s);
+
+    // Collapse extra whitespace.
+    let compressed = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compressed.is_empty() {
+        line.to_string()
+    } else {
+        compressed
+    }
+}
+
+fn replace_phrase(s: &str, phrase: &str, replacement: &str) -> String {
+    // Simple case-insensitive replacement.
+    let lower = s.to_lowercase();
+    let mut result = String::with_capacity(s.len());
+    let mut pos = 0;
+    while let Some(idx) = lower[pos..].find(phrase) {
+        let abs = pos + idx;
+        result.push_str(&s[pos..abs]);
+        result.push_str(replacement);
+        pos = abs + phrase.len();
+    }
+    result.push_str(&s[pos..]);
+    result
+}
+
+fn remove_complementizer_that(s: &str) -> String {
+    // If "that" appears after a reporting verb, delete it.
+    // Reporting verbs: said, reported, showed, indicated, noted, found,
+    // suggested, confirmed, mentioned, stated, claimed.
+    let reporting_verbs = [
+        "said", "reported", "showed", "indicated", "noted", "found",
+        "suggested", "confirmed", "mentioned", "stated", "claimed",
+        "Said", "Reported", "Showed", "Indicated", "Noted", "Found",
+        "Suggested", "Confirmed", "Mentioned", "Stated", "Claimed",
+    ];
+    let words: Vec<&str> = s.split_whitespace().collect();
+    let mut result = Vec::with_capacity(words.len());
+    let mut i = 0;
+    while i < words.len() {
+        result.push(words[i].to_string());
+        if i + 2 < words.len()
+            && reporting_verbs.contains(&words[i])
+            && words[i + 1].eq_ignore_ascii_case("that")
+        {
+            // Skip "that", keep the verb.
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    result.join(" ")
+}
+
+/// Apply semantic compression to all tool-result text blocks. Returns
+/// the number of messages that had any text actually compressed.
+fn semantic_compress_tool_results(messages: &mut [AgentMessage]) -> usize {
+    let mut compressed = 0usize;
+    for msg in messages {
+        let AgentMessage::Standard(Message::ToolResult(tr)) = msg else {
+            continue;
+        };
+        for c in &mut tr.content {
+            let UserContent::Text(t) = c else {
+                continue;
+            };
+            let compact = semantic_compress(&t.text);
+            if compact != t.text {
+                t.text = compact;
+                compressed += 1;
+            }
+        }
+    }
+    compressed
 }
 
 #[cfg(test)]

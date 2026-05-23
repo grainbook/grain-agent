@@ -29,6 +29,7 @@
 //! src  = "git@github.com:me/lazy-gagent.git"
 //! ```
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -61,6 +62,19 @@ pub struct PluginSpec {
     /// [`Self::src`].
     #[serde(default)]
     pub kind: Option<SourceKind>,
+/// Per-plugin env vars injected into the wasm sandbox.
+/// Any top-level key not matching `name|src|rev|kind` is captured.
+/// Merged with `plugin.toml`'s `[wasm.env]` at load time;
+/// spec entries override manifest entries on key conflict.
+///
+/// ```toml
+/// [[plugin]]
+/// name = "web-search"
+/// src = "https://..."
+/// EXA_API_KEY = "your-key"
+/// ```
+#[serde(flatten, default)]
+pub env: HashMap<String, String>,
 }
 
 /// How the engine treats [`PluginSpec::src`].
@@ -364,6 +378,7 @@ mod tests {
             src: "https://example.com/x.git".into(),
             rev: None,
             kind: Some(SourceKind::Local),
+        env: HashMap::new(),
         };
         assert_eq!(spec.resolved_kind(), SourceKind::Local);
     }
@@ -429,6 +444,7 @@ rev = "main"
                 src: "/does/not/exist".into(),
                 rev: None,
                 kind: None,
+            env: HashMap::new(),
             }],
         };
         let report = sync_plugins(&spec, &plugins_dir, tmp.path());
@@ -448,12 +464,14 @@ rev = "main"
                     src: "/whatever".into(),
                     rev: None,
                     kind: None,
+                env: HashMap::new(),
                 },
                 PluginSpec {
                     name: "a/b".into(),
                     src: "/whatever".into(),
                     rev: None,
                     kind: None,
+                env: HashMap::new(),
                 },
             ],
         };
@@ -479,6 +497,7 @@ rev = "main"
                 src: source.to_string_lossy().into_owned(),
                 rev: None,
                 kind: None,
+            env: HashMap::new(),
             }],
         };
         let report = sync_plugins(&spec, &plugins_dir, tmp.path());
@@ -504,6 +523,7 @@ rev = "main"
                 src: tmp.path().join("does-not-exist").to_string_lossy().into_owned(),
                 rev: None,
                 kind: None,
+            env: HashMap::new(),
             }],
         };
         let report = sync_plugins(&spec, &plugins_dir, tmp.path());
@@ -524,6 +544,7 @@ rev = "main"
                 src: file_src.to_string_lossy().into_owned(),
                 rev: None,
                 kind: None,
+            env: HashMap::new(),
             }],
         };
         let report = sync_plugins(&spec, &plugins_dir, tmp.path());
@@ -554,6 +575,7 @@ rev = "main"
                 src: "../lazy-gagent".into(),
                 rev: None,
                 kind: None,
+            env: HashMap::new(),
             }],
         };
         // Pass `<workspace>/.grain/` as base_dir — the spec file's

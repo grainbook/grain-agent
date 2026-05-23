@@ -14,7 +14,7 @@ pub struct SessionMeta {
     pub id: String,
     /// 磁盘上的绝对路径。
     pub path: PathBuf,
-    /// 第一条用户 prompt 文本，截断到 `TITLE_PREVIEW_MAX`（80）字符。
+    /// 最后一条用户 prompt 文本，截断到 `TITLE_PREVIEW_MAX`（80）字符。
     /// 如果会话从未记录用户消息则为 `None`。
     pub title: Option<String>,
     /// 第一条 assistant 消息的 `model` 字段。
@@ -83,7 +83,7 @@ pub fn parse_session_meta(path: &Path) -> std::io::Result<SessionMeta>;
 
 1. 打开文件并读取 `modified_at` 时间戳。
 2. 逐行扫描 `AgentMessage` JSON。
-3. 取第一条 `User` 消息作为 `title`（截断并合并空白到 80 字符）。
+3. 取最后一条 `User` 消息作为 `title`（截断并合并空白到 80 字符）。
 4. 取第一条 `model` 非空的 `Assistant` 消息。
 5. 统计所有可解析的消息数。
 

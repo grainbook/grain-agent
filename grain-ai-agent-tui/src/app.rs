@@ -84,6 +84,13 @@ pub enum Overlay {
     SessionResume {
         focused: usize,
         sessions: Vec<grain_ai_agent_headless::SessionMeta>,
+        /// `Delete` is a two-step action: the first press arms this
+        /// flag (UI flips the hint into a "press Delete again to
+        /// confirm" warning); the second press emits
+        /// [`Command::DeleteSession`]. Any other navigation key (Up,
+        /// Down, Home, End, Enter) resets it so users don't trigger
+        /// a delete after moving focus.
+        confirm_delete: bool,
     },
     /// `lazy.gagent` plugin overlay (`/plugins`). Read-only listing
     /// of plugins discovered under `<workspace>/.grain/plugins/`,
@@ -163,6 +170,52 @@ pub enum Overlay {
         title: String,
         children: Vec<grain_ai_agent_headless::OverlayDescriptor>,
     },
+    /// Modal shown when the live `SessionWriter` can't take the
+    /// advisory lock on a jsonl — either at boot (auto-resume
+    /// candidate held by another grain process) or at runtime when
+    /// the user picks a `[locked]` row in the `/resume` overlay.
+    /// Default focus is on the safest option ("Start a fresh
+    /// session"), matching the rule of least destruction.
+    SessionLockConflict {
+        source: SessionLockSource,
+        locked_path: std::path::PathBuf,
+        choices: Vec<SessionConflictChoice>,
+        focused: usize,
+    },
+}
+
+/// Where a [`Overlay::SessionLockConflict`] originated. Drives the
+/// choice list (boot offers `Quit`, resume offers `Cancel`) and the
+/// rendered title.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionLockSource {
+    /// Resolved at startup: auto-resume picked a candidate that
+    /// another grain process holds. The worker already swapped in a
+    /// fresh path so the user can dismiss safely.
+    Boot,
+    /// Triggered from inside the `/resume` overlay when the user
+    /// hit Enter on a `[locked]` row. Dismissing returns to the
+    /// running session.
+    Resume,
+}
+
+/// Choices presented in [`Overlay::SessionLockConflict`]. Boot shows
+/// `Fresh / Fork / Quit`; resume shows `Fresh / Fork / Cancel`. The
+/// variant carries no payload — the overlay holds `locked_path`
+/// itself, the dispatcher reads both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionConflictChoice {
+    /// Discard the locked candidate, stay on the fresh session the
+    /// worker minted. No copy, no resume.
+    Fresh,
+    /// Copy the locked jsonl to a new uuidv7 path and resume the
+    /// copy in place (worker handles via `Command::ForkSession`).
+    Fork,
+    /// (Boot only) Quit the TUI without touching anything.
+    Quit,
+    /// (Resume only) Close the modal and stay on the current
+    /// session, no swap.
+    Cancel,
 }
 
 /// Per-field editor state inside [`Overlay::DynamicForm`]. The TUI
@@ -368,6 +421,23 @@ pub enum Command {
     /// subscriptions (event fan-out, telemetry, session writer) and
     /// emits a [`TuiEvent::Info`] when the swap completes.
     ResumeSession(std::path::PathBuf),
+    /// Copy a (possibly-locked) source jsonl to a fresh uuidv7
+    /// path in `sessions_dir` and swap the harness onto it — same
+    /// effect as [`Command::ResumeSession`] but against a copy, so
+    /// the original keeps appending under whichever process owns
+    /// its lock. Used by the session-lock-conflict overlay's
+    /// "Fork" choice. Worker emits [`TuiEvent::SessionResumed`] +
+    /// [`TuiEvent::Info`] on success.
+    ForkSession(std::path::PathBuf),
+    /// Permanently remove a session's `<uuidv7>.jsonl` from disk.
+    /// Refused by the worker when `path` is the **currently active**
+    /// session (the one the live `SessionWriter` is appending to) —
+    /// the user must `/clear` or `/resume` away first. On success the
+    /// worker re-emits [`TuiEvent::SessionsListed`] so the open
+    /// `/resume` overlay reflects the new list, plus an
+    /// [`TuiEvent::Info`] confirmation; on failure it emits
+    /// [`TuiEvent::AgentWorkerError`].
+    DeleteSession(std::path::PathBuf),
     /// Run a compaction pass on the harness's session: summarize all
     /// but the last `keep_recent` messages. Worker emits a
     /// [`TuiEvent::Info`] on success or [`TuiEvent::AgentWorkerError`]
@@ -690,6 +760,10 @@ pub struct AppState {
     /// `[ctx N%]` chip in the footer. `0` when unknown — the chip is
     /// omitted in that case.
     pub context_window: u64,
+    /// Length of the pinned system prompt in bytes. Used together with
+    /// a local scan of the transcript to estimate context-window
+    /// occupancy without waiting for an API response.
+    pub system_prompt_chars: usize,
     /// Number of compaction events in this session. Bumped when a
     /// `TuiEvent::Info` contains "compacted". Rendered as
     /// `[compact N]` in the footer when > 0.
@@ -908,6 +982,7 @@ impl AppState {
         model_id: String,
         model_cost: Cost,
         context_window: u64,
+        system_prompt_chars: usize,
         workspace_display: String,
         capabilities: Capabilities,
         show_thinking: bool,
@@ -941,6 +1016,7 @@ impl AppState {
             model_id,
             model_cost,
             context_window,
+            system_prompt_chars,
             compaction_count: 0,
             workspace_display,
             capabilities,
@@ -1490,14 +1566,48 @@ impl AppState {
             TuiEvent::SessionsListed(list) => {
                 // Only swap when the overlay is still open (user may
                 // have hit Esc while the scan was in flight).
-                if let Some(Overlay::SessionResume { sessions, focused }) =
-                    &mut self.overlay
+                if let Some(Overlay::SessionResume {
+                    sessions,
+                    focused,
+                    confirm_delete,
+                }) = &mut self.overlay
                 {
                     *sessions = list;
                     if *focused >= sessions.len() {
                         *focused = sessions.len().saturating_sub(1);
                     }
+                    // A fresh list invalidates whatever the user was
+                    // about to confirm — the row they armed might
+                    // even be gone now. Re-arm explicitly.
+                    *confirm_delete = false;
                 }
+                Vec::new()
+            }
+            TuiEvent::SessionLockedAtBoot { locked_path } => {
+                // Boot detected the auto-resume target was held by
+                // another grain process. Worker already swapped to
+                // a fresh session; surface the dialog so the user
+                // can pick fork / quit / stay-on-fresh. Boot list
+                // omits "Cancel" because there's nothing to cancel
+                // back to (we're not mid-overlay flow); "Quit"
+                // takes its place.
+                self.push(
+                    TranscriptKind::Info,
+                    format!(
+                        "(another grain process holds {} — started a fresh session)",
+                        locked_path.display()
+                    ),
+                );
+                self.set_overlay(Some(Overlay::SessionLockConflict {
+                    source: SessionLockSource::Boot,
+                    locked_path,
+                    choices: vec![
+                        SessionConflictChoice::Fresh,
+                        SessionConflictChoice::Fork,
+                        SessionConflictChoice::Quit,
+                    ],
+                    focused: 0,
+                }));
                 Vec::new()
             }
             TuiEvent::SessionResumed { path: _, messages } => {
@@ -1901,6 +2011,9 @@ impl AppState {
         }
         if matches!(self.overlay, Some(Overlay::SessionResume { .. })) {
             return self.on_key_session_resume(key);
+        }
+        if matches!(self.overlay, Some(Overlay::SessionLockConflict { .. })) {
+            return self.on_key_session_lock_conflict(key);
         }
         if matches!(self.overlay, Some(Overlay::Plugins { .. })) {
             return self.on_key_plugins(key);
@@ -2325,7 +2438,12 @@ impl AppState {
     /// Enter prints the chosen session's path to the transcript and
     /// closes the overlay (Phase 1 — in-place swap lands later).
     fn on_key_session_resume(&mut self, key: KeyEvent) -> Vec<Command> {
-        let Some(Overlay::SessionResume { focused, sessions }) = &mut self.overlay else {
+        let Some(Overlay::SessionResume {
+            focused,
+            sessions,
+            confirm_delete,
+        }) = &mut self.overlay
+        else {
             return Vec::new();
         };
         match key.code {
@@ -2333,33 +2451,152 @@ impl AppState {
                 if *focused > 0 {
                     *focused -= 1;
                 }
+                *confirm_delete = false;
             }
             KeyCode::Down => {
                 if *focused + 1 < sessions.len() {
                     *focused += 1;
                 }
+                *confirm_delete = false;
             }
             KeyCode::Home => {
                 *focused = 0;
+                *confirm_delete = false;
             }
             KeyCode::End => {
                 *focused = sessions.len().saturating_sub(1);
+                *confirm_delete = false;
+            }
+            KeyCode::Delete => {
+                // First press arms; second press fires. Empty list
+                // → no-op (UI already shows the empty-state hint).
+                let Some(sel) = sessions.get(*focused) else {
+                    return Vec::new();
+                };
+                if *confirm_delete {
+                    let path = sel.path.clone();
+                    *confirm_delete = false;
+                    return vec![Command::DeleteSession(path)];
+                }
+                *confirm_delete = true;
             }
             KeyCode::Enter => {
-                if let Some(sel) = sessions.get(*focused) {
-                    let path = sel.path.clone();
-                    self.push(
-                        TranscriptKind::Info,
-                        format!("(resuming session: {})", path.display()),
-                    );
+                // Enter never confirms a delete — it always resumes.
+                // Pressing Enter while armed cancels the arm and
+                // resumes the focused row, matching the principle of
+                // least destruction.
+                *confirm_delete = false;
+                let Some(sel) = sessions.get(*focused).cloned() else {
                     self.set_overlay(None);
-                    return vec![Command::ResumeSession(path)];
+                    return Vec::new();
+                };
+                // Locked rows must NOT directly resume — that would
+                // race the lock and produce an immediate worker
+                // error. Instead swap the resume overlay for the
+                // session-lock-conflict overlay (source=Resume,
+                // default-focus on the safe "fresh" choice).
+                if sel.locked {
+                    self.set_overlay(Some(Overlay::SessionLockConflict {
+                        source: SessionLockSource::Resume,
+                        locked_path: sel.path,
+                        choices: vec![
+                            SessionConflictChoice::Fresh,
+                            SessionConflictChoice::Fork,
+                            SessionConflictChoice::Cancel,
+                        ],
+                        focused: 0,
+                    }));
+                    return Vec::new();
                 }
+                let path = sel.path.clone();
+                self.push(
+                    TranscriptKind::Info,
+                    format!("(resuming session: {})", path.display()),
+                );
                 self.set_overlay(None);
+                return vec![Command::ResumeSession(path)];
             }
             _ => {}
         }
         Vec::new()
+    }
+
+    /// Key handler for [`Overlay::SessionLockConflict`]. Up/Down
+    /// navigates the choice list; Enter dispatches the focused
+    /// choice; Esc dismisses (Resume source) or is rejected (Boot
+    /// source — the user must pick one; Esc on boot also defaults
+    /// to "Fresh" because we've already swapped to a fresh
+    /// session, so dismissing is equivalent).
+    fn on_key_session_lock_conflict(&mut self, key: KeyEvent) -> Vec<Command> {
+        let Some(Overlay::SessionLockConflict {
+            source,
+            locked_path,
+            choices,
+            focused,
+        }) = &mut self.overlay
+        else {
+            return Vec::new();
+        };
+        let source = *source;
+        let last = choices.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Up => {
+                *focused = focused.saturating_sub(1);
+                Vec::new()
+            }
+            KeyCode::Down => {
+                if !choices.is_empty() {
+                    *focused = (*focused + 1).min(last);
+                }
+                Vec::new()
+            }
+            KeyCode::Home => {
+                *focused = 0;
+                Vec::new()
+            }
+            KeyCode::End => {
+                *focused = last;
+                Vec::new()
+            }
+            KeyCode::Enter => {
+                let Some(choice) = choices.get(*focused).copied() else {
+                    self.set_overlay(None);
+                    return Vec::new();
+                };
+                let locked_path = locked_path.clone();
+                self.set_overlay(None);
+                match choice {
+                    SessionConflictChoice::Fresh => {
+                        // Boot already swapped to a fresh session;
+                        // Resume needs an explicit Reset to land
+                        // there from the live (non-locked) one.
+                        match source {
+                            SessionLockSource::Boot => Vec::new(),
+                            SessionLockSource::Resume => {
+                                self.push(
+                                    TranscriptKind::Info,
+                                    "(switching to a fresh session)".into(),
+                                );
+                                vec![Command::Reset]
+                            }
+                        }
+                    }
+                    SessionConflictChoice::Fork => {
+                        self.push(
+                            TranscriptKind::Info,
+                            format!("(forking from snapshot: {})", locked_path.display()),
+                        );
+                        vec![Command::ForkSession(locked_path)]
+                    }
+                    SessionConflictChoice::Quit => {
+                        self.should_quit = true;
+                        vec![Command::Quit]
+                    }
+                    SessionConflictChoice::Cancel => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// Key handler for the `/plugins` overlay. Plugin-contributed
@@ -2755,6 +2992,7 @@ impl AppState {
                 self.set_overlay(Some(Overlay::SessionResume {
                     focused: 0,
                     sessions: Vec::new(),
+                    confirm_delete: false,
                 }));
                 vec![Command::ReturnSessions]
             }
@@ -3216,6 +3454,7 @@ mod tests {
             "deepseek/deepseek-chat".into(),
             Cost::default(),
             0,
+            0, // system_prompt_chars — 0 means unknown (chip hidden when context_window is also 0)
             "/tmp/proj".into(),
             Capabilities::default(),
             false,
@@ -3232,6 +3471,7 @@ mod tests {
             "deepseek/deepseek-chat".into(),
             Cost::default(),
             0,
+            0, // system_prompt_chars — 0 means unknown (chip hidden when context_window is also 0)
             "/tmp/proj".into(),
             Capabilities::default(),
             false,
@@ -4544,6 +4784,7 @@ mod tests {
             message_count: 3,
             modified_at: std::time::SystemTime::now()
                 - std::time::Duration::from_secs(secs_ago),
+            locked: false,
         }
     }
 
@@ -4563,6 +4804,7 @@ mod tests {
         s.overlay = Some(Overlay::SessionResume {
             focused: 0,
             sessions: Vec::new(),
+            confirm_delete: false,
         });
         s.on_event(TuiEvent::SessionsListed(vec![
             fake_session_meta("a", 30),
@@ -4590,6 +4832,7 @@ mod tests {
         s.overlay = Some(Overlay::SessionResume {
             focused: 0,
             sessions: vec![fake_session_meta("a", 0), fake_session_meta("b", 60)],
+            confirm_delete: false,
         });
         s.on_event(TuiEvent::Key(press(KeyCode::Down)));
         if let Some(Overlay::SessionResume { focused, .. }) = s.overlay.clone() {
@@ -4610,6 +4853,7 @@ mod tests {
         s.overlay = Some(Overlay::SessionResume {
             focused: 0,
             sessions: vec![meta],
+            confirm_delete: false,
         });
         let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
         assert!(s.overlay.is_none());
@@ -4621,6 +4865,266 @@ mod tests {
                     && l.text.contains("resuming session")
                     && l.text.contains("xyz.jsonl"))
         );
+    }
+
+    #[test]
+    fn resume_picker_delete_arms_then_fires_on_second_press() {
+        let mut s = fresh();
+        let meta = fake_session_meta("doomed", 5);
+        let path = meta.path.clone();
+        s.overlay = Some(Overlay::SessionResume {
+            focused: 0,
+            sessions: vec![meta],
+            confirm_delete: false,
+        });
+        // First Delete arms but doesn't fire.
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Delete)));
+        assert!(cmds.is_empty());
+        if let Some(Overlay::SessionResume { confirm_delete, .. }) = &s.overlay {
+            assert!(*confirm_delete, "first Delete should arm confirm_delete");
+        } else {
+            panic!("overlay should still be SessionResume");
+        }
+        // Second Delete fires.
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Delete)));
+        assert_eq!(cmds, vec![Command::DeleteSession(path)]);
+        // Arm flag resets — overlay stays open for further deletes.
+        if let Some(Overlay::SessionResume { confirm_delete, .. }) = &s.overlay {
+            assert!(!*confirm_delete);
+        } else {
+            panic!("overlay should still be SessionResume");
+        }
+    }
+
+    #[test]
+    fn resume_picker_navigation_cancels_pending_delete() {
+        let mut s = fresh();
+        s.overlay = Some(Overlay::SessionResume {
+            focused: 0,
+            sessions: vec![fake_session_meta("a", 0), fake_session_meta("b", 60)],
+            confirm_delete: false,
+        });
+        s.on_event(TuiEvent::Key(press(KeyCode::Delete)));
+        // Down should disarm.
+        s.on_event(TuiEvent::Key(press(KeyCode::Down)));
+        if let Some(Overlay::SessionResume { confirm_delete, .. }) = &s.overlay {
+            assert!(!*confirm_delete);
+        }
+        // And the follow-up Delete only re-arms, never fires.
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Delete)));
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn resume_picker_enter_while_armed_resumes_not_deletes() {
+        let mut s = fresh();
+        let meta = fake_session_meta("xyz", 10);
+        let path = meta.path.clone();
+        s.overlay = Some(Overlay::SessionResume {
+            focused: 0,
+            sessions: vec![meta],
+            confirm_delete: true,
+        });
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert_eq!(cmds, vec![Command::ResumeSession(path)]);
+    }
+
+    #[test]
+    fn resume_picker_delete_on_empty_list_is_noop() {
+        let mut s = fresh();
+        s.overlay = Some(Overlay::SessionResume {
+            focused: 0,
+            sessions: Vec::new(),
+            confirm_delete: false,
+        });
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Delete)));
+        assert!(cmds.is_empty());
+        if let Some(Overlay::SessionResume { confirm_delete, .. }) = &s.overlay {
+            assert!(!*confirm_delete);
+        }
+    }
+
+    #[test]
+    fn sessions_listed_event_resets_pending_delete_confirm() {
+        let mut s = fresh();
+        s.overlay = Some(Overlay::SessionResume {
+            focused: 0,
+            sessions: vec![fake_session_meta("a", 0)],
+            confirm_delete: true,
+        });
+        s.on_event(TuiEvent::SessionsListed(vec![fake_session_meta("b", 0)]));
+        if let Some(Overlay::SessionResume { confirm_delete, .. }) = &s.overlay {
+            assert!(!*confirm_delete);
+        }
+    }
+
+    #[test]
+    fn resume_picker_enter_on_locked_opens_conflict_overlay() {
+        let mut s = fresh();
+        let mut meta = fake_session_meta("held", 1);
+        meta.locked = true;
+        let locked_path = meta.path.clone();
+        s.overlay = Some(Overlay::SessionResume {
+            focused: 0,
+            sessions: vec![meta],
+            confirm_delete: false,
+        });
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        // No ResumeSession — locked rows divert to the dialog.
+        assert!(cmds.is_empty());
+        match &s.overlay {
+            Some(Overlay::SessionLockConflict {
+                source,
+                locked_path: lp,
+                choices,
+                focused,
+            }) => {
+                assert_eq!(*source, SessionLockSource::Resume);
+                assert_eq!(lp, &locked_path);
+                assert_eq!(*focused, 0);
+                assert_eq!(choices[0], SessionConflictChoice::Fresh);
+                assert!(matches!(choices[2], SessionConflictChoice::Cancel));
+            }
+            other => panic!("expected SessionLockConflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn boot_locked_event_opens_overlay_with_fresh_default() {
+        let mut s = fresh();
+        let locked_path = std::path::PathBuf::from("/tmp/held.jsonl");
+        s.on_event(TuiEvent::SessionLockedAtBoot {
+            locked_path: locked_path.clone(),
+        });
+        match &s.overlay {
+            Some(Overlay::SessionLockConflict {
+                source,
+                locked_path: lp,
+                choices,
+                focused,
+            }) => {
+                assert_eq!(*source, SessionLockSource::Boot);
+                assert_eq!(lp, &locked_path);
+                assert_eq!(*focused, 0, "Fresh must be preselected at boot");
+                assert_eq!(choices[0], SessionConflictChoice::Fresh);
+                assert!(matches!(choices[2], SessionConflictChoice::Quit));
+            }
+            other => panic!("expected SessionLockConflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lock_conflict_enter_fresh_at_boot_is_noop() {
+        let mut s = fresh();
+        s.overlay = Some(Overlay::SessionLockConflict {
+            source: SessionLockSource::Boot,
+            locked_path: std::path::PathBuf::from("/tmp/x.jsonl"),
+            choices: vec![
+                SessionConflictChoice::Fresh,
+                SessionConflictChoice::Fork,
+                SessionConflictChoice::Quit,
+            ],
+            focused: 0,
+        });
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert!(cmds.is_empty(), "boot Fresh = stay on already-fresh session");
+        assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn lock_conflict_enter_fresh_at_resume_emits_reset() {
+        let mut s = fresh();
+        s.overlay = Some(Overlay::SessionLockConflict {
+            source: SessionLockSource::Resume,
+            locked_path: std::path::PathBuf::from("/tmp/x.jsonl"),
+            choices: vec![
+                SessionConflictChoice::Fresh,
+                SessionConflictChoice::Fork,
+                SessionConflictChoice::Cancel,
+            ],
+            focused: 0,
+        });
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert_eq!(cmds, vec![Command::Reset]);
+    }
+
+    #[test]
+    fn lock_conflict_enter_fork_emits_fork_command() {
+        let mut s = fresh();
+        let path = std::path::PathBuf::from("/tmp/forkme.jsonl");
+        s.overlay = Some(Overlay::SessionLockConflict {
+            source: SessionLockSource::Resume,
+            locked_path: path.clone(),
+            choices: vec![
+                SessionConflictChoice::Fresh,
+                SessionConflictChoice::Fork,
+                SessionConflictChoice::Cancel,
+            ],
+            focused: 1,
+        });
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert_eq!(cmds, vec![Command::ForkSession(path)]);
+    }
+
+    #[test]
+    fn lock_conflict_enter_quit_at_boot_sets_quit() {
+        let mut s = fresh();
+        s.overlay = Some(Overlay::SessionLockConflict {
+            source: SessionLockSource::Boot,
+            locked_path: std::path::PathBuf::from("/tmp/x.jsonl"),
+            choices: vec![
+                SessionConflictChoice::Fresh,
+                SessionConflictChoice::Fork,
+                SessionConflictChoice::Quit,
+            ],
+            focused: 2,
+        });
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert_eq!(cmds, vec![Command::Quit]);
+        assert!(s.should_quit);
+    }
+
+    #[test]
+    fn lock_conflict_enter_cancel_just_closes() {
+        let mut s = fresh();
+        s.overlay = Some(Overlay::SessionLockConflict {
+            source: SessionLockSource::Resume,
+            locked_path: std::path::PathBuf::from("/tmp/x.jsonl"),
+            choices: vec![
+                SessionConflictChoice::Fresh,
+                SessionConflictChoice::Fork,
+                SessionConflictChoice::Cancel,
+            ],
+            focused: 2,
+        });
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert!(cmds.is_empty());
+        assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn lock_conflict_arrows_navigate_within_bounds() {
+        let mut s = fresh();
+        s.overlay = Some(Overlay::SessionLockConflict {
+            source: SessionLockSource::Boot,
+            locked_path: std::path::PathBuf::from("/tmp/x.jsonl"),
+            choices: vec![
+                SessionConflictChoice::Fresh,
+                SessionConflictChoice::Fork,
+                SessionConflictChoice::Quit,
+            ],
+            focused: 0,
+        });
+        s.on_event(TuiEvent::Key(press(KeyCode::Down)));
+        s.on_event(TuiEvent::Key(press(KeyCode::Down)));
+        s.on_event(TuiEvent::Key(press(KeyCode::Down))); // clamped
+        if let Some(Overlay::SessionLockConflict { focused, .. }) = &s.overlay {
+            assert_eq!(*focused, 2);
+        }
+        s.on_event(TuiEvent::Key(press(KeyCode::Up)));
+        if let Some(Overlay::SessionLockConflict { focused, .. }) = &s.overlay {
+            assert_eq!(*focused, 1);
+        }
     }
 
     #[test]

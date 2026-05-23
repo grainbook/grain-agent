@@ -146,6 +146,10 @@ pub struct WorkerHandles {
     /// models.dev snapshot). `0` when unknown — the footer omits the
     /// `[ctx N%]` chip in that case.
     pub context_window: u64,
+    /// Length of the pinned system prompt in bytes (used by the
+    /// footer to estimate context-window occupancy locally, without
+    /// waiting for an API round-trip).
+    pub system_prompt_chars: usize,
 }
 
 /// Errors that can happen *before* the worker successfully takes over.
@@ -257,8 +261,17 @@ impl HarnessBuilder {
             self.compaction_prompt.clone(),
             session.clone(),
         );
-        let prepare_next_turn =
-            chain_prepare_next_turn(Some(compaction_hook), self.escalation_hook.clone());
+        // Chain: truncation → compaction → escalation.
+        // Truncation runs first so compaction sees already-capped tool
+        // results; compaction summarises the truncated prefix; escalation
+        // has the final say on model/thinking overrides.
+        let truncation_hook = grain_agent_harness::tool_result_truncation_hook(
+            grain_agent_harness::DEFAULT_TOOL_RESULT_TRUNCATION_CAP_CHARS,
+        );
+        let prepare_next_turn = chain_prepare_next_turn(
+            Some(truncation_hook),
+            chain_prepare_next_turn(Some(compaction_hook), self.escalation_hook.clone()),
+        );
 
         let mut opts = AgentHarnessOptions::new(session, model, self.stream.clone());
         opts.system_prompt = SystemPrompt::Static(self.system_prompt.clone());
@@ -470,6 +483,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         pinned.digest()
     );
     let system_prompt = pinned.to_string_owned();
+    let system_prompt_chars = system_prompt.len();
 
     // --- Session auto-create + restore -------------------------------------
     let sessions_dir = cfg
@@ -511,12 +525,67 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             }
         }
     }
-    let prior_messages = match &cfg.session {
-        Some(path) => load_messages(path).map_err(|e| WorkerInitError::Session {
-            path: path.clone(),
-            source: Box::new(e),
-        })?,
-        None => Vec::new(),
+    // --- Lock-aware writer open --------------------------------------------
+    // Try to acquire the advisory lock on `cfg.session`. If a sibling
+    // grain process already holds it (auto-resume race), record the
+    // contested path and silently re-mint a fresh uuidv7 so this run
+    // still has a writable session. The worker will emit
+    // `TuiEvent::SessionLockedAtBoot` after subscriptions install, and
+    // the UI overlay lets the user pick fresh (stay here) / fork /
+    // quit. Path resolution above guarantees `cfg.session` is
+    // populated only when the sessions dir exists.
+    let mut boot_locked_path: Option<PathBuf> = None;
+    let session_writer: Option<Arc<SessionWriter>> = match cfg.session.clone() {
+        Some(path) => match SessionWriter::open(&path) {
+            Ok(w) => Some(Arc::new(w)),
+            Err(grain_ai_agent_headless::SessionError::Locked { .. }) => {
+                eprintln!(
+                    "[info] {} held by another grain process — starting fresh",
+                    path.display()
+                );
+                boot_locked_path = Some(path);
+                // Mint a fresh path and retry. If the sessions dir
+                // creation failed at boot, cfg.session would have
+                // been None and we wouldn't be on this branch.
+                let fresh = grain_ai_agent_headless::new_session_path(&sessions_dir);
+                cfg.session = Some(fresh.clone());
+                match SessionWriter::open(&fresh) {
+                    Ok(w) => Some(Arc::new(w)),
+                    Err(e) => {
+                        eprintln!(
+                            "[warn] open fresh session {} failed: {e} \
+                             (session won't be persisted this run)",
+                            fresh.display()
+                        );
+                        cfg.session = None;
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(WorkerInitError::Session {
+                    path: path.clone(),
+                    source: Box::new(e),
+                });
+            }
+        },
+        None => None,
+    };
+
+    let prior_messages = if boot_locked_path.is_some() {
+        // Fresh path — nothing to restore. Even though the locked
+        // file has prior messages, attaching them here would
+        // implicitly mean "we resumed it", which is exactly what
+        // the user must still opt into via Fork.
+        Vec::new()
+    } else {
+        match &cfg.session {
+            Some(path) => load_messages(path).map_err(|e| WorkerInitError::Session {
+                path: path.clone(),
+                source: Box::new(e),
+            })?,
+            None => Vec::new(),
+        }
     };
 
     // --- Stream ------------------------------------------------------------
@@ -700,7 +769,15 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                     // — calling `Handle::block_on` here panics with
                     // "Cannot start a runtime from within a runtime".
                     // Just `.await` the plugin load directly.
-                    match runtime.load(&wasm_path, &plugin_id, caps, &plugin_name).await {
+                    // Merge per-plugin env: plugin.toml [wasm.env] base,
+// plugin-spec.toml [plugin.env] overrides on key conflict.
+let mut env_map = plugin.wasm_env();
+if let Some(spec) = plugin_spec.plugins.iter().find(|s| s.name == plugin_id) {
+for (k, v) in &spec.env {
+env_map.insert(k.clone(), v.clone());
+                                }
+                            }
+match runtime.load(&wasm_path, &plugin_id, caps, &plugin_name, env_map).await {
                         Ok(loaded) => {
                             // Boot-time load summary: route through the
                             // event channel as an `Info` line so it
@@ -968,6 +1045,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         allow_semantic_search: cfg.allow_semantic_search,
         model_cost: model_cost.clone(),
         context_window: model_context_window,
+        system_prompt_chars,
     };
 
     // --- Telemetry sink (Arc'd; lives across `/resume` swaps) -------------
@@ -984,19 +1062,12 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         None => None,
     };
 
-    // --- Session writer (reopened on every `/resume` swap) -----------------
-    let session_writer: Option<Arc<SessionWriter>> = match cfg.session.clone() {
-        Some(path) => match SessionWriter::open(&path) {
-            Ok(w) => Some(Arc::new(w)),
-            Err(e) => {
-                let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
-                    "session writer open failed: {e}"
-                )));
-                None
-            }
-        },
-        None => None,
-    };
+    // --- Session writer ----------------------------------------------------
+    // The writer was opened earlier (lock-aware boot path); rebinding
+    // here is the original anchor point so subscription wiring + the
+    // worker-loop signature stay identical to before. `session_writer`
+    // is reopened on every `/resume` or `/fork` swap inside
+    // `run_command_loop`.
 
     let profiles = cfg.profiles.clone();
     let workspace_for_task = workspace.clone();
@@ -1006,6 +1077,13 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     let plugins_dir_for_task = plugins_dir.clone();
     let evt_tx_for_task = evt_tx.clone();
     let model_cost_for_task = model_cost.clone();
+    // Snapshot the on-disk path the harness is currently persisting
+    // to. The worker loop updates this on `/clear` (Reset) and
+    // `/resume` (ResumeSession) so `DeleteSession` can refuse to
+    // unlink the file the live `SessionWriter` is still appending
+    // to. `None` when boot-time `cfg.session` was None (sessions
+    // dir creation failed, etc.).
+    let active_session_path_for_task = cfg.session.clone();
     // Captured by the worker task closure so the Boa worker stays
     // alive for the whole agent lifetime; dropping at task end sends
     // Shutdown to that worker thread.
@@ -1153,6 +1231,15 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                 cost: model_cost_for_task.clone(),
             });
         }
+        // Boot raced with another grain process over the
+        // auto-resume target. Tell the UI so it can show the
+        // session-lock-conflict overlay (default = stay on the
+        // fresh session we already swapped to). Emit AFTER the
+        // provider-applied event so the overlay paints over a
+        // fully-initialized status bar.
+        if let Some(locked_path) = boot_locked_path.clone() {
+            let _ = evt_tx_for_task.send(TuiEvent::SessionLockedAtBoot { locked_path });
+        }
 
         run_command_loop(
             harness,
@@ -1168,6 +1255,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             plugins_dir_for_task,
             profiles,
             overhead_banner_for_replay,
+            active_session_path_for_task,
             cmd_rx,
             evt_tx_for_task,
             #[cfg(feature = "scripts-rhai")]
@@ -1303,6 +1391,12 @@ async fn run_command_loop(
     plugins_dir: PathBuf,
     profiles: Vec<ProviderProfile>,
     overhead_banner: String,
+    // Path of the JSONL the live `session_writer` is appending to.
+    // Mirrors what `Reset` / `ResumeSession` swap to so
+    // `DeleteSession` can refuse to unlink the file out from under
+    // an open writer. `None` when persistence is disabled (the
+    // sessions dir wasn't creatable at boot).
+    mut active_session_path: Option<PathBuf>,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     evt_tx: mpsc::UnboundedSender<TuiEvent>,
     #[cfg(feature = "scripts-rhai")] mut rhai_ctx: RhaiReloadCtx,
@@ -1378,6 +1472,7 @@ async fn run_command_loop(
                 .await;
                 harness = new_harness;
                 session_writer = new_writer;
+                active_session_path = Some(new_path.clone());
                 let _ = evt_tx.send(TuiEvent::Info(format!(
                     "(cleared — fresh session: {})",
                     new_path.display()
@@ -1402,6 +1497,120 @@ async fn run_command_loop(
             Command::ReturnSessions => {
                 let list = grain_ai_agent_headless::list_sessions(&sessions_dir);
                 let _ = evt_tx.send(TuiEvent::SessionsListed(list));
+            }
+            Command::DeleteSession(path) => {
+                // If the user explicitly deletes the active session, treat it
+                // as "clear + rm": abort, close the writer (releasing the
+                // file handle so the OS lets us unlink), delete the old
+                // file, then mint a fresh session.  UX: the old history
+                // is gone for good — the user confirmed this path in the
+                // picker, so no additional confirmation dialog is needed.
+                if active_session_path.as_ref() == Some(&path) {
+                    harness.abort().await;
+                    harness.wait_for_idle().await;
+                    // Drop the writer first — it holds an open fd that
+                    // would otherwise keep the inode alive on Unix.
+                    session_writer = None;
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {
+                            let _ = evt_tx.send(TuiEvent::Info(format!(
+                                "(deleted active session: {})",
+                                path.display()
+                            )));
+                        }
+                        Err(e) => {
+                            let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                                "delete active session {}: {e}",
+                                path.display()
+                            )));
+                        }
+                    }
+                    // Mint a fresh session so the user can continue.
+                    let new_path =
+                        grain_ai_agent_headless::new_session_path(&sessions_dir);
+                    let new_writer = match SessionWriter::open(&new_path) {
+                        Ok(w) => Some(Arc::new(w)),
+                        Err(e) => {
+                            let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                                "delete: open new session writer {} failed: {e}",
+                                new_path.display()
+                            )));
+                            None
+                        }
+                    };
+                    let new_harness = builder
+                        .build_with_model(Vec::new(), current_model.clone())
+                        .await;
+                    install_subscriptions(
+                        &new_harness,
+                        &evt_tx,
+                        telemetry_sink.clone(),
+                        new_writer.clone(),
+                    )
+                    .await;
+                    harness = new_harness;
+                    session_writer = new_writer;
+                    active_session_path = Some(new_path.clone());
+                    let _ = evt_tx.send(TuiEvent::Info(format!(
+                        "(fresh session after delete: {})",
+                        new_path.display()
+                    )));
+                    // Refresh the picker so the deleted row vanishes
+                    // and the new session row appears.
+                    let list =
+                        grain_ai_agent_headless::list_sessions(&sessions_dir);
+                    let _ = evt_tx.send(TuiEvent::SessionsListed(list));
+                    let _ = evt_tx.send(TuiEvent::SessionResumed {
+                        path: new_path.display().to_string(),
+                        messages: Vec::new(),
+                    });
+                    continue;
+                }
+                // Constrain deletes to `sessions_dir` and require a
+                // `.jsonl` extension so a malformed Command can't
+                // be used to unlink arbitrary files. Compare on
+                // canonical paths because the picker's list may
+                // emit non-canonical PathBufs (the `sessions_dir`
+                // we hold isn't canonicalized either, so canonicalize
+                // both for a fair compare; fall back to the literal
+                // parent when canonicalize fails — e.g. on a
+                // permission-denied dir, the user-visible failure
+                // is the same).
+                let in_sessions_dir = match (path.parent(), Some(sessions_dir.as_path())) {
+                    (Some(parent), Some(dir)) => {
+                        let canon_parent =
+                            parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+                        let canon_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+                        canon_parent == canon_dir
+                    }
+                    _ => false,
+                };
+                let is_jsonl = path.extension().and_then(|s| s.to_str()) == Some("jsonl");
+                if !in_sessions_dir || !is_jsonl {
+                    let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                        "delete refused: {} is not a session jsonl under {}",
+                        path.display(),
+                        sessions_dir.display()
+                    )));
+                    continue;
+                }
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {
+                        let _ = evt_tx.send(TuiEvent::Info(format!(
+                            "(deleted session: {})",
+                            path.display()
+                        )));
+                        // Refresh the open picker so the row vanishes.
+                        let list = grain_ai_agent_headless::list_sessions(&sessions_dir);
+                        let _ = evt_tx.send(TuiEvent::SessionsListed(list));
+                    }
+                    Err(e) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "delete {}: {e}",
+                            path.display()
+                        )));
+                    }
+                }
             }
             Command::ReturnPlugins => {
                 // Re-read config + lock + legacy spec so entries
@@ -1665,6 +1874,7 @@ async fn run_command_loop(
                 let prior_count = prior_for_ui.len();
                 harness = new_harness;
                 session_writer = new_writer;
+                active_session_path = Some(path.clone());
                 let path_display = path.display().to_string();
                 let _ = evt_tx.send(TuiEvent::SessionResumed {
                     path: path_display,
@@ -1678,6 +1888,71 @@ async fn run_command_loop(
                 // resumed messages, wiping the boot-time overhead
                 // banner. Re-emit it so the guard's budget is still
                 // visible after every /resume.
+                let _ = evt_tx.send(TuiEvent::Info(format!("({overhead_banner})")));
+            }
+            Command::ForkSession(src_path) => {
+                // "Resume into a copy". Mirrors ResumeSession exactly
+                // but against a fresh uuidv7 file copied from
+                // src_path, so the source (possibly locked by another
+                // grain process) is left alone.
+                harness.abort().await;
+                harness.wait_for_idle().await;
+
+                let dest_path = grain_ai_agent_headless::new_session_path(&sessions_dir);
+                if let Err(e) = std::fs::copy(&src_path, &dest_path) {
+                    let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                        "fork copy {} → {} failed: {e}",
+                        src_path.display(),
+                        dest_path.display()
+                    )));
+                    continue;
+                }
+                let prior = match load_messages(&dest_path) {
+                    Ok(msgs) => msgs,
+                    Err(e) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "fork load {} failed: {e}",
+                            dest_path.display()
+                        )));
+                        continue;
+                    }
+                };
+                let prior_for_ui = prior.clone();
+                let new_writer: Option<Arc<SessionWriter>> =
+                    match SessionWriter::open(&dest_path) {
+                        Ok(w) => Some(Arc::new(w)),
+                        Err(e) => {
+                            let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                                "fork session writer open {} failed: {e}",
+                                dest_path.display()
+                            )));
+                            None
+                        }
+                    };
+                let new_harness = builder
+                    .build_with_model(prior, current_model.clone())
+                    .await;
+                install_subscriptions(
+                    &new_harness,
+                    &evt_tx,
+                    telemetry_sink.clone(),
+                    new_writer.clone(),
+                )
+                .await;
+                let prior_count = prior_for_ui.len();
+                harness = new_harness;
+                session_writer = new_writer;
+                active_session_path = Some(dest_path.clone());
+                let path_display = dest_path.display().to_string();
+                let _ = evt_tx.send(TuiEvent::SessionResumed {
+                    path: path_display,
+                    messages: prior_for_ui,
+                });
+                let _ = evt_tx.send(TuiEvent::Info(format!(
+                    "(forked {} → {} — {prior_count} prior message(s))",
+                    src_path.display(),
+                    dest_path.display()
+                )));
                 let _ = evt_tx.send(TuiEvent::Info(format!("({overhead_banner})")));
             }
             Command::Compact { keep_recent } => match harness.compact(keep_recent).await {

@@ -34,6 +34,7 @@
 //! - **Phase C** — runtime install / update / remove via the
 //!   `lazy-gagent` plugin (not yet shipped).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -118,6 +119,16 @@ pub struct WasmConfig {
     /// Valid: `["log", "env", "http"]`. Default: `["log"]` only.
     #[serde(default = "default_wasm_capabilities")]
     pub capabilities: Vec<String>,
+/// Per-plugin env vars injected before OS env fallback.
+/// Keys set here are visible to `host::env_get` inside the
+/// wasm guest; they override same-named OS env vars.
+///
+/// ```toml
+/// [wasm.env]
+/// EXA_API_KEY = "your-key"
+/// ```
+#[serde(default)]
+pub env: HashMap<String, String>,
 }
 
 fn default_wasm_module() -> PathBuf {
@@ -187,6 +198,16 @@ impl Plugin {
         match &self.manifest.wasm {
             Some(cfg) => cfg.capabilities.clone(),
             None => default_wasm_capabilities(),
+        }
+    }
+
+/// Per-plugin env vars from `plugin.toml`'s `[wasm.env]` section.
+/// Merged with env vars from `plugin-spec.toml` at load time
+/// (spec overrides manifest on key conflict).
+pub fn wasm_env(&self) -> HashMap<String, String> {
+match &self.manifest.wasm {
+Some(cfg) => cfg.env.clone(),
+None => HashMap::new(),
         }
     }
 }

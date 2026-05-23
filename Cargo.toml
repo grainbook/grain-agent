@@ -65,3 +65,4 @@ rhai = { version = "1", features = ["sync"] }
 notify = "6"
 arboard = { version = "3", default-features = false }
 textwrap = "0.16"
+fs2 = "0.4"

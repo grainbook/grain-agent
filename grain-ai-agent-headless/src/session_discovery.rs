@@ -20,7 +20,7 @@ pub struct SessionMeta {
     pub id: String,
     /// Absolute path on disk.
     pub path: PathBuf,
-    /// First user prompt's text (clamped to ~80 chars). `None` when
+    /// Last user prompt's text (clamped to ~80 chars). `None` when
     /// the session never recorded a user message yet.
     pub title: Option<String>,
     /// First assistant message's `model` field. `None` when no
@@ -32,6 +32,21 @@ pub struct SessionMeta {
     /// File mtime — what the picker sorts by ("most recently used
     /// first").
     pub modified_at: SystemTime,
+    /// `true` when another grain process currently holds the
+    /// advisory exclusive lock on this jsonl (see
+    /// [`crate::is_session_locked`]). The TUI's `/resume` picker
+    /// renders `[locked]` next to these rows and gates Enter on
+    /// them through a "fresh / fork / cancel" dialog instead of
+    /// emitting an in-place resume.
+    ///
+    /// Populated by `list_sessions` at scan time; not refreshed
+    /// after — the field is a snapshot, callers must re-scan if
+    /// they need fresher state. Note this is non-`Serialize`-safe
+    /// for cross-process state, so the field has `#[serde(skip)]`
+    /// — serialized SessionMeta blobs (if any consumers persist
+    /// them) intentionally drop the lock state.
+    #[serde(skip, default)]
+    pub locked: bool,
 }
 
 impl SessionMeta {
@@ -103,7 +118,13 @@ pub fn list_sessions(dir: &Path) -> Vec<SessionMeta> {
             continue;
         }
         match parse_session_meta(&path) {
-            Ok(meta) => out.push(meta),
+            Ok(mut meta) => {
+                // Fill the lock-state snapshot here so the picker
+                // can render `[locked]` without re-probing each
+                // row at render time.
+                meta.locked = crate::is_session_locked(&path);
+                out.push(meta);
+            }
             Err(e) => {
                 eprintln!(
                     "[warn] session-discovery: skipping {} ({e})",
@@ -149,7 +170,7 @@ pub fn parse_session_meta(path: &Path) -> std::io::Result<SessionMeta> {
             continue;
         };
         match msg {
-            Message::User(u) if title.is_none() => {
+            Message::User(u) => {
                 title = Some(extract_user_text_preview(&u.content));
             }
             Message::Assistant(a) if model.is_none() && !a.model.is_empty() => {
@@ -174,6 +195,11 @@ pub fn parse_session_meta(path: &Path) -> std::io::Result<SessionMeta> {
         model,
         message_count: count,
         modified_at,
+        // parse_session_meta is pure-parse; lock state is filled
+        // in by list_sessions which probes each file. Direct
+        // callers that need the flag should call `is_session_locked`
+        // themselves.
+        locked: false,
     })
 }
 
@@ -340,4 +366,27 @@ mod tests {
         let good = sessions.iter().find(|s| s.id == "good").unwrap();
         assert_eq!(good.title.as_deref(), Some("hi"));
     }
+    #[test]
+fn parse_meta_title_is_last_user_message() {
+// When a session has multiple user turns, the title shown in
+// the /resume picker should be the **last** user prompt.
+let tmp = tempfile::tempdir().unwrap();
+let path = write_session(
+            tmp.path(),
+            "multi",
+            &[
+user("first question"),
+assistant("first answer", "gpt-4"),
+user("second question"),
+assistant("second answer", "gpt-4"),
+user("final question — this should be the title"),
+            ],
+        );
+let meta = parse_session_meta(&path).unwrap();
+assert_eq!(
+meta.title.as_deref(),
+Some("final question — this should be the title")
+        );
+    }
+
 }

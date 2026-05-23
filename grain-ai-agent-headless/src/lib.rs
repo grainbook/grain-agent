@@ -70,7 +70,7 @@ pub use runtime::{
     coding_all_tools, coding_bash_tools, coding_full_tools, coding_read_tools,
     coding_web_tools, coding_write_tools,
 };
-pub use session::{SessionError, SessionWriter, load_messages};
+pub use session::{SessionError, SessionWriter, is_session_locked, load_messages};
 pub use session_discovery::{
     SessionMeta, TITLE_PREVIEW_MAX, list_sessions, new_session_path, parse_session_meta,
 };

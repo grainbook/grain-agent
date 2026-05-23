@@ -17,7 +17,7 @@
 //! in `plugin.toml` — calls into a denied capability return an error
 //! to the guest.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -95,6 +95,8 @@ pub struct PluginState {
     /// Optional sink for `log` host imports. When `None`, the host
     /// falls back to `eprintln!` — see [`LogSink`].
     log_sink: Option<LogSink>,
+    /// Per-plugin env vars (from plugin.toml + plugin-spec.toml).
+    env_map: HashMap<String, String>,
 }
 
 impl WasiView for PluginState {
@@ -134,6 +136,10 @@ impl wit_host::Host for PluginState {
     fn env_get(&mut self, key: String) -> Option<String> {
         if !self.capabilities.env {
             return None;
+        }
+        // Per-plugin env map takes priority over OS env vars.
+        if let Some(val) = self.env_map.get(&key) {
+            return Some(val.clone());
         }
         std::env::var(&key).ok()
     }
@@ -278,6 +284,8 @@ struct PluginEntry {
     component: Component,
     capabilities: Capabilities,
     plugin_name: String,
+    /// Per-plugin env vars (merged from plugin.toml + plugin-spec.toml).
+    env_map: HashMap<String, String>,
 }
 
 impl std::fmt::Debug for WasmPluginRuntime {
@@ -320,6 +328,7 @@ impl WasmPluginRuntime {
         plugin_id: &str,
         capabilities: Capabilities,
         plugin_name: &str,
+        env_map: HashMap<String, String>,
     ) -> Result<LoadedPlugin, WasmPluginError> {
         let wasm_bytes = tokio::fs::read(path).await?;
         let component = Component::new(&self.engine, &wasm_bytes)?;
@@ -333,6 +342,7 @@ impl WasmPluginRuntime {
             plugin_name: plugin_name.to_string(),
             rt_handle: tokio::runtime::Handle::current(),
             log_sink: self.log_sink.clone(),
+            env_map: env_map.clone(),
         };
         let mut store = Store::new(&self.engine, state);
         let bindings = GrainPlugin::instantiate(&mut store, &component, &self.linker)?;
@@ -365,6 +375,7 @@ impl WasmPluginRuntime {
             component,
             capabilities,
             plugin_name: plugin_name.to_string(),
+            env_map,
         });
 
         Ok(LoadedPlugin { info, tool_defs })
@@ -428,6 +439,7 @@ impl WasmPluginRuntime {
             plugin_name: entry.plugin_name.clone(),
             rt_handle: host_rt_handle,
             log_sink: self.log_sink.clone(),
+            env_map: entry.env_map.clone(),
         };
         let mut store = Store::new(&self.engine, state);
         let bindings = GrainPlugin::instantiate(&mut store, &entry.component, &self.linker)?;

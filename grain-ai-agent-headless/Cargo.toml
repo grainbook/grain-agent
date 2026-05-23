@@ -47,6 +47,7 @@ grain-agent-harness = { workspace = true }
 grain-deepseek-pack = { workspace = true }
 grain-llm-models = { workspace = true }
 grain-llm-genai = { workspace = true }
+fs2 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "fs", "io-util", "rt-multi-thread"] }

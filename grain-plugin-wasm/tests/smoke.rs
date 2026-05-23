@@ -5,6 +5,8 @@
 //! real component, call tools, verify output) live behind the
 //! `echo-plugin` example and require `cargo-component` + wasm32-wasip2.
 
+use std::collections::HashMap;
+
 use grain_plugin_wasm::{Capabilities, WasmPluginRuntime};
 
 // ---------------------------------------------------------------------------
@@ -74,7 +76,7 @@ async fn load_invalid_wasm_returns_error() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), b"not a valid wasm module").unwrap();
     let result = rt
-        .load(tmp.path(), "bad", Capabilities::default(), "bad-plugin")
+        .load(tmp.path(), "bad", Capabilities::default(), "bad-plugin", HashMap::new())
         .await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -93,6 +95,7 @@ async fn load_nonexistent_file_returns_error() {
             "missing",
             Capabilities::default(),
             "missing-plugin",
+            HashMap::new(),
         )
         .await;
     assert!(result.is_err());
@@ -181,6 +184,7 @@ async fn wasm_web_fetch_plugin_does_not_reenter_tokio_runtime() {
                 http: true,
             },
             "web-search",
+            HashMap::new(),
         )
         .await
         .unwrap();

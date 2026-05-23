@@ -297,6 +297,7 @@ async fn event_loop(
         handles.model_id.clone(),
         handles.model_cost.clone(),
         handles.context_window,
+        handles.system_prompt_chars,
         handles.workspace_display.clone(),
         Capabilities {
             allow_write: handles.allow_write,
@@ -343,11 +344,15 @@ async fn event_loop(
     loop {
         let event = tokio::select! {
             biased;
-            ev = evt_rx.recv() => match ev {
+            // Check terminal (user) events first — during streaming / thinking,
+            // agent events can flood `evt_rx` at frame-cadence frequency.  If
+            // those were polled first, a `biased` select would never yield to
+            // `term_rx`, freezing scroll and mouse capture.
+            ev = term_rx.recv() => match ev {
                 Some(e) => e,
                 None => return Ok(()),
             },
-            ev = term_rx.recv() => match ev {
+            ev = evt_rx.recv() => match ev {
                 Some(e) => e,
                 None => return Ok(()),
             },

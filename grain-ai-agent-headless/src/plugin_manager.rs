@@ -13,6 +13,7 @@
 //! See [`crate::plugin_spec`] for the underlying spec-file shape +
 //! syncing rules.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::plugin_spec::{
@@ -99,6 +100,7 @@ pub fn install(
         src: src.into(),
         rev: rev.map(str::to_string),
         kind: None,
+    env: HashMap::new(),
     });
     write_spec(spec_path, &spec)?;
     let base_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));

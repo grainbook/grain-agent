@@ -23,6 +23,13 @@ pub enum SessionError {
     },
     #[error("serialize: {0}")]
     Serialize(#[from] serde_json::Error),
+    /// Another process already holds an advisory write lock on this
+    /// JSONL — opening a second writer would let the two processes
+    /// interleave appends and diverge their in-memory transcripts.
+    /// Callers should either fork to a new path or surface a picker
+    /// to the user (see TUI's session-lock-conflict overlay).
+    #[error("{path} is held by another process")]
+    Locked { path: String },
 }
 
 /// Read a JSONL session file and return the contained messages.
@@ -73,6 +80,14 @@ pub fn load_messages(path: &Path) -> Result<Vec<AgentMessage>, SessionError> {
 /// Opens with `append + create`. `Mutex` around the inner `File` keeps the
 /// per-line writes serialized when called from a subscriber callback that
 /// can fire concurrently with other listeners.
+///
+/// Also takes an OS-level **advisory exclusive lock** (`flock` on Unix,
+/// `LockFileEx` on Windows) on the underlying file via the `fs2` crate so
+/// two TUI processes can't both auto-resume the same session and
+/// interleave their appends. The lock is per-fd and released
+/// automatically when the inner `File` is dropped (i.e. when this
+/// `SessionWriter` falls out of scope, or the process exits — even on a
+/// crash, since the kernel cleans up the fd).
 pub struct SessionWriter {
     path: std::path::PathBuf,
     file: Mutex<std::fs::File>,
@@ -80,6 +95,7 @@ pub struct SessionWriter {
 
 impl SessionWriter {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, SessionError> {
+        use fs2::FileExt;
         let path = path.as_ref().to_path_buf();
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -89,6 +105,21 @@ impl SessionWriter {
                 path: path.display().to_string(),
                 source,
             })?;
+        // try_lock_exclusive returns Err with kind WouldBlock (Unix
+        // EWOULDBLOCK, Windows ERROR_LOCK_VIOLATION) when another
+        // process holds the lock. Treat both as `Locked`; other I/O
+        // errors propagate as `Io`.
+        if let Err(e) = file.try_lock_exclusive() {
+            return Err(match e.kind() {
+                std::io::ErrorKind::WouldBlock => SessionError::Locked {
+                    path: path.display().to_string(),
+                },
+                _ => SessionError::Io {
+                    path: path.display().to_string(),
+                    source: e,
+                },
+            });
+        }
         Ok(SessionWriter {
             path,
             file: Mutex::new(file),
@@ -120,6 +151,35 @@ impl SessionWriter {
                 path: self.path.display().to_string(),
                 source,
             })
+    }
+}
+
+/// Probe whether `path` is currently held by another process's
+/// `SessionWriter`. Opens a temporary read-only fd, attempts a
+/// non-blocking exclusive lock, then drops the fd (releasing the
+/// probe lock immediately if we got it). Returns `false` when the
+/// file doesn't exist yet — there's nothing to be locked.
+///
+/// Used by the TUI's `/resume` picker to render the `[locked]`
+/// annotation; not used to gate the actual open, since that would
+/// race with another process opening between the probe and the
+/// real lock. Always pass the `SessionError::Locked` returned by
+/// `SessionWriter::open` to the user as authoritative.
+pub fn is_session_locked(path: &Path) -> bool {
+    use fs2::FileExt;
+    let file = match std::fs::OpenOptions::new().read(true).open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            // We got the lock — was unlocked. Release before dropping
+            // for symmetry (Drop would do it anyway).
+            let _ = file.unlock();
+            false
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => true,
+        Err(_) => false,
     }
 }
 
@@ -179,6 +239,54 @@ mod tests {
     fn second_writer_appends_does_not_truncate() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
+        SessionWriter::open(&path).unwrap().append(&user("a")).unwrap();
+        SessionWriter::open(&path).unwrap().append(&user("b")).unwrap();
+    }
+
+    #[test]
+    fn second_open_while_first_held_returns_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("contested.jsonl");
+        let _held = SessionWriter::open(&path).unwrap();
+        match SessionWriter::open(&path) {
+            Err(SessionError::Locked { .. }) => {}
+            Err(e) => panic!("expected Locked, got Err({e:?})"),
+            Ok(_) => panic!("expected Locked, got Ok"),
+        }
+        // is_session_locked should agree with the writer's view.
+        assert!(is_session_locked(&path));
+    }
+
+    #[test]
+    fn lock_releases_when_writer_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dropped.jsonl");
+        {
+            let _w = SessionWriter::open(&path).unwrap();
+            assert!(is_session_locked(&path));
+        }
+        // After Drop the lock is gone.
+        assert!(!is_session_locked(&path));
+        // And a fresh open succeeds.
+        let _w2 = SessionWriter::open(&path).unwrap();
+    }
+
+    #[test]
+    fn is_session_locked_false_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nope.jsonl");
+        assert!(!is_session_locked(&path));
+    }
+
+    #[test]
+    fn second_writer_after_first_drops_appends_both() {
+        // Smoke test for the previous "second_writer_appends_does_not_truncate"
+        // case, now adjusted for advisory locking: opening twice on the same
+        // file is fine as long as the first writer dropped first. The
+        // chained `open().append()` form drops the temporary at statement
+        // end, releasing the lock for the next statement.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seq.jsonl");
         SessionWriter::open(&path).unwrap().append(&user("a")).unwrap();
         SessionWriter::open(&path).unwrap().append(&user("b")).unwrap();
         let loaded = load_messages(&path).unwrap();

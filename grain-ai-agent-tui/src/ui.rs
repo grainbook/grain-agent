@@ -60,6 +60,21 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState, elapsed: crate::anim::F
     }
     let palette = state.theme().palette; // Palette is Copy
 
+    // Paint the entire terminal background with the theme's `bg` color.
+    // Without this, the terminal defaults to the terminal emulator's
+    // configured background (usually black or white), which creates a
+    // jarring mismatch against the overlay cards. Use `Clear` to fill
+    // the whole physical area.
+    {
+        use ratatui::style::Style;
+        frame.render_widget(Clear, area);
+        // Then overlay a full-screen block with the bg color so the
+        // terminal background reads through as theme-bg.
+        let bg_block = ratatui::widgets::Block::default()
+            .style(Style::default().bg(palette.bg));
+        frame.render_widget(bg_block, area);
+    }
+
     let palette_rows = palette_height(state);
     // Dynamic heights. The ratatui "dynamic layout" recipe:
     // give the flex pane `Constraint::Min(1)` and every other chunk
@@ -695,7 +710,7 @@ fn build_line(
     // Snap to UTF-8 char boundaries; multi-byte chars must stay intact.
     let lo = clamp_char_boundary(&row.text, lo);
     let hi = clamp_char_boundary(&row.text, hi);
-    let highlight_style = style.bg(palette.surface);
+    let highlight_style = style.bg(palette.selection);
     Line::from(vec![
         Span::styled(row.text[..lo].to_string(), style),
         Span::styled(row.text[lo..hi].to_string(), highlight_style),
@@ -724,7 +739,7 @@ fn apply_highlight_to_spans(
             let hi = hi.min(span.content.len());
             let lo = clamp_char_boundary(&span.content, lo);
             let hi = clamp_char_boundary(&span.content, hi);
-            let highlight_style = span.style.bg(palette.surface);
+            let highlight_style = span.style.bg(palette.selection);
             if lo > 0 {
                 out.push(Span::styled(
                     span.content[..lo].to_string(),
@@ -1034,23 +1049,41 @@ fn build_footer_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
         spans.push(Span::raw("  "));
     }
     // Context-window usage chip: [ctx N%]. Color: green <=60, yellow 60-85, red >85.
-    // Both input and output tokens occupy the physical context window, so include both in the numerator.
-    if state.context_window > 0 && state.tokens_in > 0 {
-        let total_tokens = state.tokens_in.saturating_add(state.tokens_out);
-        let pct = (total_tokens as f64 / state.context_window as f64 * 100.0)
-            .clamp(0.0, 100.0) as u64;
-        let ctx_color = if pct <= 60 {
-            palette.success
-        } else if pct <= 85 {
-            palette.warning
+    //
+    // Uses the API-reported `usage.input` from the latest turn as the primary
+    // source — this is the exact token count the provider billed for, and it
+    // naturally drops after compaction / tool-result truncation (because the
+    // next request carries fewer messages).  Output tokens are deliberately
+    // excluded: they count against `max_output_tokens`, not the context budget.
+    //
+    // Fallback: before the first API response lands (`tokens_in == 0`), estimate
+    // from the pinned system prompt so the user sees a rough starting occupancy.
+    if state.context_window > 0 {
+        let estimated = if state.tokens_in > 0 {
+            // Ground truth from the most recent API request.
+            state.tokens_in
+        } else if state.system_prompt_chars > 0 {
+            // Boot-time estimate: system prompt only, no messages yet.
+            (state.system_prompt_chars as u64).div_ceil(4) + 24
         } else {
-            palette.error
+            0
         };
-        spans.push(Span::styled(
-            format!("[ctx {pct}%]"),
-            Style::default().fg(ctx_color),
-        ));
-        spans.push(Span::raw("  "));
+        if estimated > 0 {
+            let pct = ((estimated as f64) / (state.context_window as f64) * 100.0)
+                .clamp(0.0, 100.0) as u64;
+            let ctx_color = if pct <= 60 {
+                palette.success
+            } else if pct <= 85 {
+                palette.warning
+            } else {
+                palette.error
+            };
+            spans.push(Span::styled(
+                format!("[ctx {pct}%]"),
+                Style::default().fg(ctx_color),
+            ));
+            spans.push(Span::raw("  "));
+        }
     }
     // Message count chip: [msg N].
     {
@@ -1255,6 +1288,12 @@ fn draw_overlay(
             let h = (4u16 + children.len() as u16 * 6).min(28);
             (88, h.max(10))
         }
+        Overlay::SessionLockConflict { choices, .. } => {
+            // 4 chrome (title + pad + body + hint) + 2 body rows
+            // for the path message + 1 per choice. Cap at 16.
+            let h = (6u16 + choices.len() as u16).min(16);
+            (66, h.max(10))
+        }
     };
     let popup = centered_rect_fixed(target_w, target_h, area);
     // Clear so the transcript underneath doesn't bleed through; then
@@ -1293,8 +1332,19 @@ fn draw_overlay(
         Overlay::Log { scroll } => {
             return draw_log(frame, inner, *scroll, state, palette);
         }
-        Overlay::SessionResume { focused, sessions } => {
-            return draw_session_resume(frame, inner, *focused, sessions, palette);
+        Overlay::SessionResume {
+            focused,
+            sessions,
+            confirm_delete,
+        } => {
+            return draw_session_resume(
+                frame,
+                inner,
+                *focused,
+                sessions,
+                *confirm_delete,
+                palette,
+            );
         }
         Overlay::Plugins {
             plugins,
@@ -1358,6 +1408,22 @@ fn draw_overlay(
             label,
         } => {
             return draw_dynamic_progress(frame, inner, title, *value, *max, label, palette);
+        }
+        Overlay::SessionLockConflict {
+            source,
+            locked_path,
+            choices,
+            focused,
+        } => {
+            return draw_session_lock_conflict(
+                frame,
+                inner,
+                *source,
+                locked_path,
+                choices,
+                *focused,
+                palette,
+            );
         }
         Overlay::DynamicStack { title, children } => {
             return draw_dynamic_stack(frame, inner, title, children, palette);
@@ -1639,6 +1705,7 @@ fn draw_session_resume(
     popup: Rect,
     focused: usize,
     sessions: &[grain_ai_agent_headless::SessionMeta],
+    confirm_delete: bool,
     palette: &Palette,
 ) {
     let chunks = Layout::default()
@@ -1678,15 +1745,32 @@ fn draw_session_resume(
                 let mtime_str = humanize_mtime(sess.modified_at);
                 let model = sess.model.as_deref().unwrap_or("(unknown)");
                 let title = sess.title_or_placeholder();
-                let row = title.to_string();
+                // Append `[locked]` to the title when another grain
+                // process holds the writer lock. Enter on a locked row
+                // opens the session-lock-conflict dialog instead of
+                // emitting `Command::ResumeSession` directly.
+                let row = if sess.locked {
+                    format!("{title}   [locked]")
+                } else {
+                    title.to_string()
+                };
                 let meta = format!("    {model} · {mtime_str} · {} msgs", sess.message_count);
                 let (row_style, meta_style) = if i == focused {
+                    // Armed-delete state: flip the highlight to the
+                    // error palette so the row visually screams
+                    // "destructive action pending" rather than the
+                    // friendly accent color the resume picker uses.
+                    let bg = if confirm_delete {
+                        palette.error
+                    } else {
+                        palette.accent
+                    };
                     (
                         Style::default()
                             .fg(palette.surface)
-                            .bg(palette.accent)
+                            .bg(bg)
                             .add_modifier(Modifier::BOLD),
-                        Style::default().fg(palette.surface).bg(palette.accent),
+                        Style::default().fg(palette.surface).bg(bg),
                     )
                 } else {
                     (
@@ -1704,17 +1788,118 @@ fn draw_session_resume(
     };
     frame.render_widget(body, chunks[2]);
 
-    let hint = if sessions.is_empty() {
-        "Esc close"
+    let (hint, hint_style) = if sessions.is_empty() {
+        ("Esc close", Style::default().fg(palette.muted))
+    } else if confirm_delete {
+        (
+            "press Delete again to permanently remove · any other key cancels",
+            Style::default()
+                .fg(palette.error)
+                .add_modifier(Modifier::BOLD),
+        )
     } else {
-        "↑↓ navigate · Enter pick · Esc close"
+        (
+            "↑↓ navigate · Enter pick · Delete remove · Esc close",
+            Style::default().fg(palette.muted),
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(hint, hint_style))),
+        chunks[3],
+    );
+}
+
+/// Draw the session-lock-conflict modal — shown when boot's
+/// auto-resume target is held by another grain process, or when the
+/// user hits Enter on a `[locked]` row in `/resume`. Choices render
+/// vertically, default focus is on the first entry (always "Start a
+/// fresh session" — the safe option).
+fn draw_session_lock_conflict(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    source: crate::app::SessionLockSource,
+    locked_path: &std::path::Path,
+    choices: &[crate::app::SessionConflictChoice],
+    focused: usize,
+    palette: &Palette,
+) {
+    use crate::app::{SessionConflictChoice, SessionLockSource};
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // title
+            Constraint::Length(1), // pad
+            Constraint::Length(2), // body (held-by message)
+            Constraint::Min(1),    // choice list
+            Constraint::Length(1), // hint
+        ])
+        .split(popup);
+
+    let title_text = match source {
+        SessionLockSource::Boot => "session locked",
+        SessionLockSource::Resume => "session locked",
+    };
+    let title_line = Line::from(vec![Span::styled(
+        title_text,
+        Style::default()
+            .fg(palette.warning)
+            .add_modifier(Modifier::BOLD),
+    )]);
+    frame.render_widget(Paragraph::new(title_line), chunks[0]);
+
+    let path_disp = locked_path.display().to_string();
+    let body_lines = vec![
+        Line::from(Span::styled(
+            format!("{path_disp} is held by"),
+            Style::default().fg(palette.fg),
+        )),
+        Line::from(Span::styled(
+            "another grain TUI.",
+            Style::default().fg(palette.fg),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(Text::from(body_lines)).wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+
+    let choice_lines: Vec<Line> = choices
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let label = match c {
+                SessionConflictChoice::Fresh => "Start a fresh session",
+                SessionConflictChoice::Fork => "Fork from snapshot",
+                SessionConflictChoice::Quit => "Quit",
+                SessionConflictChoice::Cancel => "Cancel",
+            };
+            let (style, marker) = if i == focused {
+                (
+                    Style::default()
+                        .fg(palette.surface)
+                        .bg(palette.accent)
+                        .add_modifier(Modifier::BOLD),
+                    "▶ ",
+                )
+            } else {
+                (Style::default().fg(palette.fg), "  ")
+            };
+            Line::from(Span::styled(format!("{marker}{label}"), style))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(choice_lines)), chunks[3]);
+
+    let hint = match source {
+        SessionLockSource::Boot => "↑↓ select · Enter confirm",
+        SessionLockSource::Resume => "↑↓ select · Enter confirm · Esc cancel",
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             hint,
             Style::default().fg(palette.muted),
         ))),
-        chunks[3],
+        chunks[4],
     );
 }
 

@@ -307,6 +307,7 @@ fn user_config_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn write_toml(path: &Path, content: &str) {
         if let Some(p) = path.parent() {
@@ -486,6 +487,7 @@ auth  = { kind = "api_key", env = "OPENAI_API_KEY", value = "sk-openai-123" }
             src: "user-src".into(),
             rev: None,
             kind: None,
+        env: HashMap::new(),
         });
         let src = ConfigFile {
             plugins: vec![PluginSpec {
@@ -493,6 +495,7 @@ auth  = { kind = "api_key", env = "OPENAI_API_KEY", value = "sk-openai-123" }
                 src: "ws-src".into(),
                 rev: None,
                 kind: None,
+            env: HashMap::new(),
             }],
             ..Default::default()
         };

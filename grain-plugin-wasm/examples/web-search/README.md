@@ -51,12 +51,36 @@ description = "Exa search + URL fetch"
 capabilities = ["http", "env", "log"]
 ```
 
-Run grain with the `wasm-plugins` feature:
+Run grain (no need to `export EXA_API_KEY` — set it in config):
 
 ```sh
 cargo build --features wasm-plugins
-export EXA_API_KEY="your-exa-key"
 ./target/debug/grain-tui --workspace .
+```
+
+### Setting EXA_API_KEY
+
+Three options (highest priority first):
+
+1. **`plugin-spec.toml`** — flat key under `[[plugin]]`:
+```toml
+# .grain/plugin-spec.toml
+[[plugin]]
+name = "web-search"
+src = "..."
+EXA_API_KEY = "your-key"
+```
+
+2. **`plugin.toml`** — `[wasm.env]` section:
+```toml
+# .grain/plugins/web-search/plugin.toml
+[wasm.env]
+EXA_API_KEY = "your-key"
+```
+
+3. **Shell environment** (fallback):
+```sh
+export EXA_API_KEY="your-exa-key"
 ```
 
 The agent should now have `web_search` and `web_fetch` in its tool list

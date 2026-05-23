@@ -81,6 +81,13 @@ pub enum TuiEvent {
     /// Worker scanned `sessions_dir` and returns the discovered
     /// session list (newest first). Fills the `/resume` picker.
     SessionsListed(Vec<grain_ai_agent_headless::SessionMeta>),
+    /// Boot detected an auto-resume candidate that's already held
+    /// by another grain process. The worker has already swapped in
+    /// a fresh session so the TUI is fully functional; this event
+    /// just asks the UI to open the session-lock-conflict overlay
+    /// so the user can pick fresh / fork / quit. Carries the
+    /// **original** locked path the user might want to fork from.
+    SessionLockedAtBoot { locked_path: std::path::PathBuf },
     /// Worker completed a `/resume` in-place session swap. Carries the
     /// full set of prior messages so the UI can clear the current
     /// transcript and repopulate with the loaded history.
