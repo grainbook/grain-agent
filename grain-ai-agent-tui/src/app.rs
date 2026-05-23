@@ -196,6 +196,21 @@ pub enum TranscriptKind {
     Error,
 }
 
+/// Does this transcript kind warrant a fade-in animation when it
+/// first appears? Skip the user's own keystrokes (a flash on
+/// content they just typed reads as a flicker, not a transition)
+/// and bare `Info` / `Error` rows (the status / error rows already
+/// have their own dedicated flash effects).
+fn kind_should_fade(kind: TranscriptKind) -> bool {
+    matches!(
+        kind,
+        TranscriptKind::AssistantText
+            | TranscriptKind::ThinkingText
+            | TranscriptKind::ToolCallStart
+            | TranscriptKind::ToolCallEnd
+    )
+}
+
 /// A logical group of consecutive [`TranscriptLine`]s that the
 /// renderer treats as one foldable unit.
 ///
@@ -1167,7 +1182,10 @@ impl AppState {
     }
 
     fn push(&mut self, kind: TranscriptKind, text: String) {
-        self.transcript.push(TranscriptLine { kind, text });
+        self.transcript.push(TranscriptLine {
+            kind,
+            text,
+        });
         // No scroll mutation here. When `follow_bottom == true`
         // (the default), the renderer pins to tail and ignores
         // `scroll_offset`, so new content shows up automatically.
@@ -1176,26 +1194,30 @@ impl AppState {
         // it alone is exactly what keeps the visible window stable
         // as new lines append at the end.
 
-        // Fade-in effect for new lines — only when the line will be
-        // visible (tailing mode). Place a 1-row fade at the bottom
-        // of the transcript pane.
-        if self.follow_bottom {
-            let ta = self.transcript_area.get();
-            if ta.height > 0 {
-                use crate::anim::{EffectKind, FxDuration, fx};
-                let palette = &self.themes[self.current_theme_idx].palette;
-                let row_area = Rect {
-                    x: ta.x,
-                    y: ta.y.saturating_add(ta.height.saturating_sub(1)),
-                    width: ta.width,
-                    height: 1,
-                };
-                self.effects.push(
-                    EffectKind::NewMessage,
-                    fx::fade_from_fg(palette.surface, FxDuration::from_millis(220)),
-                    row_area,
-                );
-            }
+        // Fade-in effect for new lines — only on assistant / tool
+        // output that the user is actually reading for the first
+        // time. Skip user-typed prompts (they know they typed it —
+        // a flash on their own keystroke registers as a flicker)
+        // and skip when scrolled away from tail (the row isn't on
+        // screen).
+        if !self.follow_bottom || !kind_should_fade(kind) {
+            return;
+        }
+        let ta = self.transcript_area.get();
+        if ta.height > 0 {
+            use crate::anim::{EffectKind, FxDuration, fx};
+            let palette = &self.themes[self.current_theme_idx].palette;
+            let row_area = Rect {
+                x: ta.x,
+                y: ta.y.saturating_add(ta.height.saturating_sub(1)),
+                width: ta.width,
+                height: 1,
+            };
+            self.effects.push(
+                EffectKind::NewMessage,
+                fx::fade_from_fg(palette.surface, FxDuration::from_millis(220)),
+                row_area,
+            );
         }
     }
 
