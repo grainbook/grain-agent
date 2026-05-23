@@ -38,7 +38,7 @@ use tokio::sync::mpsc;
 use crate::app::Command;
 use crate::cli::Args;
 use crate::event::TuiEvent;
-use grain_llm_genai::{ProviderKind, ProviderProfile};
+use grain_llm_genai::{ProviderAuth, ProviderKind, ProviderProfile};
 
 /// Configuration crystallized out of [`Args`]. Pulled into its own
 /// struct so the spawn function isn't argument-soup.
@@ -1605,13 +1605,37 @@ async fn run_command_loop(
                 });
             }
             Command::ListModels(provider_name) => {
-                // Filter the registry by the provider's vendor
-                // family. For native vendors (Anthropic / OpenAI /
-                // Gemini) we filter by id prefix; for openai-compat
-                // profiles we return the full registry so the user
-                // can pick any model — the endpoint decides whether
-                // the request is honored.
+                // Routing:
+                // - Native vendor (Anthropic / OpenAI / Gemini): filter
+                //   the embedded registry by id prefix and return
+                //   synchronously.
+                // - OpenAI-compat: hit `{base_url}/models` (OpenAI's
+                //   models-list endpoint shape) and parse `data[].id`.
+                //   Asynchronous so the worker loop doesn't block on
+                //   network. On failure we surface an
+                //   `AgentWorkerError` and emit an empty list so the
+                //   picker doesn't hang.
                 let profile = profiles.iter().find(|p| p.name == provider_name);
+                if let Some(p) = profile
+                    && p.kind == ProviderKind::OpenAiCompat
+                {
+                    let p = p.clone();
+                    let evt_tx_for_fetch = evt_tx.clone();
+                    tokio::spawn(async move {
+                        match fetch_openai_compat_models(&p).await {
+                            Ok(pairs) => {
+                                let _ = evt_tx_for_fetch.send(TuiEvent::ModelsListed(pairs));
+                            }
+                            Err(e) => {
+                                let _ = evt_tx_for_fetch.send(TuiEvent::AgentWorkerError(
+                                    format!("list models from '{}': {e}", p.name),
+                                ));
+                                let _ = evt_tx_for_fetch.send(TuiEvent::ModelsListed(Vec::new()));
+                            }
+                        }
+                    });
+                    continue;
+                }
                 let prefix = match profile.map(|p| p.kind) {
                     Some(ProviderKind::Anthropic) => Some("anthropic/"),
                     Some(ProviderKind::OpenAi) => Some("openai/"),
@@ -1865,6 +1889,66 @@ fn build_rhai_bundle(
             }
         }
     }
+}
+
+/// Hit an OpenAI-compatible provider's `GET {base_url}/models` endpoint
+/// and return `(model_id, display_name)` pairs the model picker can
+/// render. The returned `model_id` is prefixed with `{profile.name}/`
+/// so [`Command::SetModel`] downstream can split on `/` and route
+/// through this profile's compat endpoint instead of falling back to
+/// genai's adapter heuristic (which mis-picks Ollama for unknown ids).
+///
+/// On network / auth / parse failures the error is bubbled up; callers
+/// surface it as a transient `AgentWorkerError` and still emit an
+/// empty `ModelsListed` so the picker doesn't hang waiting for a list
+/// that will never arrive.
+async fn fetch_openai_compat_models(
+    profile: &ProviderProfile,
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error + Send + Sync>> {
+    let base_url = profile
+        .base_url
+        .as_deref()
+        .ok_or("provider profile has no base_url")?;
+    let url = format!("{}models", if base_url.ends_with('/') {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/")
+    });
+
+    let env_var = match &profile.auth {
+        ProviderAuth::ApiKey { env } => Some(env.as_str()),
+        ProviderAuth::AnthropicOauth => None,
+    };
+    let token = env_var
+        .and_then(|name| std::env::var(name).ok())
+        .filter(|t| !t.is_empty());
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()?;
+    let mut req = client.get(&url);
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {} from {url}", resp.status()).into());
+    }
+    let body: serde_json::Value = resp.json().await?;
+    let data = body
+        .get("data")
+        .and_then(|v| v.as_array())
+        .ok_or("response missing `data` array")?;
+    let mut pairs: Vec<(String, String)> = data
+        .iter()
+        .filter_map(|item| {
+            let id = item.get("id")?.as_str()?;
+            Some((format!("{}/{id}", profile.name), id.to_string()))
+        })
+        .collect();
+    pairs.sort_by(|a, b| a.1.cmp(&b.1));
+    pairs.dedup_by(|a, b| a.0 == b.0);
+    Ok(pairs)
 }
 
 fn override_model_provider(

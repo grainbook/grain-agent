@@ -18,6 +18,7 @@ tachyonfx = { workspace = true }
 unicode-width = { workspace = true }
 arboard = { workspace = true }
 textwrap = { workspace = true }
+reqwest = { workspace = true }
 grain-agent-core = { workspace = true }
 grain-agent-harness = { workspace = true }
 grain-llm-models = { workspace = true }
