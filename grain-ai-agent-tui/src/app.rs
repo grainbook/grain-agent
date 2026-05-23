@@ -3001,13 +3001,46 @@ impl AppState {
     }
 
     fn append_streaming(&mut self, kind: TranscriptKind, delta: &str) {
-        if let Some(last) = self.transcript.last_mut()
-            && last.kind == kind
-        {
-            last.text.push_str(delta);
-        } else {
-            self.push(kind, delta.to_string());
+        // Look back from the tail for the most recent line of THIS
+        // kind, stopping at a hard turn boundary. Providers that
+        // interleave `content` + `reasoning_content` (DeepSeek's
+        // thinking mode is the worst offender) deliver streams like
+        // TextDelta → ThinkingDelta → TextDelta → ThinkingDelta …
+        // The naive "is `last.kind == kind`?" check fails on the
+        // second TextDelta (last is now ThinkingText) and pushes a
+        // *brand new* AssistantText line — which is exactly what
+        // produced the screenshots of ~30 stacked copies of the
+        // same growing sentence.
+        for line in self.transcript.iter_mut().rev() {
+            if line.kind == kind {
+                // Some providers (notably opencodezen's DeepSeek
+                // streaming) deliver TextDelta as **cumulative**
+                // text — each chunk is "everything emitted so
+                // far", not the delta. Detect that by checking
+                // whether the incoming chunk starts with what we
+                // already have, and only append the suffix.
+                if delta.len() >= line.text.len()
+                    && line.text.len() > 0
+                    && delta.starts_with(line.text.as_str())
+                {
+                    let suffix = &delta[line.text.len()..];
+                    line.text.push_str(suffix);
+                } else {
+                    line.text.push_str(delta);
+                }
+                return;
+            }
+            // Real turn boundaries: a fresh user prompt or a
+            // completed tool result means subsequent assistant text
+            // is a NEW turn, never merge across.
+            if matches!(
+                line.kind,
+                TranscriptKind::UserPrompt | TranscriptKind::ToolCallEnd
+            ) {
+                break;
+            }
         }
+        self.push(kind, delta.to_string());
     }
 
     fn ensure_trailing_newline(&mut self, kind: TranscriptKind) {
