@@ -53,6 +53,7 @@ grain-deepseek-pack = { path = "grain-deepseek-pack" }
 lazy-gagent = { path = "lazy-gagent" }
 grain-script-rhai = { path = "grain-script-rhai" }
 ratatui = { version = "0.30", features = ["crossterm_0_28"] }
+tachyonfx = "0.25"
 crossterm = "0.28"
 unicode-width = "0.2"
 boa_engine = "0.21"
