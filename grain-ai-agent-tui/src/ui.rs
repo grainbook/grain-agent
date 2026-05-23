@@ -57,10 +57,10 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState, elapsed: crate::anim::F
         m.full_area = area;
         state.render_metrics.set(m);
     }
-    let palette = &state.theme().palette;
+    let palette = state.theme().palette; // Palette is Copy
 
     let palette_rows = palette_height(state);
-    // Dynamic heights. The ratatui "dynamic layout" recipe says:
+    // Dynamic heights. The ratatui "dynamic layout" recipe:
     // give the flex pane `Constraint::Min(1)` and every other chunk
     // a `Constraint::Length(known_height)`. We build header / footer
     // paragraphs once, measure them with `Paragraph::line_count(width)`
@@ -69,10 +69,14 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState, elapsed: crate::anim::F
     // their layout chunks below. Net effect: a narrower terminal makes
     // the long footer status line wrap into 2-3 rows instead of being
     // sliced off; the transcript shrinks to compensate.
-    let header_para = build_header_paragraph(state, palette);
-    let footer_para = build_footer_paragraph(state, palette);
-    let header_rows = (header_para.line_count(area.width) as u16).clamp(1, HEADER_MAX_ROWS);
-    let footer_rows = (footer_para.line_count(area.width) as u16).clamp(1, FOOTER_MAX_ROWS);
+    let header_rows = {
+        let h = build_header_paragraph(state, &palette);
+        (h.line_count(area.width) as u16).clamp(1, HEADER_MAX_ROWS)
+    };
+    let footer_rows = {
+        let f = build_footer_paragraph(state, &palette);
+        (f.line_count(area.width) as u16).clamp(1, FOOTER_MAX_ROWS)
+    };
     let input_rows = input_height(state, area.width);
     // Ephemeral status slot — 1 row above the input box when set, 0
     // rows (no slot) when empty. Replace-in-place, never appended to
@@ -107,23 +111,25 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState, elapsed: crate::anim::F
         .constraints(constraints)
         .split(area);
 
-    frame.render_widget(header_para, chunks[0]);
-    draw_transcript(frame, chunks[1], state, palette);
+    // Header: rebuild + render (no mutable borrow here)
+    frame.render_widget(build_header_paragraph(state, &palette), chunks[0]);
+    // Transcript + mutable borrow (for markdown cache)
+    draw_transcript(frame, chunks[1], state, &palette);
     if palette_rows > 0 {
-        draw_palette(frame, chunks[2], state, palette);
-        draw_status(frame, chunks[3], state, palette);
+        draw_palette(frame, chunks[2], state, &palette);
+        draw_status(frame, chunks[3], state, &palette);
         // chunks[4] = spacer (blank)
-        draw_input(frame, chunks[5], state, palette);
-        frame.render_widget(footer_para, chunks[6]);
+        draw_input(frame, chunks[5], state, &palette);
+        frame.render_widget(build_footer_paragraph(state, &palette), chunks[6]);
     } else {
-        draw_status(frame, chunks[2], state, palette);
+        draw_status(frame, chunks[2], state, &palette);
         // chunks[3] = spacer (blank)
-        draw_input(frame, chunks[4], state, palette);
-        frame.render_widget(footer_para, chunks[5]);
+        draw_input(frame, chunks[4], state, &palette);
+        frame.render_widget(build_footer_paragraph(state, &palette), chunks[5]);
     }
 
     if let Some(overlay) = &state.overlay {
-        draw_overlay(frame, area, overlay, state, palette);
+        draw_overlay(frame, area, overlay, state, &palette);
     }
 
     // Process tachyonfx effects last so they paint on top of everything.
@@ -259,7 +265,7 @@ fn build_header_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
     Paragraph::new(line).wrap(Wrap { trim: false })
 }
 
-fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &Palette) {
+fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, palette: &Palette) {
     // Stash the pane bounds so mouse handlers can translate event
     // coordinates back into rendered-row indices.
     state.transcript_area.set(area);
@@ -307,6 +313,7 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette:
                 width,
                 Some(block.id()),
                 &mut rendered,
+                None,
             );
             continue;
         }
@@ -326,11 +333,14 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette:
                 width,
                 Some(block.id()),
                 &mut rendered,
+                None,
             );
         }
         for idx in block.first_line..=block.last_line {
-            if let Some(line) = state.transcript.get(idx) {
-                wrap_one_line(line, width, None, &mut rendered);
+            let line = state.transcript.get(idx).cloned();
+            if let Some(line) = line {
+                let md = md_spans_for_line(&line, idx, block, state);
+                wrap_one_line(&line, width, None, &mut rendered, md.as_deref());
             }
         }
     }
@@ -369,6 +379,63 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette:
     frame.render_widget(paragraph, area);
 }
 
+/// Decide whether `line` should get markdown rendering and return
+/// the parsed spans if so. Uses [`MarkdownCache`] so completed lines
+/// aren't re-parsed every frame.
+fn md_spans_for_line(
+    line: &TranscriptLine,
+    idx: usize,
+    block: &crate::app::TranscriptBlock,
+    state: &mut AppState,
+) -> Option<Vec<crate::md_render::MdStyledSpan>> {
+    use crate::md_render::{looks_like_markdown, render_md_to_spans};
+    // Only render AssistText / ThinkingText through the md pipeline.
+    if !matches!(
+        line.kind,
+        TranscriptKind::AssistantText | TranscriptKind::ThinkingText
+    ) {
+        return None;
+    }
+    // Skip empty lines and lines without markdown triggers.
+    if line.text.is_empty() || !looks_like_markdown(&line.text) {
+        return None;
+    }
+    // Is this the last line of a streaming block?
+    let is_streaming =
+        state.streaming && idx == block.last_line && idx == state.transcript.len().saturating_sub(1);
+    if is_streaming {
+        // Tail-buffer (streamdown-style): the streaming tail is the
+        // line whose markdown state changes shape on every delta —
+        // an unclosed `**` becomes bold once the closer arrives, a
+        // partial code fence flips the whole rest of the document
+        // into a code block until the second fence lands, and so
+        // on. Parsing it every frame produces (a) source-vs-
+        // rendered byte-offset drift that historically panicked
+        // `spans_for_fragment`, and (b) visible flicker where
+        // styles rapid-fire on/off as the stream catches up.
+        //
+        // Defer markdown styling until the line is *finalized*
+        // (i.e. `state.streaming` flips false, typically on
+        // `AgentEvent::MessageEnd`). On the first post-stream
+        // frame the cache branch below parses + memoizes it.
+        return None;
+    } else {
+        // Ensure cache capacity.
+        state.markdown_cache.resize(state.transcript.len());
+        // Check cache.
+        if let Some(Some(cached)) = state.markdown_cache.entries.get(idx) {
+            return Some(cached.clone());
+        }
+        // Parse and cache.
+        let spans = render_md_to_spans(&line.text);
+        state.markdown_cache.resize(state.transcript.len());
+        if idx < state.markdown_cache.entries.len() {
+            state.markdown_cache.entries[idx] = Some(spans.clone());
+        }
+        Some(spans)
+    }
+}
+
 /// Wrap one `TranscriptLine` into 1+ rendered rows, identical to
 /// what the legacy in-line loop did. Extracted so the block-aware
 /// outer loop can reuse it both for raw transcript lines and for
@@ -379,18 +446,29 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette:
 /// "click here toggles the fold". (Most chrome lines fit on one
 /// terminal row, but very wide terminals + long tool names can
 /// still wrap.)
+///
+/// When `md_spans` is `Some`, each wrapped fragment also carries the
+/// full markdown span list + its byte range so [`build_line`] can
+/// produce styled ratatui `Span`s.
 fn wrap_one_line(
     line: &TranscriptLine,
     width: usize,
     chrome_for_block: Option<usize>,
     rendered: &mut Vec<crate::app::RenderedRow>,
+    md_spans: Option<&[crate::md_render::MdStyledSpan]>,
 ) {
+
     let prefix = prefix_for_kind(line.kind);
     let continuation = "  ";
+    let prefix_width = UnicodeWidthStr::width(prefix);
+    let cont_width = UnicodeWidthStr::width(continuation);
+
     for (seg_i, segment) in line.text.split('\n').enumerate() {
         let initial_prefix = if seg_i == 0 { prefix } else { continuation };
+        let initial_prefix_width = if seg_i == 0 { prefix_width } else { cont_width };
+
         let inner = width
-            .saturating_sub(UnicodeWidthStr::width(initial_prefix))
+            .saturating_sub(initial_prefix_width)
             .max(1);
         let wrapped: Vec<String> = if segment.is_empty() {
             vec![String::new()]
@@ -400,16 +478,50 @@ fn wrap_one_line(
                 .map(|c| c.into_owned())
                 .collect()
         };
+
+        // Track cumulative character offset within the original
+        // `segment` so we can map fragments back to source spans.
+        // Use `.chars().count()` because textwrap wraps by display
+        // width, but we need byte offsets for slicing.
+        //
+        // Build a mapping: for each wrapped fragment, determine its
+        // byte range [start, end) in `segment`.
+        let mut char_offset = 0usize;
+        let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(wrapped.len());
+        for frag in &wrapped {
+            let frag_chars = frag.chars().count();
+            // Byte range: from the start of this fragment to the start
+            // of the next one.
+            let start_byte = segment
+                .char_indices()
+                .nth(char_offset)
+                .map(|(i, _)| i)
+                .unwrap_or(segment.len());
+            let end_byte = segment
+                .char_indices()
+                .nth(char_offset + frag_chars)
+                .map(|(i, _)| i)
+                .unwrap_or(segment.len());
+            ranges.push((start_byte, end_byte));
+            char_offset += frag_chars;
+        }
+
         for (frag_i, frag) in wrapped.into_iter().enumerate() {
             let p = if frag_i == 0 {
                 initial_prefix
             } else {
                 continuation
             };
+            let text = format!("{p}{frag}");
+            let md = md_spans.map(|spans| {
+                let (frag_start, frag_end) = ranges[frag_i];
+                (spans.to_vec(), frag_start, frag_end)
+            });
             rendered.push(crate::app::RenderedRow {
-                text: format!("{p}{frag}"),
+                text,
                 kind: line.kind,
                 chrome_for_block,
+                md_spans: md,
             });
         }
     }
@@ -476,7 +588,9 @@ fn truncate_oneline(s: &str, max: usize) -> String {
 }
 
 /// Build one rendered `Line` with the kind's base style + optional
-/// selection-background highlight.
+/// selection-background highlight. When `row.md_spans` is `Some`,
+/// renders styled sub-spans (bold, italic, code, etc.) instead of a
+/// single plain-text span.
 fn build_line(
     row: &crate::app::RenderedRow,
     idx: usize,
@@ -484,6 +598,20 @@ fn build_line(
     palette: &Palette,
 ) -> Line<'static> {
     let style = style_for_kind(row.kind, palette);
+
+    // If we have markdown spans, build styled sub-spans.
+    if let Some((ref spans, frag_start, frag_end)) = row.md_spans {
+        let mut sub_spans =
+            crate::md_render::spans_for_fragment(spans, frag_start, frag_end, style, palette);
+        // Apply selection highlight across the sub-spans if needed.
+        if let Some(s) = selection {
+            if let Some((lo, hi)) = s.col_range_for_row(idx, row.text.len()) {
+                sub_spans = apply_highlight_to_spans(sub_spans, lo, hi, palette);
+            }
+        }
+        return Line::from(sub_spans);
+    }
+
     let highlight = selection.and_then(|s| s.col_range_for_row(idx, row.text.len()));
     let Some((lo, hi)) = highlight else {
         return Line::from(Span::styled(row.text.clone(), style));
@@ -497,6 +625,52 @@ fn build_line(
         Span::styled(row.text[lo..hi].to_string(), highlight_style),
         Span::styled(row.text[hi..].to_string(), style),
     ])
+}
+
+/// Apply selection-background highlight to a list of styled spans.
+fn apply_highlight_to_spans(
+    spans: Vec<Span<'static>>,
+    highlight_start: usize,
+    highlight_end: usize,
+    palette: &Palette,
+) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut byte_offset = 0usize;
+    for span in spans {
+        let span_start = byte_offset;
+        let span_end = byte_offset + span.content.len();
+        if span_end <= highlight_start || span_start >= highlight_end {
+            // No overlap — pass through unchanged.
+            out.push(span);
+        } else {
+            let lo = highlight_start.saturating_sub(span_start);
+            let hi = highlight_end.min(span_end) - span_start;
+            let hi = hi.min(span.content.len());
+            let lo = clamp_char_boundary(&span.content, lo);
+            let hi = clamp_char_boundary(&span.content, hi);
+            let highlight_style = span.style.bg(palette.surface);
+            if lo > 0 {
+                out.push(Span::styled(
+                    span.content[..lo].to_string(),
+                    span.style,
+                ));
+            }
+            if hi > lo {
+                out.push(Span::styled(
+                    span.content[lo..hi].to_string(),
+                    highlight_style,
+                ));
+            }
+            if hi < span.content.len() {
+                out.push(Span::styled(
+                    span.content[hi..].to_string(),
+                    span.style,
+                ));
+            }
+        }
+        byte_offset = span_end;
+    }
+    out
 }
 
 fn clamp_char_boundary(s: &str, idx: usize) -> usize {

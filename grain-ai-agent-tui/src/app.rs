@@ -18,6 +18,7 @@ use grain_agent_core::{
 };
 
 use crate::anim::EffectManager;
+use crate::md_render::MarkdownCache;
 use crate::event::TuiEvent;
 use crate::theme::Theme;
 use grain_llm_genai::ProviderProfile;
@@ -431,6 +432,11 @@ pub struct RenderedRow {
     /// toggle: click on a chrome row → toggle that block, instead
     /// of starting a text selection.
     pub chrome_for_block: Option<usize>,
+    /// Pre-parsed markdown spans produced by [`crate::md_render`].
+    /// When `Some`, [`crate::ui::build_line`] renders styled spans
+    /// instead of a single plain-text span. Byte offsets into the
+    /// concatenated plain text of `md_source_spans`.
+    pub md_spans: Option<(Vec<crate::md_render::MdStyledSpan>, usize, usize)>,
 }
 
 /// Active text selection inside the transcript. Coordinates are
@@ -773,6 +779,10 @@ pub struct AppState {
     /// Active tachyonfx visual effects. Processed each frame in
     /// `ui::draw`; finished effects are auto-retired.
     pub effects: EffectManager,
+    /// Caches pre-parsed markdown spans for completed transcript
+    /// lines so they aren't re-parsed every frame. The last streaming
+    /// line is always re-parsed; everything before it hits this cache.
+    pub markdown_cache: MarkdownCache,
 }
 
 /// Cap on the in-memory prompt history. Old entries get truncated
@@ -946,6 +956,7 @@ impl AppState {
             fold_overrides: HashMap::new(),
             transcript_cursor: None,
             effects: EffectManager::new(),
+            markdown_cache: MarkdownCache::new(),
         };
         s.push(
             TranscriptKind::Info,
@@ -993,9 +1004,18 @@ impl AppState {
     /// Shared scroll-up step. Used by PgUp and mouse-wheel-up. Same
     /// semantics: tail-follow → freeze at current bottom, then step
     /// back `amount` rows. Already-frozen → just step back.
+    ///
+    /// When the entire transcript already fits in the visible area
+    /// there's nothing above the top row to scroll into view; we no-op
+    /// instead of flipping `follow_bottom` off (which would silently
+    /// break tail-follow for subsequent streaming deltas without
+    /// the user seeing any feedback for the wheel-up).
     pub fn scroll_up(&mut self, amount: usize) {
+        let m = self.render_metrics.get();
+        if m.total_rows <= m.visible_rows {
+            return;
+        }
         if self.follow_bottom {
-            let m = self.render_metrics.get();
             self.scroll_offset = m.total_rows.saturating_sub(m.visible_rows);
             self.follow_bottom = false;
         }
@@ -3912,6 +3932,7 @@ mod tests {
             text: " ▸ tool: read (2 lines)".into(),
             kind: TranscriptKind::ToolCallStart,
             chrome_for_block: Some(block_id),
+            md_spans: None,
         }]);
         let pre_blocks = build_transcript_blocks(&s.transcript);
         let pre = pre_blocks.iter().find(|b| b.id() == block_id).unwrap();
@@ -3944,6 +3965,7 @@ mod tests {
             text: "  some body text".into(),
             kind: TranscriptKind::AssistantText,
             chrome_for_block: None,
+            md_spans: None,
         }]);
         let _ = s.on_event(TuiEvent::MouseDown { row: 0, col: 5 });
         assert!(s.selection.is_some());
@@ -4137,6 +4159,7 @@ mod tests {
                 text: (*t).to_string(),
                 kind: *k,
                 chrome_for_block: None,
+                md_spans: None,
             })
             .collect()
     }
