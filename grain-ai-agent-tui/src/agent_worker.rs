@@ -1919,6 +1919,10 @@ fn build_rhai_bundle(
             m.insert("themes".into(), rhai::Dynamic::from(info.themes as i64));
             m.insert("scripts".into(), rhai::Dynamic::from(info.scripts as i64));
             m.insert("prompts".into(), rhai::Dynamic::from(info.prompts as i64));
+            // Whether this plugin ships a `plugin.wasm` Component
+            // Model module. Lets the `/plugins` overlay flag wasm
+            // plugins distinctly from script-only ones.
+            m.insert("wasm".into(), rhai::Dynamic::from(info.wasm));
             arr.push(rhai::Dynamic::from(m));
         }
         rhai::Dynamic::from(arr)

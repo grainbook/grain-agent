@@ -2083,10 +2083,15 @@ fn draw_dynamic_table(
             body.push(Line::from(Span::styled(text, style)));
         }
     }
-    frame.render_widget(
-        Paragraph::new(Text::from(body)).wrap(Wrap { trim: false }),
-        chunks[2],
-    );
+    // No-wrap on purpose: with `Wrap { trim: false }` a single
+    // long-source row (e.g. a wasm plugin with a deep src path) wraps
+    // to 2-3 visible lines and pushes subsequent rows past the
+    // popup's bottom edge — they then never render and the user
+    // sees "2 plugins" in the title but only 1 row in the body.
+    // Letting long cells clip at the right edge keeps every row
+    // visible; the user can switch to `/plugin-details` for the
+    // full src if they need it.
+    frame.render_widget(Paragraph::new(Text::from(body)), chunks[2]);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "↑↓ navigate · Enter pick · Esc close",

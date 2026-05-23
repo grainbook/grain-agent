@@ -205,7 +205,13 @@ fn ui_plugins_panel() {
     }
     let rows = [];
     for p in plugins {
-        let stats = `${p.skills}s · ${p.themes}t · ${p.scripts}sc · ${p.prompts}p`;
+        // `p.wasm` is `true` when the plugin ships a Component-Model
+        // `.wasm` module (loaded via `grain-plugin-wasm` when the
+        // `wasm-plugins` feature is on). The host already validated
+        // it; we just flag it here so it stands apart from
+        // script-only plugins in the table.
+        let kind_tag = if p.wasm { " · wasm" } else { "" };
+        let stats = `${p.skills}s · ${p.themes}t · ${p.scripts}sc · ${p.prompts}p${kind_tag}`;
         let src_short = if p.src.len() > 40 { p.src.sub_string(0, 37) + "..." } else { p.src };
         rows.push([
             p.name,
