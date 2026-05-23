@@ -2874,15 +2874,22 @@ impl AppState {
                 assistant_message_event,
                 ..
             } => match assistant_message_event {
-                AssistantMessageEvent::TextDelta { delta, .. } => {
-                    self.append_streaming(TranscriptKind::AssistantText, &delta);
+                AssistantMessageEvent::TextDelta { partial, .. } => {
+                    // Use the *canonical* concatenated text from
+                    // `partial.content` — the genai-side inbound
+                    // already maintains the authoritative running
+                    // buffer there. Trying to dedup raw `delta`
+                    // values (cumulative-vs-incremental, jitter,
+                    // out-of-order chunks) is brittle and was
+                    // producing screenshots of N stacked snapshots
+                    // of the same growing sentence on opencodezen
+                    // and kimi-k2.6.
+                    let canonical = concat_assistant_text(&partial);
+                    self.set_streaming_canonical(TranscriptKind::AssistantText, &canonical);
                 }
-                AssistantMessageEvent::ThinkingDelta { delta, .. } => {
-                    // Always push into the underlying transcript; the
-                    // render-side filter in `ui::draw_transcript`
-                    // governs visibility via `state.show_thinking`,
-                    // toggleable at runtime with F5.
-                    self.append_streaming(TranscriptKind::ThinkingText, &delta);
+                AssistantMessageEvent::ThinkingDelta { partial, .. } => {
+                    let canonical = concat_assistant_thinking(&partial);
+                    self.set_streaming_canonical(TranscriptKind::ThinkingText, &canonical);
                 }
                 _ => {}
             },
@@ -3000,39 +3007,25 @@ impl AppState {
         }
     }
 
-    fn append_streaming(&mut self, kind: TranscriptKind, delta: &str) {
-        // Look back from the tail for the most recent line of THIS
-        // kind, stopping at a hard turn boundary. Providers that
-        // interleave `content` + `reasoning_content` (DeepSeek's
-        // thinking mode is the worst offender) deliver streams like
-        // TextDelta → ThinkingDelta → TextDelta → ThinkingDelta …
-        // The naive "is `last.kind == kind`?" check fails on the
-        // second TextDelta (last is now ThinkingText) and pushes a
-        // *brand new* AssistantText line — which is exactly what
-        // produced the screenshots of ~30 stacked copies of the
-        // same growing sentence.
+    /// Set the active streaming line of `kind` to `canonical` (the
+    /// authoritative cumulative text from `AssistantMessageEvent::*
+    /// .partial`). Walks back from the tail looking for a same-kind
+    /// line, ignoring interleaved ThinkingText / Info / etc. Stops
+    /// at hard turn boundaries (`UserPrompt` / `ToolCallEnd`) so we
+    /// never merge across turns.
+    ///
+    /// Replaces text rather than appending — `canonical` already
+    /// reflects every chunk emitted so far, so any "delta dedup"
+    /// dance is a category error. This is the streamdown approach
+    /// applied at the source: trust the agent-side running buffer
+    /// instead of trying to reconstruct it from chunk fragments.
+    fn set_streaming_canonical(&mut self, kind: TranscriptKind, canonical: &str) {
         for line in self.transcript.iter_mut().rev() {
             if line.kind == kind {
-                // Some providers (notably opencodezen's DeepSeek
-                // streaming) deliver TextDelta as **cumulative**
-                // text — each chunk is "everything emitted so
-                // far", not the delta. Detect that by checking
-                // whether the incoming chunk starts with what we
-                // already have, and only append the suffix.
-                if delta.len() >= line.text.len()
-                    && line.text.len() > 0
-                    && delta.starts_with(line.text.as_str())
-                {
-                    let suffix = &delta[line.text.len()..];
-                    line.text.push_str(suffix);
-                } else {
-                    line.text.push_str(delta);
-                }
+                line.text.clear();
+                line.text.push_str(canonical);
                 return;
             }
-            // Real turn boundaries: a fresh user prompt or a
-            // completed tool result means subsequent assistant text
-            // is a NEW turn, never merge across.
             if matches!(
                 line.kind,
                 TranscriptKind::UserPrompt | TranscriptKind::ToolCallEnd
@@ -3040,7 +3033,7 @@ impl AppState {
                 break;
             }
         }
-        self.push(kind, delta.to_string());
+        self.push(kind, canonical.to_string());
     }
 
     fn ensure_trailing_newline(&mut self, kind: TranscriptKind) {
@@ -3051,6 +3044,36 @@ impl AppState {
             last.text.push('\n');
         }
     }
+}
+
+/// Concatenate every Text block in `partial.content` into one string.
+/// Multiple Text blocks arise when reasoning chunks interrupt the
+/// model's prose (DeepSeek's thinking mode is the most common
+/// offender) — the genai inbound starts a fresh Text block after
+/// every Thinking block, so the final assistant message can have
+/// several. We render them as one continuous AssistantText line in
+/// the TUI; ThinkingText is rendered separately on its own line.
+fn concat_assistant_text(partial: &grain_agent_core::AssistantMessage) -> String {
+    use grain_agent_core::AssistantContent;
+    let mut out = String::new();
+    for c in &partial.content {
+        if let AssistantContent::Text(t) = c {
+            out.push_str(&t.text);
+        }
+    }
+    out
+}
+
+/// Same as [`concat_assistant_text`] but for Thinking blocks.
+fn concat_assistant_thinking(partial: &grain_agent_core::AssistantMessage) -> String {
+    use grain_agent_core::AssistantContent;
+    let mut out = String::new();
+    for c in &partial.content {
+        if let AssistantContent::Thinking(t) = c {
+            out.push_str(&t.thinking);
+        }
+    }
+    out
 }
 
 fn preview_json(v: &serde_json::Value, max_chars: usize) -> String {
@@ -4007,10 +4030,14 @@ mod tests {
     #[test]
     fn text_delta_appends_to_last_assistant_line() {
         let mut s = fresh();
-        use grain_agent_core::{AssistantMessage, StopReason, Usage};
+        use grain_agent_core::{
+            AssistantContent, AssistantMessage, StopReason, TextContent, Usage,
+        };
 
-        let dummy = AssistantMessage {
-            content: vec![],
+        let make = |text: &str| AssistantMessage {
+            content: vec![AssistantContent::Text(TextContent {
+                text: text.into(),
+            })],
             api: "x".into(),
             provider: "x".into(),
             model: "x".into(),
@@ -4020,18 +4047,20 @@ mod tests {
             timestamp: 0,
         };
 
+        // Each TextDelta carries the *canonical* partial — the handler
+        // pulls the full assistant text from `partial.content`.
         s.on_event(TuiEvent::Agent(AgentEvent::MessageUpdate {
-            message: dummy.clone(),
+            message: make("Hello, "),
             assistant_message_event: AssistantMessageEvent::TextDelta {
-                partial: dummy.clone(),
+                partial: make("Hello, "),
                 content_index: 0,
                 delta: "Hello, ".into(),
             },
         }));
         s.on_event(TuiEvent::Agent(AgentEvent::MessageUpdate {
-            message: dummy.clone(),
+            message: make("Hello, world!"),
             assistant_message_event: AssistantMessageEvent::TextDelta {
-                partial: dummy,
+                partial: make("Hello, world!"),
                 content_index: 0,
                 delta: "world!".into(),
             },
@@ -4938,10 +4967,15 @@ mod tests {
         // After the F5 redesign, thinking deltas always land in the
         // transcript so they're available to render when the user
         // later flips visibility on.
+        use grain_agent_core::{AssistantContent, ThinkingContent};
         let mut s = fresh();
         assert!(!s.show_thinking);
         let am = AssistantMessage {
-            content: vec![],
+            content: vec![AssistantContent::Thinking(ThinkingContent {
+                thinking: "thinking-text".into(),
+                signature: None,
+                provider_metadata: None,
+            })],
             api: "x".into(),
             provider: "x".into(),
             model: "x".into(),
