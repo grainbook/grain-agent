@@ -682,9 +682,11 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                         grain_plugin_wasm::Capabilities::from_list(&plugin.wasm_capabilities());
                     let plugin_id = plugin.manifest.name.clone();
                     let plugin_name = plugin.manifest.name.clone();
-                    match tokio::runtime::Handle::current()
-                        .block_on(runtime.load(&wasm_path, &plugin_id, caps, &plugin_name))
-                    {
+                    // `spawn()` is already an async fn driven by tokio
+                    // — calling `Handle::block_on` here panics with
+                    // "Cannot start a runtime from within a runtime".
+                    // Just `.await` the plugin load directly.
+                    match runtime.load(&wasm_path, &plugin_id, caps, &plugin_name).await {
                         Ok(loaded) => {
                             eprintln!(
                                 "[info] wasm plugin '{}' v{}: {} tool(s)",
