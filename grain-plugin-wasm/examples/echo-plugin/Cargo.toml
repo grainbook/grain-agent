@@ -1,0 +1,17 @@
+[package]
+name = "echo-plugin"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.41"
+
+[package.metadata.component]
+package = "grain:echo-plugin"
+
+[package.metadata.component.target]
+world = "grain-plugin"
+path = "wit"
