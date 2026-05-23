@@ -59,12 +59,14 @@ pub enum Overlay {
     ProviderPicker {
         focused: usize,
     },
-    /// Model picker — `focused` is the index into the list of models
-    /// returned by the worker for the current provider. Same key model
-    /// as ThemePicker / ProviderPicker.
+    /// Model picker — `focused` is the index into the filtered list of
+    /// models returned by the worker for the current provider. Same key
+    /// model as ThemePicker / ProviderPicker. `query` is a live search
+    /// filter matched case-insensitively against model id and name.
     ModelPicker {
         focused: usize,
         models: Vec<(String, String)>, // (id, name)
+        query: String,
     },
     /// Request-body log overlay. Joins entries from
     /// [`AppState::request_log`] with blank-line separators; `scroll`
@@ -835,6 +837,31 @@ pub fn update_cache_drop_state(
     }
 }
 
+/// Filter and sort models by a case-insensitive query. Models are sorted
+/// by provider (inferred from the id prefix) then by name.
+pub fn filter_models(models: &[(String, String)], query: &str) -> Vec<(String, String)> {
+    let needle = query.to_ascii_lowercase();
+    let mut filtered: Vec<(String, String)> = models
+        .iter()
+        .filter(|(id, name)| {
+            if needle.is_empty() {
+                return true;
+            }
+            id.to_ascii_lowercase().contains(&needle)
+                || name.to_ascii_lowercase().contains(&needle)
+        })
+        .cloned()
+        .collect();
+    filtered.sort_by(|a, b| {
+        let provider_a = a.0.split('/').next().unwrap_or("");
+        let provider_b = b.0.split('/').next().unwrap_or("");
+        provider_a
+            .cmp(provider_b)
+            .then_with(|| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()))
+    });
+    filtered
+}
+
 impl AppState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -1454,7 +1481,7 @@ impl AppState {
                     self.effects.clear_kind(EffectKind::StatusFlash);
                     self.effects.push(
                         EffectKind::StatusFlash,
-                        fx::sequence(vec![
+                        fx::sequence(&[
                             fx::paint_fg(palette.warning, FxDuration::from_millis(50)),
                             fx::fade_to_fg(palette.muted, FxDuration::from_millis(300)),
                         ]),
@@ -1696,10 +1723,11 @@ impl AppState {
             TuiEvent::ModelsListed(list) => {
                 // Only swap when the overlay is still open (user may
                 // have hit Esc while the scan was in flight).
-                if let Some(Overlay::ModelPicker { models, focused }) = &mut self.overlay {
+                if let Some(Overlay::ModelPicker { models, focused, query }) = &mut self.overlay {
                     *models = list;
-                    if *focused >= models.len() {
-                        *focused = models.len().saturating_sub(1);
+                    let filtered_len = filter_models(models, query).len();
+                    if *focused >= filtered_len {
+                        *focused = filtered_len.saturating_sub(1);
                     }
                 }
                 Vec::new()
@@ -2126,19 +2154,29 @@ impl AppState {
         }
     }
 
-    /// Key handler for the `/model` picker overlay. Same navigation
-    /// shape as the provider picker.
+    /// Key handler for the `/model` picker overlay. Up/Down/PageUp/PageDown
+    /// navigate the filtered list; typed characters edit the live search query.
     fn on_key_model_picker(&mut self, key: KeyEvent) -> Vec<Command> {
-        let Some(Overlay::ModelPicker { focused, models }) = &mut self.overlay else {
+        let Some(Overlay::ModelPicker { focused, models, query }) = &mut self.overlay else {
             return Vec::new();
         };
-        let last = models.len().saturating_sub(1);
+        let filtered = filter_models(models, query);
+        let last = filtered.len().saturating_sub(1);
         match key.code {
+            // Search-input editing.
+            KeyCode::Char(c) => {
+                query.push(c);
+                *focused = 0;
+            }
+            KeyCode::Backspace => {
+                query.pop();
+                *focused = 0;
+            }
             KeyCode::Up => {
                 *focused = focused.saturating_sub(1);
             }
             KeyCode::Down => {
-                if !models.is_empty() {
+                if !filtered.is_empty() {
                     *focused = (*focused + 1).min(last);
                 }
             }
@@ -2155,7 +2193,7 @@ impl AppState {
                 *focused = last;
             }
             KeyCode::Enter => {
-                if let Some((model_id, _)) = models.get(*focused) {
+                if let Some((model_id, _)) = filtered.get(*focused) {
                     let model_id = model_id.clone();
                     self.set_overlay(None);
                     return vec![Command::SetModel(model_id)];
@@ -2638,6 +2676,7 @@ impl AppState {
                 self.set_overlay(Some(Overlay::ModelPicker {
                     focused: 0,
                     models: Vec::new(),
+                    query: String::new(),
                 }));
                 vec![Command::ListModels(provider)]
             }
@@ -2891,7 +2930,7 @@ impl AppState {
                         self.effects.clear_kind(EffectKind::ErrorFlash);
                         self.effects.push(
                             EffectKind::ErrorFlash,
-                            fx::sequence(vec![
+                            fx::sequence(&[
                                 fx::paint_fg(palette.error, FxDuration::from_millis(50)),
                                 fx::fade_to_fg(palette.muted, FxDuration::from_millis(300)),
                             ]),
