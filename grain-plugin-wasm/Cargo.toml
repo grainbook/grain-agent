@@ -1,0 +1,22 @@
+[package]
+name = "grain-plugin-wasm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "WebAssembly Component Model plugin runtime for grain. Loads `.wasm` plugins at runtime and exposes their tools through the `AgentTool` trait — no recompiling grain to add a plugin."
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tokio-util = { workspace = true }
+reqwest = { workspace = true }
+wasmtime = { workspace = true }
+wasmtime-wasi = { workspace = true }
+grain-agent-core = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = "3"
