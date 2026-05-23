@@ -1255,10 +1255,51 @@ async fn run_command_loop(
                 harness.abort().await;
             }
             Command::Reset => {
-                // The harness exposes no `reset()` of its own — the
-                // underlying agent's reset is enough for the TUI's
-                // "blow away in-flight state" intent.
-                harness.agent().reset().await;
+                // `/clear` semantics: fresh in-memory transcript AND a
+                // fresh on-disk session file. The previous handler
+                // only ran `agent.reset()` — that cleared in-memory
+                // messages but the auto-resume path on next TUI
+                // launch would re-load the still-on-disk JSONL,
+                // dragging the "cleared" history right back. Plus
+                // the same session writer kept appending into the
+                // mid-debug file, conflating clean turns with the
+                // pre-clear transcript.
+                //
+                // Implementation mirrors `ResumeSession` but seeded
+                // with `Vec::new()` and a freshly-minted session
+                // path. The old JSONL is left alone — the user can
+                // still `/resume` it later if they want the history
+                // back.
+                harness.abort().await;
+                harness.wait_for_idle().await;
+                let new_path = grain_ai_agent_headless::new_session_path(&sessions_dir);
+                let new_writer: Option<Arc<SessionWriter>> = match SessionWriter::open(&new_path)
+                {
+                    Ok(w) => Some(Arc::new(w)),
+                    Err(e) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "clear: open new session writer {} failed: {e}",
+                            new_path.display()
+                        )));
+                        None
+                    }
+                };
+                let new_harness = builder
+                    .build_with_model(Vec::new(), current_model.clone())
+                    .await;
+                install_subscriptions(
+                    &new_harness,
+                    &evt_tx,
+                    telemetry_sink.clone(),
+                    new_writer.clone(),
+                )
+                .await;
+                harness = new_harness;
+                session_writer = new_writer;
+                let _ = evt_tx.send(TuiEvent::Info(format!(
+                    "(cleared — fresh session: {})",
+                    new_path.display()
+                )));
             }
             Command::ReturnDoctor => {
                 let text = render_doctor_report(&workspace, &registry);
