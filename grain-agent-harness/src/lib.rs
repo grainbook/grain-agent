@@ -46,7 +46,9 @@ pub use compaction::{
     compact_transcript, compaction_prepare_next_turn, resolve_threshold_tokens, semantic_compress,
     should_compact, snap_to_safe_boundary, tool_result_truncation_hook, truncate_tool_results,
 };
-pub use context_guard::{ActiveModelHandle, ContextGuard, ContextGuardPolicy, TokenEstimator};
+pub use context_guard::{
+    ActiveModelHandle, ActiveModelInfo, ContextGuard, ContextGuardPolicy, TokenEstimator,
+};
 pub use escalation::{
     EscalationConfig, EscalationState, count_failures, decide_escalation, failure_escalation_hook,
 };

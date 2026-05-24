@@ -46,6 +46,8 @@ use grain_llm_models::Registry;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+use crate::context_guard::ActiveModelInfo;
 use crate::context_guard::{ActiveModelHandle, TokenEstimator};
 use crate::messages::compaction_summary_message;
 use crate::session::Session;
@@ -245,12 +247,11 @@ impl TokenBudgetPolicy {
 
 impl CompactionPolicy for TokenBudgetPolicy {
     fn evaluate(&self, messages: &[AgentMessage]) -> Option<usize> {
-        // 1. Look up current model's context window.
-        let model_id = self.model_handle.read().ok()?.clone();
-        let ctx_window = self.registry.lookup(&model_id)?.context_window;
-        if ctx_window == 0 {
-            return None;
-        }
+        // 1. Resolve current model's context window. Registry-backed
+        // models use the embedded descriptor; synthetic/local models
+        // fall back to the window carried in ActiveModelInfo.
+        let active_model = self.model_handle.read().ok()?.clone();
+        let ctx_window = active_model.resolve_context_window(&self.registry)?;
 
         // 2. Estimate total tokens.
         let ctx_tokens = self.estimator.estimate_messages(messages);
@@ -1427,7 +1428,7 @@ mod tests {
     #[test]
     fn token_budget_policy_no_compact_below_threshold() {
         let registry = make_test_registry(vec![test_model_descriptor("test/big", 1_000_000)]);
-        let handle: ActiveModelHandle = Arc::new(RwLock::new("test/big".into()));
+        let handle: ActiveModelHandle = Arc::new(RwLock::new(ActiveModelInfo::id("test/big")));
         let policy = TokenBudgetPolicy::new(
             registry,
             handle,
@@ -1443,7 +1444,7 @@ mod tests {
     fn token_budget_policy_compacts_when_above_threshold() {
         // Small window model (2000 tokens), transcript that exceeds it.
         let registry = make_test_registry(vec![test_model_descriptor("test/tiny", 2000)]);
-        let handle: ActiveModelHandle = Arc::new(RwLock::new("test/tiny".into()));
+        let handle: ActiveModelHandle = Arc::new(RwLock::new(ActiveModelInfo::id("test/tiny")));
         let policy = TokenBudgetPolicy::new(
             registry,
             handle,
@@ -1471,7 +1472,7 @@ mod tests {
         // Transcript: [user, assistant+toolcall, toolresult, user]
         // The policy should never split between assistant+toolcall and toolresult.
         let registry = make_test_registry(vec![test_model_descriptor("test/tiny", 500)]);
-        let handle: ActiveModelHandle = Arc::new(RwLock::new("test/tiny".into()));
+        let handle: ActiveModelHandle = Arc::new(RwLock::new(ActiveModelInfo::id("test/tiny")));
         let policy = TokenBudgetPolicy::new(
             registry,
             handle,
@@ -1518,7 +1519,7 @@ mod tests {
     #[test]
     fn token_budget_policy_refuses_degenerate() {
         let registry = make_test_registry(vec![test_model_descriptor("test/tiny", 200)]);
-        let handle: ActiveModelHandle = Arc::new(RwLock::new("test/tiny".into()));
+        let handle: ActiveModelHandle = Arc::new(RwLock::new(ActiveModelInfo::id("test/tiny")));
         let policy = TokenBudgetPolicy::new(
             registry,
             handle,
@@ -1540,7 +1541,7 @@ mod tests {
     #[test]
     fn token_budget_policy_unknown_model_returns_none() {
         let registry = make_test_registry(vec![test_model_descriptor("test/known", 100_000)]);
-        let handle: ActiveModelHandle = Arc::new(RwLock::new("test/unknown".into()));
+        let handle: ActiveModelHandle = Arc::new(RwLock::new(ActiveModelInfo::id("test/unknown")));
         let policy = TokenBudgetPolicy::new(
             registry,
             handle,
@@ -1551,5 +1552,27 @@ mod tests {
             .map(|i| user(&format!("msg{i}: {}", "x".repeat(4000))))
             .collect();
         assert!(policy.evaluate(&msgs).is_none());
+    }
+
+    #[test]
+    fn token_budget_policy_uses_fallback_window_for_registry_miss() {
+        let registry = make_test_registry(vec![]);
+        let handle: ActiveModelHandle =
+            Arc::new(RwLock::new(ActiveModelInfo::new("local/model", 2000)));
+        let policy = TokenBudgetPolicy::new(
+            registry,
+            handle,
+            CompactionSettings {
+                keep_recent_tokens: 100,
+                reserve_tokens: 200,
+                ..DEFAULT_COMPACTION_SETTINGS
+            },
+            TokenEstimator::approximate(),
+        );
+
+        let msgs: Vec<AgentMessage> = (0..10)
+            .map(|i| user(&format!("msg{i}: {}", "x".repeat(1000))))
+            .collect();
+        assert!(policy.evaluate(&msgs).is_some());
     }
 }

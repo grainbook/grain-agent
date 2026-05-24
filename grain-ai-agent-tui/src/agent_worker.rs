@@ -24,7 +24,7 @@ use grain_agent_core::{
 use grain_agent_harness::{
     AgentHarness, AgentHarnessOptions, InMemorySessionStorage, Session, SessionMetadata,
     SystemPrompt,
-    context_guard::{ActiveModelHandle, ContextGuard, ContextGuardPolicy},
+    context_guard::{ActiveModelHandle, ActiveModelInfo, ContextGuard, ContextGuardPolicy},
 };
 use grain_ai_agent_headless::{
     SessionWriter, TelemetrySink, Workspace, coding_agent_system_prompt, coding_bash_tools,
@@ -826,8 +826,9 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // Both ContextGuard and TokenBudgetPolicy read from the same handle
     // so a mid-session model switch immediately updates context-window
     // enforcement and compaction thresholds.
-    let active_model_handle: ActiveModelHandle =
-        Arc::new(std::sync::RwLock::new(active_model_id.clone()));
+    let active_model_handle: ActiveModelHandle = Arc::new(std::sync::RwLock::new(
+        ActiveModelInfo::new(active_model_id.clone(), model.context_window),
+    ));
 
     // --- Context guard -----------------------------------------------------
     // The transform fn only sees `Vec<AgentMessage>` — it never sees
@@ -1966,7 +1967,7 @@ async fn run_command_loop(
                 // Update the shared handle so ContextGuard and
                 // TokenBudgetPolicy see the new model immediately.
                 if let Ok(mut w) = active_model_handle.write() {
-                    *w = profile.model.clone();
+                    *w = ActiveModelInfo::new(profile.model.clone(), model.context_window);
                 }
                 // Keep `current_model` in sync so a later /resume
                 // hands the resumed harness the right model.
@@ -2042,7 +2043,7 @@ async fn run_command_loop(
                 // Update the shared handle so ContextGuard and
                 // TokenBudgetPolicy see the new model immediately.
                 if let Ok(mut w) = active_model_handle.write() {
-                    *w = model_id.clone();
+                    *w = ActiveModelInfo::new(model_id.clone(), model.context_window);
                 }
                 current_model = model;
                 let _ = evt_tx.send(TuiEvent::ModelApplied {

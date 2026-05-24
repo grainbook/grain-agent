@@ -197,10 +197,40 @@ impl TokenEstimator {
     }
 }
 
-/// Shared handle to the active model id. Both [`ContextGuard`] and
+/// Shared active model metadata. Registry-backed models only need `id`;
+/// synthetic/local profile models can carry their known context window so
+/// guard/compaction do not silently no-op on registry misses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveModelInfo {
+    pub id: String,
+    pub context_window: u64,
+}
+
+impl ActiveModelInfo {
+    pub fn new(id: impl Into<String>, context_window: u64) -> Self {
+        ActiveModelInfo {
+            id: id.into(),
+            context_window,
+        }
+    }
+
+    pub fn id(id: impl Into<String>) -> Self {
+        ActiveModelInfo::new(id, 0)
+    }
+
+    pub fn resolve_context_window(&self, registry: &Registry) -> Option<u64> {
+        registry
+            .lookup(&self.id)
+            .map(|m| m.context_window)
+            .filter(|w| *w > 0)
+            .or_else(|| (self.context_window > 0).then_some(self.context_window))
+    }
+}
+
+/// Shared handle to the active model metadata. Both [`ContextGuard`] and
 /// [`crate::compaction::TokenBudgetPolicy`] read from the same handle so
 /// a model switch mid-session is immediately visible to both subsystems.
-pub type ActiveModelHandle = Arc<RwLock<String>>;
+pub type ActiveModelHandle = Arc<RwLock<ActiveModelInfo>>;
 
 /// Builder + factory for a context-guard [`TransformContextFn`].
 #[derive(Debug, Clone)]
@@ -236,7 +266,7 @@ impl ContextGuard {
     pub fn new(registry: Arc<Registry>, model_id: impl Into<String>) -> Self {
         ContextGuard {
             registry,
-            model_handle: Arc::new(RwLock::new(model_id.into())),
+            model_handle: Arc::new(RwLock::new(ActiveModelInfo::id(model_id))),
             policy: ContextGuardPolicy::default(),
             estimator: TokenEstimator::approximate(),
             headroom_tokens: 1024,
@@ -264,7 +294,16 @@ impl ContextGuard {
     /// of the [`TransformContextFn`] produced by [`Self::into_transform_fn`].
     pub fn set_active_model(&self, id: impl Into<String>) {
         if let Ok(mut guard) = self.model_handle.write() {
-            *guard = id.into();
+            *guard = ActiveModelInfo::id(id);
+        }
+    }
+
+    /// Update the active model id and a caller-known context window.
+    /// Use this for synthetic/local models not present in the embedded
+    /// registry.
+    pub fn set_active_model_info(&self, id: impl Into<String>, context_window: u64) {
+        if let Ok(mut guard) = self.model_handle.write() {
+            *guard = ActiveModelInfo::new(id, context_window);
         }
     }
 
@@ -331,12 +370,14 @@ impl ContextGuard {
             let registry = registry.clone();
             // Read the *current* model id on every invocation — not a
             // stale snapshot from construction time.
-            let model_id = model_handle.read().map(|g| g.clone()).unwrap_or_default();
+            let active_model = model_handle
+                .read()
+                .map(|g| g.clone())
+                .unwrap_or_else(|_| ActiveModelInfo::id(""));
             let policy = policy.clone();
             Box::pin(async move {
-                let budget = match registry.lookup(&model_id) {
-                    Some(m) if m.context_window > 0 => m
-                        .context_window
+                let budget = match active_model.resolve_context_window(&registry) {
+                    Some(context_window) => context_window
                         .saturating_sub(headroom_tokens)
                         .saturating_sub(system_overhead_tokens),
                     _ => return messages, // unknown model — no-op
@@ -538,7 +579,7 @@ mod tests {
         // Switch to big model via the handle.
         {
             let mut w = handle.write().unwrap();
-            *w = "test/big".into();
+            *w = ActiveModelInfo::id("test/big");
         }
 
         // Big model → no truncation.
@@ -553,7 +594,8 @@ mod tests {
     #[tokio::test]
     async fn with_active_model_handle_shares_state() {
         let registry = make_registry(vec![small_model(), big_model()]);
-        let shared_handle: ActiveModelHandle = Arc::new(RwLock::new("test/small".into()));
+        let shared_handle: ActiveModelHandle =
+            Arc::new(RwLock::new(ActiveModelInfo::id("test/small")));
 
         let guard = ContextGuard::with_active_model_handle(registry, shared_handle.clone())
             .with_policy(ContextGuardPolicy::DropOldest)
@@ -567,11 +609,27 @@ mod tests {
         assert!(result.len() < messages.len());
 
         // External code writes through the shared handle.
-        *shared_handle.write().unwrap() = "test/big".into();
+        *shared_handle.write().unwrap() = ActiveModelInfo::id("test/big");
 
         // Transform now sees the big model.
         let result = transform(messages.clone(), CancellationToken::new()).await;
         assert_eq!(result.len(), messages.len());
+    }
+
+    #[tokio::test]
+    async fn fallback_context_window_handles_registry_miss() {
+        let registry = make_registry(vec![]);
+        let shared_handle: ActiveModelHandle =
+            Arc::new(RwLock::new(ActiveModelInfo::new("local/model", 1000)));
+
+        let guard = ContextGuard::with_active_model_handle(registry, shared_handle)
+            .with_policy(ContextGuardPolicy::DropOldest)
+            .with_headroom_tokens(0);
+
+        let transform = guard.into_transform_fn();
+        let messages = large_transcript();
+        let result = transform(messages.clone(), CancellationToken::new()).await;
+        assert!(result.len() < messages.len());
     }
 
     #[tokio::test]
