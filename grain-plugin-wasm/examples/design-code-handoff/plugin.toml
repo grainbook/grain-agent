@@ -1,0 +1,7 @@
+name = "design-code-handoff"
+version = "0.1.0"
+description = "Designer -> coder role handoff using WASM v2 orchestration."
+
+[wasm]
+module = "plugin.wasm"
+capabilities = ["log", "env", "role-orchestration"]

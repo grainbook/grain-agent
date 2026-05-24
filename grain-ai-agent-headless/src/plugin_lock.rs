@@ -71,10 +71,7 @@ pub enum PluginOrigin {
 /// `name` collisions. Returns the merged spec plus a list of
 /// human-facing warnings (e.g. "found N entries in legacy
 /// plugin-spec.toml; consider migrating to config.toml").
-pub fn effective_spec(
-    workspace_root: &Path,
-    config: &ConfigFile,
-) -> (PluginSpecFile, Vec<String>) {
+pub fn effective_spec(workspace_root: &Path, config: &ConfigFile) -> (PluginSpecFile, Vec<String>) {
     let mut out = PluginSpecFile::default();
     let mut warnings = Vec::new();
 
@@ -145,7 +142,7 @@ pub fn origin_of(workspace_root: &Path, config: &ConfigFile, name: &str) -> Opti
 mod tests {
     use super::*;
     use crate::plugin_spec::PluginSpec;
-    
+
     fn write_toml(path: &Path, body: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
@@ -175,7 +172,7 @@ mod tests {
                 src: "config-src".into(),
                 rev: None,
                 kind: None,
-            auth: Vec::new(),
+                auth: Vec::new(),
             }],
             ..Default::default()
         };
@@ -230,7 +227,7 @@ src  = "legacy-src"
                 src: "./demo".into(),
                 rev: None,
                 kind: None,
-            auth: Vec::new(),
+                auth: Vec::new(),
             }],
         };
         save_plugin_lock(&path, &lock).unwrap();
@@ -247,7 +244,7 @@ src  = "legacy-src"
                 src: "x".into(),
                 rev: None,
                 kind: None,
-            auth: Vec::new(),
+                auth: Vec::new(),
             }],
             ..Default::default()
         };

@@ -53,6 +53,12 @@ pub enum TuiEvent {
     /// the model id + pricing so the UI can refresh the status line
     /// ("(model: deepseek/deepseek-v4-pro)") and cost chip.
     ModelApplied { model: String, cost: Cost },
+    /// A trusted host-side plugin action updated the UI header display.
+    /// This is presentation-only; routing state still lives in the worker.
+    UiHeaderUpdated {
+        provider: Option<String>,
+        model: Option<String>,
+    },
     /// Mouse wheel rolled up — translated into transcript scroll-up by
     /// `amount` rows. Same follow-bottom semantics as PgUp.
     ScrollUp { amount: u16 },

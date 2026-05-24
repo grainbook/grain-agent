@@ -127,9 +127,7 @@ mod tests {
     #[test]
     fn subagent_done_parses_when_enabled() {
         let ds = DeepSeekPack::new(&deepseek_model());
-        let events = ds.parse_subagent_done(
-            r#"done <deepseek:subagent.done>{"summary":"ok"}"#,
-        );
+        let events = ds.parse_subagent_done(r#"done <deepseek:subagent.done>{"summary":"ok"}"#);
         assert_eq!(events.len(), 1);
         assert!(events[0].payload.is_some());
     }

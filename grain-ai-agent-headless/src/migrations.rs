@@ -170,9 +170,7 @@ pub fn default_migrations() -> Vec<Box<dyn Migration>> {
 /// same `source_version` would mean `migrate_session` silently picks the
 /// first one and skips the second on every upgrade, corrupting session
 /// data. Catch that at registration time rather than on a live session.
-pub fn validate_migrations(
-    migrations: &[Box<dyn Migration>],
-) -> Result<(), MigrationError> {
+pub fn validate_migrations(migrations: &[Box<dyn Migration>]) -> Result<(), MigrationError> {
     let mut seen = std::collections::HashSet::new();
     for m in migrations {
         if !seen.insert(m.source_version()) {
@@ -284,7 +282,13 @@ mod tests {
         if CURRENT_SCHEMA_VERSION > 0 {
             fs::write(dir.path().join("meta.json"), "{\"id\":\"x\"}").unwrap();
             let err = migrate_session(dir.path(), &default_migrations()).unwrap_err();
-            assert!(matches!(err, MigrationError::Step { step: "missing", .. }));
+            assert!(matches!(
+                err,
+                MigrationError::Step {
+                    step: "missing",
+                    ..
+                }
+            ));
         }
     }
 
@@ -293,12 +297,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
             dir.path().join("meta.json"),
-            format!(
-                "{{\"id\":\"x\",\"schemaVersion\":{CURRENT_SCHEMA_VERSION}}}"
-            ),
+            format!("{{\"id\":\"x\",\"schemaVersion\":{CURRENT_SCHEMA_VERSION}}}"),
         )
         .unwrap();
         migrate_session(dir.path(), &default_migrations()).unwrap();
-        assert_eq!(schema_version_of(dir.path()).unwrap(), CURRENT_SCHEMA_VERSION);
+        assert_eq!(
+            schema_version_of(dir.path()).unwrap(),
+            CURRENT_SCHEMA_VERSION
+        );
     }
 }

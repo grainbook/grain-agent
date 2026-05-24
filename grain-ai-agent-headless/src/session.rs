@@ -239,8 +239,14 @@ mod tests {
     fn second_writer_appends_does_not_truncate() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
-        SessionWriter::open(&path).unwrap().append(&user("a")).unwrap();
-        SessionWriter::open(&path).unwrap().append(&user("b")).unwrap();
+        SessionWriter::open(&path)
+            .unwrap()
+            .append(&user("a"))
+            .unwrap();
+        SessionWriter::open(&path)
+            .unwrap()
+            .append(&user("b"))
+            .unwrap();
     }
 
     #[test]
@@ -287,8 +293,14 @@ mod tests {
         // end, releasing the lock for the next statement.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("seq.jsonl");
-        SessionWriter::open(&path).unwrap().append(&user("a")).unwrap();
-        SessionWriter::open(&path).unwrap().append(&user("b")).unwrap();
+        SessionWriter::open(&path)
+            .unwrap()
+            .append(&user("a"))
+            .unwrap();
+        SessionWriter::open(&path)
+            .unwrap()
+            .append(&user("b"))
+            .unwrap();
         let loaded = load_messages(&path).unwrap();
         assert_eq!(loaded.len(), 2);
     }

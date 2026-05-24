@@ -36,9 +36,9 @@ use tokio_util::sync::CancellationToken;
 use crate::workspace::Workspace;
 
 const DEFAULT_TEXT_EXTENSIONS: &[&str] = &[
-    "rs", "toml", "md", "txt", "json", "yaml", "yml", "py", "js", "ts", "tsx", "jsx", "go",
-    "java", "c", "cc", "cpp", "h", "hpp", "rb", "sh", "kt", "swift", "html", "css", "scss",
-    "sql", "proto", "graphql", "lua", "zig", "ml", "scala",
+    "rs", "toml", "md", "txt", "json", "yaml", "yml", "py", "js", "ts", "tsx", "jsx", "go", "java",
+    "c", "cc", "cpp", "h", "hpp", "rb", "sh", "kt", "swift", "html", "css", "scss", "sql", "proto",
+    "graphql", "lua", "zig", "ml", "scala",
 ];
 
 const DEFAULT_MAX_FILE_BYTES: u64 = 100 * 1024;
@@ -57,7 +57,10 @@ pub struct SemanticIndexConfig {
 impl Default for SemanticIndexConfig {
     fn default() -> Self {
         SemanticIndexConfig {
-            allowed_extensions: DEFAULT_TEXT_EXTENSIONS.iter().map(|s| (*s).to_string()).collect(),
+            allowed_extensions: DEFAULT_TEXT_EXTENSIONS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             embedding_model: openai::TEXT_EMBEDDING_3_SMALL.to_string(),
         }
@@ -167,8 +170,7 @@ impl SemanticSearchTool {
             .await
             .map_err(|e| SemanticInitError::Embed(e.to_string()))?;
 
-        let store =
-            InMemoryVectorStore::from_documents_with_id_f(embeddings, |doc| doc.id.clone());
+        let store = InMemoryVectorStore::from_documents_with_id_f(embeddings, |doc| doc.id.clone());
 
         let doc_count = docs.len();
         *guard = Some(BuiltIndex {
@@ -193,8 +195,8 @@ impl AgentTool for SemanticSearchTool {
         _cancel: CancellationToken,
         _on_update: ToolUpdateCallback,
     ) -> Result<AgentToolResult, AgentToolError> {
-        let args: SearchArgs = serde_json::from_value(args)
-            .map_err(|e| AgentToolError::Validation(e.to_string()))?;
+        let args: SearchArgs =
+            serde_json::from_value(args).map_err(|e| AgentToolError::Validation(e.to_string()))?;
         let top_n = args.top_n.unwrap_or(DEFAULT_TOP_N).max(1);
 
         // Build (or reuse) the index. Errors here are user-actionable — surface

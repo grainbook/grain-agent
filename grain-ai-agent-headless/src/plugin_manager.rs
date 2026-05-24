@@ -16,9 +16,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::plugin_spec::{
-    PluginSpec, PluginSpecFile, SyncReport, load_plugin_spec, sync_plugins,
-};
+use crate::plugin_spec::{PluginSpec, PluginSpecFile, SyncReport, load_plugin_spec, sync_plugins};
 
 /// Outcome of [`install`]. Combines the spec-file write with the
 /// per-plugin sync result — callers usually only care that the new
@@ -276,21 +274,34 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(outcome.report.installed.contains(&"source-plugin".to_string()));
+        assert!(
+            outcome
+                .report
+                .installed
+                .contains(&"source-plugin".to_string())
+        );
         let parsed = load_plugin_spec(&spec_path).unwrap();
         assert_eq!(parsed.plugins.len(), 1);
         // Local plugins are virtual — sync validates the source path
         // but doesn't create any entry under `plugins_dir`. The
         // engine reads them from `src` directly via
         // `discover_plugins_with_spec`.
-        assert!(plugins_dir.join("source-plugin").symlink_metadata().is_err());
+        assert!(
+            plugins_dir
+                .join("source-plugin")
+                .symlink_metadata()
+                .is_err()
+        );
     }
 
     #[test]
     fn install_refuses_duplicate_name() {
         let tmp = make_workspace();
         let spec_path = tmp.path().join(".grain").join("plugin-spec.toml");
-        write_file(&spec_path, "[[plugin]]\nname = \"x\"\nsrc = \"/whatever\"\n");
+        write_file(
+            &spec_path,
+            "[[plugin]]\nname = \"x\"\nsrc = \"/whatever\"\n",
+        );
         let err = install(
             &spec_path,
             &tmp.path().join(".grain").join("plugins"),
@@ -321,7 +332,10 @@ mod tests {
         let tmp = make_workspace();
         let spec_path = tmp.path().join(".grain").join("plugin-spec.toml");
         let plugins_dir = tmp.path().join(".grain").join("plugins");
-        write_file(&spec_path, "[[plugin]]\nname = \"x\"\nsrc = \"/whatever\"\n");
+        write_file(
+            &spec_path,
+            "[[plugin]]\nname = \"x\"\nsrc = \"/whatever\"\n",
+        );
         std::fs::create_dir_all(plugins_dir.join("x")).unwrap();
         write_file(&plugins_dir.join("x").join("plugin.toml"), "name = \"x\"\n");
 
@@ -338,7 +352,10 @@ mod tests {
         let tmp = make_workspace();
         let spec_path = tmp.path().join(".grain").join("plugin-spec.toml");
         let plugins_dir = tmp.path().join(".grain").join("plugins");
-        write_file(&spec_path, "[[plugin]]\nname = \"x\"\nsrc = \"/whatever\"\n");
+        write_file(
+            &spec_path,
+            "[[plugin]]\nname = \"x\"\nsrc = \"/whatever\"\n",
+        );
         std::fs::create_dir_all(plugins_dir.join("x")).unwrap();
         write_file(&plugins_dir.join("x").join("plugin.toml"), "name = \"x\"\n");
 
@@ -358,7 +375,14 @@ mod tests {
         let plugins_dir = tmp.path().join(".grain").join("plugins");
         let source = tmp.path().join("source-x");
         write_file(&source.join("plugin.toml"), "name = \"x\"\n");
-        install(&spec_path, &plugins_dir, "x", source.to_str().unwrap(), None).unwrap();
+        install(
+            &spec_path,
+            &plugins_dir,
+            "x",
+            source.to_str().unwrap(),
+            None,
+        )
+        .unwrap();
         let outcome = remove(&spec_path, &plugins_dir, "x", true).unwrap();
         // Spec entry dropped, but no files to clean (none were
         // created for the local install in the first place).
@@ -421,7 +445,14 @@ mod tests {
         let plugins_dir = tmp.path().join(".grain").join("plugins");
         let source = tmp.path().join("src");
         write_file(&source.join("plugin.toml"), "name = \"linked\"\n");
-        install(&spec_path, &plugins_dir, "linked", source.to_str().unwrap(), None).unwrap();
+        install(
+            &spec_path,
+            &plugins_dir,
+            "linked",
+            source.to_str().unwrap(),
+            None,
+        )
+        .unwrap();
         let err = update(&plugins_dir, "linked").err().unwrap();
         assert!(matches!(err, ManagerError::NotFound(_)));
     }
@@ -440,7 +471,10 @@ mod tests {
         std::os::unix::fs::symlink(&source, plugins_dir.join("legacy")).unwrap();
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir(&source, plugins_dir.join("legacy")).unwrap();
-        assert_eq!(update(&plugins_dir, "legacy").unwrap(), UpdateOutcome::Symlink);
+        assert_eq!(
+            update(&plugins_dir, "legacy").unwrap(),
+            UpdateOutcome::Symlink
+        );
     }
 
     #[test]
@@ -459,11 +493,17 @@ mod tests {
         let plugins_dir = tmp.path().join(".grain").join("plugins");
         let source = tmp.path().join("src");
         write_file(&source.join("plugin.toml"), "name = \"roundtrip\"\n");
-        install(&spec_path, &plugins_dir, "roundtrip", source.to_str().unwrap(), None).unwrap();
+        install(
+            &spec_path,
+            &plugins_dir,
+            "roundtrip",
+            source.to_str().unwrap(),
+            None,
+        )
+        .unwrap();
         remove(&spec_path, &plugins_dir, "roundtrip", true).unwrap();
         let spec = load_plugin_spec(&spec_path).unwrap();
         assert!(spec.plugins.is_empty());
         assert!(!plugins_dir.join("roundtrip").exists());
     }
-
 }

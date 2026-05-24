@@ -89,8 +89,8 @@ impl AgentTool for ReadTool {
         _cancel: CancellationToken,
         _on_update: ToolUpdateCallback,
     ) -> Result<AgentToolResult, AgentToolError> {
-        let args: ReadArgs = serde_json::from_value(args)
-            .map_err(|e| AgentToolError::Validation(e.to_string()))?;
+        let args: ReadArgs =
+            serde_json::from_value(args).map_err(|e| AgentToolError::Validation(e.to_string()))?;
         let path = self
             .workspace
             .resolve(&args.path)
@@ -104,11 +104,7 @@ impl AgentTool for ReadTool {
         let trimmed: String = if offset == 0 {
             content
         } else {
-            content
-                .lines()
-                .skip(offset)
-                .collect::<Vec<_>>()
-                .join("\n")
+            content.lines().skip(offset).collect::<Vec<_>>().join("\n")
         };
 
         let opts = TruncationOptions {

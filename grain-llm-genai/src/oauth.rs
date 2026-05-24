@@ -447,34 +447,34 @@ pub async fn get_valid_access_token(profile_name: &str) -> Result<Option<String>
 /// instead of looking it up by provider name. The `profile_name` is used
 /// only to locate the persisted token file.
 pub async fn get_valid_access_token_with_config(
-config: &OauthConfig,
-profile_name: &str,
+    config: &OauthConfig,
+    profile_name: &str,
 ) -> Result<Option<String>, OauthError> {
-let Some(mut tokens) = load_tokens(profile_name)? else {
+    let Some(mut tokens) = load_tokens(profile_name)? else {
         return Ok(None);
     };
 
-let now = SystemTime::now()
-.duration_since(UNIX_EPOCH)
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-// Refresh if expired or about to expire (within 60s).
-if now >= tokens.expires_at {
-tokens = refresh_tokens(config, &tokens.refresh_token).await?;
-save_tokens(profile_name, &tokens)?;
+    // Refresh if expired or about to expire (within 60s).
+    if now >= tokens.expires_at {
+        tokens = refresh_tokens(config, &tokens.refresh_token).await?;
+        save_tokens(profile_name, &tokens)?;
     }
 
-Ok(Some(tokens.access_token))
+    Ok(Some(tokens.access_token))
 }
 
 /// Synchronous version of [`get_valid_access_token_with_config`].
 pub fn get_valid_access_token_with_config_sync(
-config: &OauthConfig,
-profile_name: &str,
+    config: &OauthConfig,
+    profile_name: &str,
 ) -> Result<Option<String>, OauthError> {
-let handle = tokio::runtime::Handle::current();
-handle.block_on(get_valid_access_token_with_config(config, profile_name))
+    let handle = tokio::runtime::Handle::current();
+    handle.block_on(get_valid_access_token_with_config(config, profile_name))
 }
 
 /// Synchronous version for use in genai auth resolvers.

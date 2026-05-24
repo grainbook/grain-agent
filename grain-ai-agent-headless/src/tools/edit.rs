@@ -102,8 +102,8 @@ impl AgentTool for EditTool {
         _cancel: CancellationToken,
         _on_update: ToolUpdateCallback,
     ) -> Result<AgentToolResult, AgentToolError> {
-        let args: EditArgs = serde_json::from_value(args)
-            .map_err(|e| AgentToolError::Validation(e.to_string()))?;
+        let args: EditArgs =
+            serde_json::from_value(args).map_err(|e| AgentToolError::Validation(e.to_string()))?;
 
         if args.old == args.new {
             return Err(AgentToolError::Validation(
@@ -111,9 +111,7 @@ impl AgentTool for EditTool {
             ));
         }
         if args.old.is_empty() {
-            return Err(AgentToolError::Validation(
-                "old must be non-empty".into(),
-            ));
+            return Err(AgentToolError::Validation("old must be non-empty".into()));
         }
 
         let path = self

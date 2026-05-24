@@ -127,12 +127,10 @@ impl Workspace {
         if let Ok(meta) = std::fs::symlink_metadata(&target)
             && meta.file_type().is_symlink()
         {
-            let resolved = target
-                .canonicalize()
-                .map_err(|source| WorkspaceError::Io {
-                    path: target.display().to_string(),
-                    source,
-                })?;
+            let resolved = target.canonicalize().map_err(|source| WorkspaceError::Io {
+                path: target.display().to_string(),
+                source,
+            })?;
             if !resolved.starts_with(&self.root) {
                 return Err(WorkspaceError::Escape(path.to_string()));
             }

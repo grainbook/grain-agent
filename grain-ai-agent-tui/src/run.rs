@@ -324,6 +324,7 @@ async fn event_loop(
         providers,
         initial_provider_idx,
         cny_rate,
+        ctx.persisted.prompt_history.clone(),
     );
 
     // Crossterm reads on a blocking thread; forward into a tokio channel
@@ -457,6 +458,14 @@ async fn event_loop(
         }
         if ctx.persisted.last_model.as_deref() != Some(&state.model_id) {
             ctx.persisted.last_model = Some(state.model_id.clone());
+            if let Err(e) = ctx.persisted.save(&ctx.persist_path) {
+                eprintln!("[warn] tui-state save {}: {e}", ctx.persist_path.display());
+            }
+        }
+        // Persist prompt history so Up/Down recall survives
+        // restarts. Only write when it actually changed.
+        if ctx.persisted.prompt_history != state.history {
+            ctx.persisted.prompt_history = state.history.clone();
             if let Err(e) = ctx.persisted.save(&ctx.persist_path) {
                 eprintln!("[warn] tui-state save {}: {e}", ctx.persist_path.display());
             }

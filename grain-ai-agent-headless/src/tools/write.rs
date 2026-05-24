@@ -81,8 +81,8 @@ impl AgentTool for WriteTool {
         _cancel: CancellationToken,
         _on_update: ToolUpdateCallback,
     ) -> Result<AgentToolResult, AgentToolError> {
-        let args: WriteArgs = serde_json::from_value(args)
-            .map_err(|e| AgentToolError::Validation(e.to_string()))?;
+        let args: WriteArgs =
+            serde_json::from_value(args).map_err(|e| AgentToolError::Validation(e.to_string()))?;
         let path = self
             .workspace
             .resolve_for_write(&args.path)

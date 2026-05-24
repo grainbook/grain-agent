@@ -307,7 +307,7 @@ fn user_config_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     fn write_toml(path: &Path, content: &str) {
         if let Some(p) = path.parent() {
             std::fs::create_dir_all(p).unwrap();
@@ -341,12 +341,9 @@ mod tests {
     fn apply_to_args_respects_explicit_cli_flag() {
         use crate::cli::Args;
         use clap::Parser;
-        let mut args = Args::try_parse_from([
-            "grain-headless",
-            "--model",
-            "anthropic/claude-sonnet-4-5",
-        ])
-        .unwrap();
+        let mut args =
+            Args::try_parse_from(["grain-headless", "--model", "anthropic/claude-sonnet-4-5"])
+                .unwrap();
         let cfg = ConfigFile {
             model: Some("openai/gpt-4o".into()),
             ..Default::default()
@@ -452,11 +449,17 @@ auth  = { kind = "api_key", env = "OPENAI_API_KEY", value = "sk-openai-123" }
         assert_eq!(cfg.providers[0].name, "anthropic");
         assert_eq!(cfg.providers[0].kind, "anthropic");
         assert_eq!(cfg.providers[0].auth.kind, "api_key");
-        assert_eq!(cfg.providers[0].auth.env.as_deref(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(
+            cfg.providers[0].auth.env.as_deref(),
+            Some("ANTHROPIC_API_KEY")
+        );
         assert_eq!(cfg.providers[0].auth.value.as_deref(), None);
         assert_eq!(cfg.providers[1].name, "openai-work");
         assert_eq!(cfg.providers[1].auth.env.as_deref(), Some("OPENAI_API_KEY"));
-        assert_eq!(cfg.providers[1].auth.value.as_deref(), Some("sk-openai-123"));
+        assert_eq!(
+            cfg.providers[1].auth.value.as_deref(),
+            Some("sk-openai-123")
+        );
     }
 
     #[test]
@@ -486,7 +489,7 @@ auth  = { kind = "api_key", env = "OPENAI_API_KEY", value = "sk-openai-123" }
             src: "user-src".into(),
             rev: None,
             kind: None,
-        auth: Vec::new(),
+            auth: Vec::new(),
         });
         let src = ConfigFile {
             plugins: vec![PluginSpec {
@@ -494,7 +497,7 @@ auth  = { kind = "api_key", env = "OPENAI_API_KEY", value = "sk-openai-123" }
                 src: "ws-src".into(),
                 rev: None,
                 kind: None,
-            auth: Vec::new(),
+                auth: Vec::new(),
             }],
             ..Default::default()
         };

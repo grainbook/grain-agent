@@ -58,10 +58,9 @@ impl GrepTool {
             def: ToolDefinition {
                 name: "grep".into(),
                 label: "Grep".into(),
-                description:
-                    "Regex search across files in the workspace. Honors .gitignore. \
+                description: "Regex search across files in the workspace. Honors .gitignore. \
                      Supports an optional file-name glob filter."
-                        .into(),
+                    .into(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -108,8 +107,8 @@ impl AgentTool for GrepTool {
         cancel: CancellationToken,
         _on_update: ToolUpdateCallback,
     ) -> Result<AgentToolResult, AgentToolError> {
-        let args: GrepArgs = serde_json::from_value(args)
-            .map_err(|e| AgentToolError::Validation(e.to_string()))?;
+        let args: GrepArgs =
+            serde_json::from_value(args).map_err(|e| AgentToolError::Validation(e.to_string()))?;
         let root_path = self
             .workspace
             .resolve(args.root.as_deref().unwrap_or("."))
@@ -132,8 +131,8 @@ impl AgentTool for GrepTool {
         let pattern_for_details = args.pattern.clone();
 
         // ignore::Walk + regex::Regex are sync; offload.
-        let (lines, hit_count, files_with_hits, truncated) =
-            tokio::task::spawn_blocking(move || -> Result<(Vec<String>, usize, usize, bool), String> {
+        let (lines, hit_count, files_with_hits, truncated) = tokio::task::spawn_blocking(
+            move || -> Result<(Vec<String>, usize, usize, bool), String> {
                 let mut lines: Vec<String> = Vec::new();
                 let mut total = 0usize;
                 let mut files_with_hits = 0usize;
@@ -195,10 +194,11 @@ impl AgentTool for GrepTool {
                     }
                 }
                 Ok((lines, total, files_with_hits, truncated))
-            })
-            .await
-            .map_err(|e| AgentToolError::msg(format!("grep task: {e}")))?
-            .map_err(AgentToolError::Message)?;
+            },
+        )
+        .await
+        .map_err(|e| AgentToolError::msg(format!("grep task: {e}")))?
+        .map_err(AgentToolError::Message)?;
 
         let body = if lines.is_empty() {
             "(no matches)\n".to_string()
@@ -206,9 +206,7 @@ impl AgentTool for GrepTool {
             let mut s = lines.join("\n");
             s.push('\n');
             if truncated {
-                s.push_str(&format!(
-                    "\n[Truncated at {total_cap} total matches]\n"
-                ));
+                s.push_str(&format!("\n[Truncated at {total_cap} total matches]\n"));
             }
             s
         };

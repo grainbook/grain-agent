@@ -217,6 +217,10 @@ struct HarnessBuilder {
     /// so it can capture the just-created `Session`; escalation has no
     /// session affinity, so it stays cloned.
     escalation_hook: Option<PrepareNextTurnFn>,
+    /// Optional v2 WASM role/hook mapper. Runs after compaction and
+    /// escalation so explicit plugin orchestration has the final say
+    /// on role/model/tool changes for the next turn.
+    wasm_orchestration_hook: Option<PrepareNextTurnFn>,
     convert_to_llm: Option<ConvertToLlmFn>,
 }
 
@@ -262,16 +266,23 @@ impl HarnessBuilder {
             self.compaction_prompt.clone(),
             session.clone(),
         );
-        // Chain: truncation → compaction → escalation.
+        // Chain: truncation → compaction → escalation → WASM orchestration.
         // Truncation runs first so compaction sees already-capped tool
-        // results; compaction summarises the truncated prefix; escalation
-        // has the final say on model/thinking overrides.
+        // results; compaction summarises the truncated prefix; WASM
+        // orchestration runs last so explicit role handoffs can swap
+        // model/prompt/tools for the next turn.
         let truncation_hook = grain_agent_harness::tool_result_truncation_hook(
             grain_agent_harness::DEFAULT_TOOL_RESULT_TRUNCATION_CAP_CHARS,
         );
         let prepare_next_turn = chain_prepare_next_turn(
             Some(truncation_hook),
-            chain_prepare_next_turn(Some(compaction_hook), self.escalation_hook.clone()),
+            chain_prepare_next_turn(
+                Some(compaction_hook),
+                chain_prepare_next_turn(
+                    self.escalation_hook.clone(),
+                    self.wasm_orchestration_hook.clone(),
+                ),
+            ),
         );
 
         let mut opts = AgentHarnessOptions::new(session, model, self.stream.clone());
@@ -728,6 +739,13 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // Walk discovered plugins for those with a `.wasm` module, load them
     // via wasmtime, and append their tools to the tool list.
     #[cfg(feature = "wasm-plugins")]
+    let mut wasm_orchestration_plugins: Vec<(
+        String,
+        Arc<grain_plugin_wasm::WasmPluginRuntime>,
+        Option<grain_plugin_wasm::OrchestrationDef>,
+    )> = Vec::new();
+
+    #[cfg(feature = "wasm-plugins")]
     {
         use std::sync::Arc as StdArc;
         // Route guest `log` host imports through the TUI event channel
@@ -778,6 +796,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                         .await
                     {
                         Ok(loaded) => {
+                            let orchestration = loaded.orchestration.clone();
                             // Boot-time load summary: route through the
                             // event channel as an `Info` line so it
                             // lands in the transcript scrollback, not
@@ -795,6 +814,11 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                                     td,
                                 )));
                             }
+                            wasm_orchestration_plugins.push((
+                                plugin_id.clone(),
+                                runtime.clone(),
+                                orchestration,
+                            ));
                         }
                         Err(e) => {
                             let msg =
@@ -829,6 +853,48 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     let active_model_handle: ActiveModelHandle = Arc::new(std::sync::RwLock::new(
         ActiveModelInfo::new(active_model_id.clone(), model.context_window),
     ));
+
+    #[cfg(feature = "wasm-plugins")]
+    let wasm_orchestration_hook: Option<PrepareNextTurnFn> = {
+        let mut orchestrator =
+            grain_ai_agent_headless::WasmOrchestrator::new(registry.clone(), tools.clone());
+        for (plugin_id, runtime, orchestration) in wasm_orchestration_plugins {
+            orchestrator.add_plugin(plugin_id, runtime, orchestration);
+        }
+        if orchestrator.is_empty() {
+            None
+        } else {
+            let evt_tx_for_wasm_ui = evt_tx.clone();
+            let registry_for_wasm_ui = registry.clone();
+            let active_model_for_wasm_ui = active_model_handle.clone();
+            orchestrator = orchestrator.with_ui_sink(Arc::new(move |update| {
+                if let Some(status) = update.status {
+                    let _ = evt_tx_for_wasm_ui.send(TuiEvent::Status(status));
+                }
+                if update.provider.is_some() || update.model.is_some() {
+                    if let Some(model_id) = update.model.as_ref() {
+                        let context_window = registry_for_wasm_ui
+                            .to_core_model(model_id)
+                            .map(|m| m.context_window)
+                            .unwrap_or(0);
+                        if let Ok(mut w) = active_model_for_wasm_ui.write() {
+                            *w = ActiveModelInfo::new(model_id.clone(), context_window);
+                        }
+                    }
+                    let _ = evt_tx_for_wasm_ui.send(TuiEvent::UiHeaderUpdated {
+                        provider: update.provider,
+                        model: update.model,
+                    });
+                }
+            }));
+            let _ = evt_tx.send(TuiEvent::Info(
+                "(wasm role orchestration enabled)".to_string(),
+            ));
+            Arc::new(orchestrator).prepare_next_turn_hook()
+        }
+    };
+    #[cfg(not(feature = "wasm-plugins"))]
+    let wasm_orchestration_hook: Option<PrepareNextTurnFn> = None;
 
     // --- Context guard -----------------------------------------------------
     // The transform fn only sees `Vec<AgentMessage>` — it never sees
@@ -1024,6 +1090,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         compaction_policy,
         compaction_prompt,
         escalation_hook,
+        wasm_orchestration_hook,
         convert_to_llm,
     });
     let harness = builder.build(prior_messages).await;

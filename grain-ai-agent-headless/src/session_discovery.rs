@@ -149,7 +149,10 @@ pub fn parse_session_meta(path: &Path) -> std::io::Result<SessionMeta> {
     use std::io::{BufRead, BufReader};
 
     let file = std::fs::File::open(path)?;
-    let modified_at = file.metadata()?.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    let modified_at = file
+        .metadata()?
+        .modified()
+        .unwrap_or(SystemTime::UNIX_EPOCH);
     let reader = BufReader::new(file);
 
     let mut title: Option<String> = None;
@@ -220,10 +223,7 @@ fn extract_user_text_preview(contents: &[UserContent]) -> String {
         }
     }
     // Collapse whitespace (newlines + tabs would shred the picker row).
-    let collapsed: String = s
-        .split_whitespace()
-        .collect::<Vec<&str>>()
-        .join(" ");
+    let collapsed: String = s.split_whitespace().collect::<Vec<&str>>().join(" ");
     truncate_char_boundary(&collapsed, TITLE_PREVIEW_MAX)
 }
 
@@ -250,9 +250,7 @@ mod tests {
 
     fn user(text: &str) -> AgentMessage {
         AgentMessage::user(UserMessage {
-            content: vec![UserContent::Text(TextContent {
-                text: text.into(),
-            })],
+            content: vec![UserContent::Text(TextContent { text: text.into() })],
             timestamp: 0,
         })
     }
@@ -260,9 +258,7 @@ mod tests {
     fn assistant(text: &str, model: &str) -> AgentMessage {
         use grain_agent_core::AssistantContent;
         AgentMessage::assistant(AssistantMessage {
-            content: vec![AssistantContent::Text(TextContent {
-                text: text.into(),
-            })],
+            content: vec![AssistantContent::Text(TextContent { text: text.into() })],
             api: "openai".into(),
             provider: "openai".into(),
             model: model.into(),
@@ -329,7 +325,7 @@ mod tests {
     #[test]
     fn parse_meta_truncates_long_titles_at_char_boundary() {
         let long = "中".repeat(100); // 300 bytes; cap is 80 → should truncate around the
-                                     // 26th char (78 bytes) + '…'
+        // 26th char (78 bytes) + '…'
         let tmp = tempfile::tempdir().unwrap();
         let path = write_session(tmp.path(), "long", &[user(&long)]);
         let meta = parse_session_meta(&path).unwrap();
@@ -367,26 +363,25 @@ mod tests {
         assert_eq!(good.title.as_deref(), Some("hi"));
     }
     #[test]
-fn parse_meta_title_is_last_user_message() {
-// When a session has multiple user turns, the title shown in
-// the /resume picker should be the **last** user prompt.
-let tmp = tempfile::tempdir().unwrap();
-let path = write_session(
+    fn parse_meta_title_is_last_user_message() {
+        // When a session has multiple user turns, the title shown in
+        // the /resume picker should be the **last** user prompt.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_session(
             tmp.path(),
             "multi",
             &[
-user("first question"),
-assistant("first answer", "gpt-4"),
-user("second question"),
-assistant("second answer", "gpt-4"),
-user("final question — this should be the title"),
+                user("first question"),
+                assistant("first answer", "gpt-4"),
+                user("second question"),
+                assistant("second answer", "gpt-4"),
+                user("final question — this should be the title"),
             ],
         );
-let meta = parse_session_meta(&path).unwrap();
-assert_eq!(
-meta.title.as_deref(),
-Some("final question — this should be the title")
+        let meta = parse_session_meta(&path).unwrap();
+        assert_eq!(
+            meta.title.as_deref(),
+            Some("final question — this should be the title")
         );
     }
-
 }

@@ -29,6 +29,11 @@ pub struct PersistedState {
     /// launch when no explicit `--model` flag is passed.
     #[serde(default)]
     pub last_model: Option<String>,
+    /// Submitted prompt history (most recent last) so Up/Down
+    /// recall survives process restarts. Capped at [`MAX_HISTORY`]
+    /// by the TUI before persisting.
+    #[serde(default)]
+    pub prompt_history: Vec<String>,
 }
 
 impl PersistedState {

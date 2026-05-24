@@ -38,10 +38,7 @@ pub fn render_doctor_report(workspace: &Workspace, registry: &Registry) -> Strin
 
     let _ = writeln!(out, "Environment keys:");
     for (label, key) in KNOWN_PROVIDER_ENV {
-        let present = std::env::var(key)
-            .ok()
-            .filter(|s| !s.is_empty())
-            .is_some();
+        let present = std::env::var(key).ok().filter(|s| !s.is_empty()).is_some();
         let mark = if present { "✓" } else { "·" };
         let _ = writeln!(out, "  [{mark}] {label}  ({key})");
     }
@@ -67,20 +64,12 @@ pub fn render_source_info_block(root: &Path, indent: usize) -> String {
                 if info.dirty { "yes" } else { "no" }
             );
             if !info.dirty_files.is_empty() {
-                let _ = writeln!(
-                    out,
-                    "{pad}changed:     {} file(s)",
-                    info.dirty_files.len()
-                );
+                let _ = writeln!(out, "{pad}changed:     {} file(s)", info.dirty_files.len());
                 for f in info.dirty_files.iter().take(20) {
                     let _ = writeln!(out, "{pad}  {f}");
                 }
                 if info.dirty_files.len() > 20 {
-                    let _ = writeln!(
-                        out,
-                        "{pad}  … and {} more",
-                        info.dirty_files.len() - 20
-                    );
+                    let _ = writeln!(out, "{pad}  … and {} more", info.dirty_files.len() - 20);
                 }
             }
         }
@@ -122,7 +111,11 @@ pub fn source_info(root: &Path) -> Option<SourceInfo> {
 }
 
 fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").current_dir(cwd).args(args).output().ok()?;
+    let out = Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }

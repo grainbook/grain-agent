@@ -150,6 +150,44 @@ capabilities = ["log"]
 | `log` | `log(level, msg)` | 将日志行输出到 stderr：`[level] wasm plugin 'name': msg` |
 | `env` | `env-get(key)` | 读取环境变量。未授权时返回 `none`。 |
 | `http` | `http-get(...)`、`http-post(...)` | HTTP 请求。未授权时返回错误字符串。 |
+| `role-orchestration` | `orchestration.list-roles/list-hooks/call-hook` | 启用 v2 角色槽位和生命周期 hook 元数据；hook 返回的是动作请求，宿主校验后才会执行。 |
+
+### v2 编排接口
+
+原 `grain-plugin` world 保持不变，所以已有插件不需要重编译。需要声明模型角色或 hook 的插件可以改用新 world：
+
+```rust
+wit_bindgen::generate!({
+    world: "grain-plugin-v2",
+    path: "wit",
+});
+```
+
+并在 `plugin.toml` 里显式开启能力：
+
+```toml
+[wasm]
+module = "plugin.wasm"
+capabilities = ["log", "role-orchestration"]
+```
+
+v2 插件仍然导出原来的 `plugin` 接口（`init` / `list-tools` / `call-tool`），同时额外导出 `orchestration`：
+
+```wit
+list-roles: func() -> list<role-def>;
+list-hooks: func() -> list<hook-def>;
+call-hook: func(point: hook-point, context-json: string)
+    -> result<list<host-action>, string>;
+```
+
+`host-action` 只表达意图，例如 `switch-role("coder")`、`switch-model("deepseek/...")`、`set-active-tools([...])`、`inject-user-message("...")`、`set-ui-header(...)`。宿主必须验证 model 是否在 registry、tool 是否存在、role 是否由该插件声明、当前 hook 点是否允许该动作，然后才能修改 agent/harness 状态。
+
+当前 TUI 支持两个 UI action：
+
+- `set-ui-header({ provider, model })`：更新顶部 provider/model 展示名。
+- `set-ui-status(text)`：更新输入框上方的单行临时状态。
+
+此外，宿主接受 `switch-model` 或 `switch-role` 后，也会自动把新 model 同步到 TUI header。
 
 ### 安全模型
 
@@ -224,6 +262,7 @@ Agent 调用工具 "my_tool"
 - **无流式传输**：工具结果作为单个 JSON 字符串返回，不会流式传输。
 - **JSON 输入/JSON 输出**：参数和结果序列化为 JSON 字符串。没有二进制协议。
 - **每次调用全新状态**：每次调用都创建新的 Store 并重新调用 `init`。插件无法在调用之间保持状态。
+- **v2 hook 非直接权限**：`call-hook` 返回的 `host-action` 不会自动执行；宿主负责校验和应用。
 - **wasmtime 版本**：grain 使用 wasmtime 40.0.4（MSRV：rustc 1.89.0）。插件必须与此版本的 Component Model 兼容。
 
 ---

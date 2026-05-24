@@ -58,7 +58,9 @@ pub fn find_skills(dir: &Path) -> Result<Vec<Skill>, SkillsError> {
     let mut skills: Vec<Skill> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        let Ok(file_type) = entry.file_type() else { continue };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         // Refuse symlinked skill directories (and symlinked SKILL.md inside
         // them): a `<dir>/.claude/skills/evil` pointing at `/etc/` lets a
         // malicious workspace's skill metadata get injected into the system
@@ -115,17 +117,17 @@ fn parse_skill(content: &str, skill_md: &Path, dir: &Path) -> Skill {
             if trimmed.is_empty() {
                 continue;
             }
-            let Some((key, value)) = trimmed.split_once(':') else { continue };
+            let Some((key, value)) = trimmed.split_once(':') else {
+                continue;
+            };
             let key = key.trim();
             let value = unquote(value.trim());
             match key {
                 "name" => name = value,
                 "description" => description = value,
                 "disable_model_invocation" | "disableModelInvocation" => {
-                    disable_model_invocation = matches!(
-                        value.to_ascii_lowercase().as_str(),
-                        "true" | "yes" | "1"
-                    );
+                    disable_model_invocation =
+                        matches!(value.to_ascii_lowercase().as_str(), "true" | "yes" | "1");
                 }
                 _ => {}
             }
@@ -165,9 +167,7 @@ fn extract_frontmatter(content: &str) -> Option<&str> {
         .or_else(|| body.strip_prefix('\n'))
         .unwrap_or(body);
     // Match either Unix or CRLF closing fence.
-    let end = body
-        .find("\n---")
-        .or_else(|| body.find("\r\n---"))?;
+    let end = body.find("\n---").or_else(|| body.find("\r\n---"))?;
     Some(&body[..end])
 }
 
@@ -196,7 +196,10 @@ fn extract_body(content: &str) -> String {
         None => return content.to_string(),
     };
     // Find the closing `---`.
-    let body_start = match after_open.find("\n---").or_else(|| after_open.find("\r\n---")) {
+    let body_start = match after_open
+        .find("\n---")
+        .or_else(|| after_open.find("\r\n---"))
+    {
         Some(pos) => {
             // Skip past the `\n---` marker.
             let rest = &after_open[pos..];

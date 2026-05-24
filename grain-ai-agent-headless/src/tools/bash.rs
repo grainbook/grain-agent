@@ -116,10 +116,12 @@ impl AgentTool for BashTool {
         cancel: CancellationToken,
         _on_update: ToolUpdateCallback,
     ) -> Result<AgentToolResult, AgentToolError> {
-        let args: BashArgs = serde_json::from_value(args)
-            .map_err(|e| AgentToolError::Validation(e.to_string()))?;
+        let args: BashArgs =
+            serde_json::from_value(args).map_err(|e| AgentToolError::Validation(e.to_string()))?;
         if args.command.trim().is_empty() {
-            return Err(AgentToolError::Validation("command must be non-empty".into()));
+            return Err(AgentToolError::Validation(
+                "command must be non-empty".into(),
+            ));
         }
 
         let cwd = match &args.cwd {
@@ -131,7 +133,9 @@ impl AgentTool for BashTool {
         };
 
         let timeout = Duration::from_millis(
-            args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS),
+            args.timeout_ms
+                .unwrap_or(DEFAULT_TIMEOUT_MS)
+                .min(MAX_TIMEOUT_MS),
         );
 
         let started = Instant::now();

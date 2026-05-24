@@ -100,10 +100,7 @@ impl TelemetrySink {
             .and_then(|_| guard.write_all(b"\n"))
             .and_then(|_| guard.flush())
         {
-            eprintln!(
-                "[warn] telemetry write to {}: {e}",
-                self.path.display()
-            );
+            eprintln!("[warn] telemetry write to {}: {e}", self.path.display());
         }
     }
 }
@@ -139,8 +136,12 @@ mod tests {
     fn reopen_appends_does_not_truncate() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.jsonl");
-        TelemetrySink::open(&path).unwrap().record(&AgentEvent::AgentStart);
-        TelemetrySink::open(&path).unwrap().record(&AgentEvent::TurnStart);
+        TelemetrySink::open(&path)
+            .unwrap()
+            .record(&AgentEvent::AgentStart);
+        TelemetrySink::open(&path)
+            .unwrap()
+            .record(&AgentEvent::TurnStart);
         let contents = std::fs::read_to_string(&path).unwrap();
         assert_eq!(contents.lines().count(), 2);
     }

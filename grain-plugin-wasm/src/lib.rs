@@ -51,12 +51,21 @@ wasmtime::component::bindgen!({
     world: "grain-plugin",
 });
 
+mod v2_bindings {
+    wasmtime::component::bindgen!({
+        path: "wit/grain-plugin.wit",
+        world: "grain-plugin-v2",
+    });
+}
+
 // Re-export the generated types used by the tool adapter and callers.
 // The bindgen generates modules mirroring the WIT package path:
 //   exports::grain::plugin::plugin::{ToolDef, ToolResult, PluginInfo, Guest}
 //   grain::plugin::host::{Host, LogLevel, HttpResponse}
 pub use exports::grain::plugin::plugin as wit_plugin;
 pub use grain::plugin::host as wit_host;
+
+use v2_bindings::exports::grain::plugin::orchestration as wit_orchestration;
 
 const HOST_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -70,6 +79,7 @@ pub struct Capabilities {
     pub log: bool,
     pub env: bool,
     pub http: bool,
+    pub role_orchestration: bool,
 }
 
 impl Capabilities {
@@ -80,6 +90,7 @@ impl Capabilities {
             log: set.contains("log"),
             env: set.contains("env"),
             http: set.contains("http"),
+            role_orchestration: set.contains("role-orchestration"),
         }
     }
 }
@@ -170,6 +181,72 @@ impl wit_host::Host for PluginState {
     }
 }
 
+impl v2_bindings::grain::plugin::host::Host for PluginState {
+    fn log(&mut self, level: v2_bindings::grain::plugin::host::LogLevel, msg: String) {
+        if !self.capabilities.log {
+            return;
+        }
+        let tag = match level {
+            v2_bindings::grain::plugin::host::LogLevel::Debug => "debug",
+            v2_bindings::grain::plugin::host::LogLevel::Info => "info",
+            v2_bindings::grain::plugin::host::LogLevel::Warn => "warn",
+            v2_bindings::grain::plugin::host::LogLevel::Error => "error",
+        };
+        if let Some(sink) = &self.log_sink {
+            sink(tag, &self.plugin_name, &msg);
+        } else {
+            eprintln!("[{tag}] wasm plugin '{}': {msg}", self.plugin_name);
+        }
+    }
+
+    fn env_get(&mut self, key: String) -> Option<String> {
+        if !self.capabilities.env {
+            return None;
+        }
+        if let Some(val) = self.env_map.get(&key) {
+            return Some(val.clone());
+        }
+        std::env::var(&key).ok()
+    }
+
+    fn http_get(
+        &mut self,
+        url: String,
+        headers: Vec<(String, String)>,
+    ) -> Result<v2_bindings::grain::plugin::host::HttpResponse, String> {
+        if !self.capabilities.http {
+            return Err("http capability not granted".into());
+        }
+        let response = self
+            .rt_handle
+            .block_on(async { do_http_request("GET", &url, &headers, None).await })?;
+        Ok(v2_bindings::grain::plugin::host::HttpResponse {
+            status: response.status,
+            headers: response.headers,
+            body: response.body,
+        })
+    }
+
+    fn http_post(
+        &mut self,
+        url: String,
+        headers: Vec<(String, String)>,
+        body: String,
+    ) -> Result<v2_bindings::grain::plugin::host::HttpResponse, String> {
+        if !self.capabilities.http {
+            return Err("http capability not granted".into());
+        }
+        let response = self
+            .rt_handle
+            .block_on(async { do_http_request("POST", &url, &headers, Some(&body)).await })?;
+        Ok(v2_bindings::grain::plugin::host::HttpResponse {
+            status: response.status,
+            headers: response.headers,
+            body: response.body,
+        })
+    }
+}
+
 async fn do_http_request(
     method: &str,
     url: &str,
@@ -245,6 +322,7 @@ pub enum WasmPluginError {
 pub struct LoadedPlugin {
     pub info: PluginInfo,
     pub tool_defs: Vec<ToolDef>,
+    pub orchestration: Option<OrchestrationDef>,
 }
 
 /// Plugin metadata (mirrors the WIT `plugin-info` record but is
@@ -264,6 +342,60 @@ pub struct ToolDef {
     pub parameters_json: String,
 }
 
+/// Optional orchestration metadata exported by v2 plugins.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OrchestrationDef {
+    pub roles: Vec<RoleDef>,
+    pub hooks: Vec<HookDef>,
+}
+
+/// One model-role slot declared by a v2 plugin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleDef {
+    pub name: String,
+    pub model: String,
+    pub prompt: String,
+    pub tools: Vec<String>,
+    pub thinking_level: Option<String>,
+}
+
+/// One hook subscription declared by a v2 plugin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookDef {
+    pub point: HookPoint,
+    pub name: String,
+}
+
+/// Lifecycle point names supported by the v2 orchestration surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HookPoint {
+    BeforeAgentStart,
+    AfterToolCall,
+    PrepareNextTurn,
+    ShouldStopAfterTurn,
+}
+
+/// Host action requested by a v2 plugin hook.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostAction {
+    SwitchRole(String),
+    SwitchModel(String),
+    SetSystemPrompt(String),
+    SetActiveTools(Vec<String>),
+    InjectUserMessage(String),
+    StopAfterTurn(bool),
+    EmitCustom(String),
+    SetUiHeader(UiHeader),
+    SetUiStatus(String),
+}
+
+/// Optional UI header override requested by a v2 plugin.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UiHeader {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Runtime
 // ---------------------------------------------------------------------------
@@ -272,6 +404,7 @@ pub struct ToolDef {
 pub struct WasmPluginRuntime {
     engine: Engine,
     linker: Linker<PluginState>,
+    linker_v2: Linker<PluginState>,
     /// Component entries — kept so we can re-instantiate per call.
     components: Mutex<Vec<PluginEntry>>,
     /// Optional host log sink. Cloned into every `PluginState` we
@@ -304,9 +437,13 @@ impl WasmPluginRuntime {
         // Link WASI + our host interface.
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         GrainPlugin::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)?;
+        let mut linker_v2 = Linker::<PluginState>::new(&engine);
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker_v2)?;
+        v2_bindings::GrainPluginV2::add_to_linker::<_, HasSelf<_>>(&mut linker_v2, |s| s)?;
         Ok(WasmPluginRuntime {
             engine,
             linker,
+            linker_v2,
             components: Mutex::new(Vec::new()),
             log_sink: None,
         })
@@ -369,7 +506,11 @@ impl WasmPluginRuntime {
             })
             .collect();
 
-        // Stash the component for later call-tool invocations.
+        let orchestration = self
+            .load_orchestration_metadata(&component, &capabilities, plugin_name, &env_map)
+            .await?;
+
+        // Stash the component for later call-tool / hook invocations.
         self.components.lock().await.push(PluginEntry {
             id: plugin_id.to_string(),
             component,
@@ -378,7 +519,48 @@ impl WasmPluginRuntime {
             env_map,
         });
 
-        Ok(LoadedPlugin { info, tool_defs })
+        Ok(LoadedPlugin {
+            info,
+            tool_defs,
+            orchestration,
+        })
+    }
+
+    async fn load_orchestration_metadata(
+        &self,
+        component: &Component,
+        capabilities: &Capabilities,
+        plugin_name: &str,
+        env_map: &HashMap<String, String>,
+    ) -> Result<Option<OrchestrationDef>, WasmPluginError> {
+        if !capabilities.role_orchestration {
+            return Ok(None);
+        }
+        let wasi = WasiCtxBuilder::new().build();
+        let state = PluginState {
+            wasi_ctx: wasi,
+            table: ResourceTable::new(),
+            capabilities: capabilities.clone(),
+            plugin_name: plugin_name.to_string(),
+            rt_handle: tokio::runtime::Handle::current(),
+            log_sink: self.log_sink.clone(),
+            env_map: env_map.clone(),
+        };
+        let mut store = Store::new(&self.engine, state);
+        let bindings =
+            v2_bindings::GrainPluginV2::instantiate(&mut store, component, &self.linker_v2)?;
+        let guest = bindings.grain_plugin_orchestration();
+        let roles = guest
+            .call_list_roles(&mut store)?
+            .into_iter()
+            .map(role_from_wit)
+            .collect();
+        let hooks = guest
+            .call_list_hooks(&mut store)?
+            .into_iter()
+            .map(hook_from_wit)
+            .collect();
+        Ok(Some(OrchestrationDef { roles, hooks }))
     }
 
     /// Call a tool on a loaded plugin from async code. Creates a fresh
@@ -452,6 +634,69 @@ impl WasmPluginRuntime {
             is_error: result.is_error,
         })
     }
+
+    /// Invoke a v2 orchestration hook on a loaded plugin.
+    ///
+    /// The returned actions are untrusted intent. Callers must validate
+    /// model ids, role names, tools, and lifecycle timing before applying
+    /// them to an agent or harness.
+    pub async fn call_hook(
+        &self,
+        plugin_id: &str,
+        point: HookPoint,
+        context_json: &str,
+        host_rt_handle: tokio::runtime::Handle,
+    ) -> Result<Vec<HostAction>, WasmPluginError> {
+        let point_raw = point_to_wit(point);
+        std::thread::scope(|scope| {
+            scope
+                .spawn(move || {
+                    self.call_hook_blocking(plugin_id, point_raw, context_json, host_rt_handle)
+                })
+                .join()
+                .map_err(|_| WasmPluginError::ToolCallFailed("hook call panicked".into()))?
+        })
+    }
+
+    fn call_hook_blocking(
+        &self,
+        plugin_id: &str,
+        point: wit_orchestration::HookPoint,
+        context_json: &str,
+        host_rt_handle: tokio::runtime::Handle,
+    ) -> Result<Vec<HostAction>, WasmPluginError> {
+        let entries = self.components.blocking_lock();
+        let entry = entries.iter().find(|e| e.id == plugin_id).ok_or_else(|| {
+            WasmPluginError::ToolCallFailed(format!("plugin '{plugin_id}' not loaded"))
+        })?;
+        if !entry.capabilities.role_orchestration {
+            return Err(WasmPluginError::ToolCallFailed(format!(
+                "plugin '{plugin_id}' does not have role-orchestration capability"
+            )));
+        }
+
+        let wasi = WasiCtxBuilder::new().build();
+        let state = PluginState {
+            wasi_ctx: wasi,
+            table: ResourceTable::new(),
+            capabilities: entry.capabilities.clone(),
+            plugin_name: entry.plugin_name.clone(),
+            rt_handle: host_rt_handle,
+            log_sink: self.log_sink.clone(),
+            env_map: entry.env_map.clone(),
+        };
+        let mut store = Store::new(&self.engine, state);
+        let bindings =
+            v2_bindings::GrainPluginV2::instantiate(&mut store, &entry.component, &self.linker_v2)?;
+        let guest = bindings.grain_plugin_orchestration();
+        let actions = guest
+            .call_call_hook(&mut store, point, context_json)?
+            .map_err(WasmPluginError::ToolCallFailed)?
+            .into_iter()
+            .map(action_from_wit)
+            .collect();
+        Ok(actions)
+    }
 }
 
 /// Owned result from a tool call (mirrors the WIT `tool-result`).
@@ -459,4 +704,60 @@ impl WasmPluginRuntime {
 pub struct CallToolResult {
     pub content_json: String,
     pub is_error: bool,
+}
+
+fn role_from_wit(role: wit_orchestration::RoleDef) -> RoleDef {
+    RoleDef {
+        name: role.name,
+        model: role.model,
+        prompt: role.prompt,
+        tools: role.tools,
+        thinking_level: role.thinking_level,
+    }
+}
+
+fn hook_from_wit(hook: wit_orchestration::HookDef) -> HookDef {
+    HookDef {
+        point: hook_point_from_wit(hook.point),
+        name: hook.name,
+    }
+}
+
+fn hook_point_from_wit(point: wit_orchestration::HookPoint) -> HookPoint {
+    match point {
+        wit_orchestration::HookPoint::BeforeAgentStart => HookPoint::BeforeAgentStart,
+        wit_orchestration::HookPoint::AfterToolCall => HookPoint::AfterToolCall,
+        wit_orchestration::HookPoint::PrepareNextTurn => HookPoint::PrepareNextTurn,
+        wit_orchestration::HookPoint::ShouldStopAfterTurn => HookPoint::ShouldStopAfterTurn,
+    }
+}
+
+fn point_to_wit(point: HookPoint) -> wit_orchestration::HookPoint {
+    match point {
+        HookPoint::BeforeAgentStart => wit_orchestration::HookPoint::BeforeAgentStart,
+        HookPoint::AfterToolCall => wit_orchestration::HookPoint::AfterToolCall,
+        HookPoint::PrepareNextTurn => wit_orchestration::HookPoint::PrepareNextTurn,
+        HookPoint::ShouldStopAfterTurn => wit_orchestration::HookPoint::ShouldStopAfterTurn,
+    }
+}
+
+fn action_from_wit(action: wit_orchestration::HostAction) -> HostAction {
+    match action {
+        wit_orchestration::HostAction::SwitchRole(role) => HostAction::SwitchRole(role),
+        wit_orchestration::HostAction::SwitchModel(model) => HostAction::SwitchModel(model),
+        wit_orchestration::HostAction::SetSystemPrompt(prompt) => {
+            HostAction::SetSystemPrompt(prompt)
+        }
+        wit_orchestration::HostAction::SetActiveTools(tools) => HostAction::SetActiveTools(tools),
+        wit_orchestration::HostAction::InjectUserMessage(message) => {
+            HostAction::InjectUserMessage(message)
+        }
+        wit_orchestration::HostAction::StopAfterTurn(stop) => HostAction::StopAfterTurn(stop),
+        wit_orchestration::HostAction::EmitCustom(value) => HostAction::EmitCustom(value),
+        wit_orchestration::HostAction::SetUiHeader(header) => HostAction::SetUiHeader(UiHeader {
+            provider: header.provider,
+            model: header.model,
+        }),
+        wit_orchestration::HostAction::SetUiStatus(status) => HostAction::SetUiStatus(status),
+    }
 }

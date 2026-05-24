@@ -61,23 +61,23 @@ pub struct PluginSpec {
     /// [`Self::src`].
     #[serde(default)]
     pub kind: Option<SourceKind>,
-/// Per-plugin auth entries. Each entry sets an env var inside
-/// the WASM sandbox. When `value` is set the key is injected
-/// directly; otherwise it's read from the host OS environment.
-/// Multiple entries for the same `env` are resolved by
-/// `priority` (higher wins, default 0).
-///
-/// ```toml
-/// [[plugin]]
-/// name = "web-search"
-/// src = "../grain-plugin-wasm/examples/web-search"
-/// auth = [
-///   { kind = "api_key", env = "TAVILY_API_KEY", value = "tvly-xxx", priority = 1 },
-///   { kind = "api_key", env = "EXA_API_KEY", value = "sk-xxx" },
-/// ]
-/// ```
-#[serde(default)]
-pub auth: Vec<PluginAuthEntry>,
+    /// Per-plugin auth entries. Each entry sets an env var inside
+    /// the WASM sandbox. When `value` is set the key is injected
+    /// directly; otherwise it's read from the host OS environment.
+    /// Multiple entries for the same `env` are resolved by
+    /// `priority` (higher wins, default 0).
+    ///
+    /// ```toml
+    /// [[plugin]]
+    /// name = "web-search"
+    /// src = "../grain-plugin-wasm/examples/web-search"
+    /// auth = [
+    ///   { kind = "api_key", env = "TAVILY_API_KEY", value = "tvly-xxx", priority = 1 },
+    ///   { kind = "api_key", env = "EXA_API_KEY", value = "sk-xxx" },
+    /// ]
+    /// ```
+    #[serde(default)]
+    pub auth: Vec<PluginAuthEntry>,
 }
 
 /// One credential entry for a plugin. Mirrors the LLM provider
@@ -202,11 +202,7 @@ impl SyncReport {
 ///
 /// Returns a per-name report; never fails as a whole (one bad source
 /// shouldn't block the others).
-pub fn sync_plugins(
-    spec: &PluginSpecFile,
-    plugins_dir: &Path,
-    base_dir: &Path,
-) -> SyncReport {
+pub fn sync_plugins(spec: &PluginSpecFile, plugins_dir: &Path, base_dir: &Path) -> SyncReport {
     if let Err(e) = std::fs::create_dir_all(plugins_dir) {
         // Can't create the parent — every plugin is going to fail
         // with the same root cause; report the error once.
@@ -228,9 +224,10 @@ pub fn sync_plugins(
             continue;
         }
         if p.name.contains('/') || p.name.contains('\\') || p.name.contains("..") {
-            report
-                .failed
-                .push((p.name.clone(), format!("name {:?} contains path separator", p.name)));
+            report.failed.push((
+                p.name.clone(),
+                format!("name {:?} contains path separator", p.name),
+            ));
             continue;
         }
         let target = plugins_dir.join(&p.name);
@@ -347,13 +344,23 @@ fn _symlink_local_deprecated(src: &str, base_dir: &Path, target: &Path) -> Resul
     let canonical = resolve_local_src(src, base_dir)?;
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(&canonical, target)
-            .map_err(|e| format!("symlink {} → {}: {e}", target.display(), canonical.display()))
+        std::os::unix::fs::symlink(&canonical, target).map_err(|e| {
+            format!(
+                "symlink {} → {}: {e}",
+                target.display(),
+                canonical.display()
+            )
+        })
     }
     #[cfg(windows)]
     {
-        std::os::windows::fs::symlink_dir(&canonical, target)
-            .map_err(|e| format!("symlink {} → {}: {e}", target.display(), canonical.display()))
+        std::os::windows::fs::symlink_dir(&canonical, target).map_err(|e| {
+            format!(
+                "symlink {} → {}: {e}",
+                target.display(),
+                canonical.display()
+            )
+        })
     }
 }
 
@@ -378,7 +385,10 @@ mod tests {
             SourceKind::Git
         );
         assert_eq!(detect_source_kind("https://example.com/x"), SourceKind::Git);
-        assert_eq!(detect_source_kind("git@github.com:x/y.git"), SourceKind::Git);
+        assert_eq!(
+            detect_source_kind("git@github.com:x/y.git"),
+            SourceKind::Git
+        );
         assert_eq!(detect_source_kind("ssh://git@host/x.git"), SourceKind::Git);
         assert_eq!(detect_source_kind("git://host/x.git"), SourceKind::Git);
     }
@@ -399,7 +409,7 @@ mod tests {
             src: "https://example.com/x.git".into(),
             rev: None,
             kind: Some(SourceKind::Local),
-        auth: Vec::new(),
+            auth: Vec::new(),
         };
         assert_eq!(spec.resolved_kind(), SourceKind::Local);
     }
@@ -465,7 +475,7 @@ rev = "main"
                 src: "/does/not/exist".into(),
                 rev: None,
                 kind: None,
-            auth: Vec::new(),
+                auth: Vec::new(),
             }],
         };
         let report = sync_plugins(&spec, &plugins_dir, tmp.path());
@@ -485,14 +495,14 @@ rev = "main"
                     src: "/whatever".into(),
                     rev: None,
                     kind: None,
-                auth: Vec::new(),
+                    auth: Vec::new(),
                 },
                 PluginSpec {
                     name: "a/b".into(),
                     src: "/whatever".into(),
                     rev: None,
                     kind: None,
-                auth: Vec::new(),
+                    auth: Vec::new(),
                 },
             ],
         };
@@ -518,7 +528,7 @@ rev = "main"
                 src: source.to_string_lossy().into_owned(),
                 rev: None,
                 kind: None,
-            auth: Vec::new(),
+                auth: Vec::new(),
             }],
         };
         let report = sync_plugins(&spec, &plugins_dir, tmp.path());
@@ -541,10 +551,14 @@ rev = "main"
         let spec = PluginSpecFile {
             plugins: vec![PluginSpec {
                 name: "missing".into(),
-                src: tmp.path().join("does-not-exist").to_string_lossy().into_owned(),
+                src: tmp
+                    .path()
+                    .join("does-not-exist")
+                    .to_string_lossy()
+                    .into_owned(),
                 rev: None,
                 kind: None,
-            auth: Vec::new(),
+                auth: Vec::new(),
             }],
         };
         let report = sync_plugins(&spec, &plugins_dir, tmp.path());
@@ -565,7 +579,7 @@ rev = "main"
                 src: file_src.to_string_lossy().into_owned(),
                 rev: None,
                 kind: None,
-            auth: Vec::new(),
+                auth: Vec::new(),
             }],
         };
         let report = sync_plugins(&spec, &plugins_dir, tmp.path());
@@ -596,7 +610,7 @@ rev = "main"
                 src: "../lazy-gagent".into(),
                 rev: None,
                 kind: None,
-            auth: Vec::new(),
+                auth: Vec::new(),
             }],
         };
         // Pass `<workspace>/.grain/` as base_dir — the spec file's

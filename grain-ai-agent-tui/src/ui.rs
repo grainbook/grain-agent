@@ -272,6 +272,9 @@ fn build_header_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
 }
 
 fn current_provider_display(state: &AppState) -> String {
+    if let Some(label) = &state.ui_provider_label {
+        return label.clone();
+    }
     state
         .current_provider_idx
         .and_then(|idx| state.providers.get(idx))
@@ -281,6 +284,14 @@ fn current_provider_display(state: &AppState) -> String {
 }
 
 fn current_model_display(state: &AppState) -> String {
+    if let Some(label) = &state.ui_model_label {
+        return label
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(label.as_str())
+            .to_string();
+    }
     state
         .model_id
         .rsplit('/')
@@ -1062,43 +1073,41 @@ struct InputPromptChrome {
 }
 
 fn input_prompt_chrome(state: &AppState, palette: &Palette, area_width: u16) -> InputPromptChrome {
-let max_workspace = area_width.saturating_sub(24).clamp(8, 48) as usize;
-let workspace = compact_workspace_label(&state.workspace_display, max_workspace);
-let git = git_prompt_label(state, area_width);
+    let max_workspace = area_width.saturating_sub(24).clamp(8, 48) as usize;
+    let workspace = compact_workspace_label(&state.workspace_display, max_workspace);
+    let git = git_prompt_label(state, area_width);
 
-let path_bg = palette.secondary;
-let git_bg = palette.success;
-let fg_chip = palette.bg;
+    let path_bg = palette.secondary;
+    let git_bg = palette.success;
+    let fg_chip = palette.bg;
 
-    let mut spans = vec![
-        Span::styled(
-format!(" {workspace} "),
-            Style::default()
-.fg(fg_chip)
-                .bg(path_bg)
-.add_modifier(Modifier::BOLD),
-        ),
-    ];
+    let mut spans = vec![Span::styled(
+        format!(" {workspace} "),
+        Style::default()
+            .fg(fg_chip)
+            .bg(path_bg)
+            .add_modifier(Modifier::BOLD),
+    )];
 
     if let Some(git) = git {
-spans.push(Span::styled(
-format!(" {git} "),
+        spans.push(Span::styled(
+            format!(" {git} "),
             Style::default()
-.fg(fg_chip)
+                .fg(fg_chip)
                 .bg(git_bg)
-.add_modifier(Modifier::BOLD),
+                .add_modifier(Modifier::BOLD),
         ));
-spans.push(Span::raw(" "));
+        spans.push(Span::raw(" "));
     } else {
-spans.push(Span::raw("  "));
+        spans.push(Span::raw("  "));
     }
 
     let width = spans
         .iter()
-.map(|s| s.content.width() as u16)
+        .map(|s| s.content.width() as u16)
         .sum::<u16>()
-.min(area_width.saturating_sub(1).max(1));
-InputPromptChrome { spans, width }
+        .min(area_width.saturating_sub(1).max(1));
+    InputPromptChrome { spans, width }
 }
 
 fn compact_workspace_label(path: &str, max_width: usize) -> String {

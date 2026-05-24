@@ -122,8 +122,11 @@ impl AgentTool for WebFetchTool {
         cancel: CancellationToken,
         _on_update: ToolUpdateCallback,
     ) -> Result<AgentToolResult, AgentToolError> {
-        let args: FetchArgs = serde_json::from_value(args)
-            .map_err(|e| AgentToolError::Validation(e.to_string()))?;
+        let args: FetchArgs =
+            serde_json::from_value(args).map_err(|e| AgentToolError::Validation(e.to_string()))?;
+        if cancel.is_cancelled() {
+            return Err(AgentToolError::Aborted);
+        }
 
         // --- URL + SSRF guard (parsed URL first; scheme + host both validated) ---
         let parsed = Url::parse(&args.url)
@@ -137,7 +140,9 @@ impl AgentTool for WebFetchTool {
         validate_public_host(&parsed)?;
 
         let timeout = Duration::from_millis(
-            args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS),
+            args.timeout_ms
+                .unwrap_or(DEFAULT_TIMEOUT_MS)
+                .min(MAX_TIMEOUT_MS),
         );
         let max_bytes = args
             .max_bytes
@@ -192,8 +197,7 @@ impl AgentTool for WebFetchTool {
                 n = stream.next() => n,
             };
             let Some(chunk_res) = next else { break };
-            let chunk = chunk_res
-                .map_err(|e| AgentToolError::msg(format!("read body: {e}")))?;
+            let chunk = chunk_res.map_err(|e| AgentToolError::msg(format!("read body: {e}")))?;
             total_streamed = total_streamed.saturating_add(chunk.len());
             if buf.len() < max_bytes {
                 let take = chunk.len().min(max_bytes - buf.len());
@@ -231,7 +235,11 @@ impl AgentTool for WebFetchTool {
             status.as_u16(),
             status.canonical_reason().unwrap_or(""),
             final_url,
-            if content_type.is_empty() { "?" } else { &content_type }
+            if content_type.is_empty() {
+                "?"
+            } else {
+                &content_type
+            }
         ));
         body.push_str(&trunc.content);
         if truncated_at_fetch {

@@ -16,9 +16,9 @@ use grain_llm_models::Registry;
 
 use crate::config::{EnvKeyResolver, OpenAiCompatEndpoint, OpenAiCompatPreset, ProviderRouter};
 use crate::mapping::outbound::baseline_chat_options;
-use crate::oauth::get_valid_access_token_with_config_sync;
-use crate::oauth::config_for_provider;
 use crate::oauth::OauthConfig;
+use crate::oauth::config_for_provider;
+use crate::oauth::get_valid_access_token_with_config_sync;
 use crate::provider::{ProviderAuth, ProviderKind, ProviderProfile};
 use crate::stream::GenaiStream;
 
@@ -43,11 +43,11 @@ pub struct GenaiStreamBuilder {
     /// - `Some(true)` → always bypass, regardless of endpoints.
     /// - `Some(false)` → never bypass; let `reqwest` honor the env vars.
     bypass_proxy: Option<bool>,
-/// OAuth profile map: adapter_kind (e.g. `"anthropic"`) → (profile_name, OauthConfig).
-/// Populated by `with_provider_profiles` for auth entries of kind
-/// `anthropic_oauth` / `openai_oauth`. Used by the auth resolver closure
-/// to fetch fresh access tokens at request time.
-oauth_map: HashMap<String, (String, OauthConfig)>,
+    /// OAuth profile map: adapter_kind (e.g. `"anthropic"`) → (profile_name, OauthConfig).
+    /// Populated by `with_provider_profiles` for auth entries of kind
+    /// `anthropic_oauth` / `openai_oauth`. Used by the auth resolver closure
+    /// to fetch fresh access tokens at request time.
+    oauth_map: HashMap<String, (String, OauthConfig)>,
 }
 
 impl Default for GenaiStreamBuilder {
@@ -171,13 +171,15 @@ impl GenaiStreamBuilder {
                 }
                 ProviderAuth::AnthropicOauth => {
                     if let Some(config) = config_for_provider("anthropic") {
-                                    self.oauth_map.insert("anthropic".to_string(), (p.name.clone(), config));
-                                }
+                        self.oauth_map
+                            .insert("anthropic".to_string(), (p.name.clone(), config));
+                    }
                 }
                 ProviderAuth::OpenAiOauth => {
                     if let Some(config) = config_for_provider("openai") {
-                                    self.oauth_map.insert("openai".to_string(), (p.name.clone(), config));
-                                }
+                        self.oauth_map
+                            .insert("openai".to_string(), (p.name.clone(), config));
+                    }
                 }
             }
         }
@@ -214,7 +216,7 @@ impl GenaiStreamBuilder {
         // in our compat table.
         let auth_compat = compat_map.clone();
         let auth_env = env_resolver.clone();
-let auth_oauth = oauth_map.clone();
+        let auth_oauth = oauth_map.clone();
         let auth_resolver =
             move |model_iden: ModelIden| -> genai::resolver::Result<Option<AuthData>> {
                 // 1. OpenAI-compat namespace? Use its env var.
@@ -236,9 +238,10 @@ let auth_oauth = oauth_map.clone();
                 }
                 // 3. OAuth profile for this adapter kind?
                 if let Some((profile_name, config)) = auth_oauth.get(adapter_name) {
-                    if let Some(token) = get_valid_access_token_with_config_sync(config, profile_name)
-                        .ok()
-                        .flatten()
+                    if let Some(token) =
+                        get_valid_access_token_with_config_sync(config, profile_name)
+                            .ok()
+                            .flatten()
                     {
                         return Ok(Some(AuthData::from_single(token)));
                     }

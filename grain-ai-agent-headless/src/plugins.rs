@@ -120,8 +120,6 @@ pub struct WasmConfig {
     pub capabilities: Vec<String>,
 }
 
-
-
 fn default_wasm_module() -> PathBuf {
     PathBuf::from("plugin.wasm")
 }
@@ -212,10 +210,7 @@ pub fn discover_plugins(plugins_dir: &Path) -> Vec<Plugin> {
         Ok(rd) => rd,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(e) => {
-            eprintln!(
-                "[warn] plugins: read_dir {} ({e})",
-                plugins_dir.display()
-            );
+            eprintln!("[warn] plugins: read_dir {} ({e})", plugins_dir.display());
             return Vec::new();
         }
     };
@@ -226,10 +221,7 @@ pub fn discover_plugins(plugins_dir: &Path) -> Vec<Plugin> {
             continue;
         }
         // Skip hidden and `_cache`-style scratch directories.
-        let stem = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let stem = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
         if stem.is_empty() || stem.starts_with('.') || stem.starts_with('_') {
             continue;
         }
@@ -243,10 +235,7 @@ pub fn discover_plugins(plugins_dir: &Path) -> Vec<Plugin> {
                 root: path,
             }),
             Err(e) => {
-                eprintln!(
-                    "[warn] plugins: skipping {} ({e})",
-                    manifest_path.display()
-                );
+                eprintln!("[warn] plugins: skipping {} ({e})", manifest_path.display());
             }
         }
     }
@@ -408,10 +397,7 @@ pub fn find_skills_with_plugins(
         match find_skills(&d) {
             Ok(extra) => out.extend(extra),
             Err(e) => {
-                eprintln!(
-                    "[warn] plugin '{}' skills scan: {e}",
-                    plugin.manifest.name
-                );
+                eprintln!("[warn] plugin '{}' skills scan: {e}", plugin.manifest.name);
             }
         }
     }
@@ -546,9 +532,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         write_file(
             &dir.join("SKILL.md"),
-            &format!(
-                "---\nname: {name}\ndescription: {body}\n---\n\nbody\n"
-            ),
+            &format!("---\nname: {name}\ndescription: {body}\n---\n\nbody\n"),
         );
     }
 
@@ -601,8 +585,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plugin_root = tmp.path().join("bad");
         std::fs::create_dir_all(&plugin_root).unwrap();
-        std::fs::write(plugin_root.join("plugin.toml"), "this is = not = toml ===")
-            .unwrap();
+        std::fs::write(plugin_root.join("plugin.toml"), "this is = not = toml ===").unwrap();
         write_plugin(tmp.path(), "good");
         let plugins = discover_plugins(tmp.path());
         assert_eq!(plugins.len(), 1);
@@ -617,7 +600,10 @@ mod tests {
         write_plugin(tmp.path(), "mango");
         let plugins = discover_plugins(tmp.path());
         assert_eq!(
-            plugins.iter().map(|p| p.manifest.name.as_str()).collect::<Vec<_>>(),
+            plugins
+                .iter()
+                .map(|p| p.manifest.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["alpha", "mango", "zebra"]
         );
     }
@@ -827,8 +813,7 @@ handler     = "h_b"
 "#,
         );
         let plugins = discover_plugins(tmp.path());
-        let collected =
-            crate::plugin_ui::collect_slash_commands(&plugins);
+        let collected = crate::plugin_ui::collect_slash_commands(&plugins);
         assert_eq!(collected.len(), 2);
         assert_eq!(collected[0].plugin_name, "alpha");
         assert_eq!(collected[0].command.trigger, "a");

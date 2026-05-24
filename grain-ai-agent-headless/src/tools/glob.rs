@@ -93,8 +93,8 @@ impl AgentTool for GlobTool {
         cancel: CancellationToken,
         _on_update: ToolUpdateCallback,
     ) -> Result<AgentToolResult, AgentToolError> {
-        let args: GlobArgs = serde_json::from_value(args)
-            .map_err(|e| AgentToolError::Validation(e.to_string()))?;
+        let args: GlobArgs =
+            serde_json::from_value(args).map_err(|e| AgentToolError::Validation(e.to_string()))?;
         let root_path = self
             .workspace
             .resolve(args.root.as_deref().unwrap_or("."))

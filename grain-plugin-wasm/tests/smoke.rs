@@ -23,10 +23,16 @@ fn capabilities_default_is_all_false() {
 
 #[test]
 fn capabilities_from_list_parses_known_strings() {
-    let caps = Capabilities::from_list(&["log".to_string(), "env".to_string(), "http".to_string()]);
+    let caps = Capabilities::from_list(&[
+        "log".to_string(),
+        "env".to_string(),
+        "http".to_string(),
+        "role-orchestration".to_string(),
+    ]);
     assert!(caps.log);
     assert!(caps.env);
     assert!(caps.http);
+    assert!(caps.role_orchestration);
 }
 
 #[test]
@@ -35,6 +41,7 @@ fn capabilities_from_list_ignores_unknown() {
     assert!(caps.log);
     assert!(!caps.env);
     assert!(!caps.http);
+    assert!(!caps.role_orchestration);
 }
 
 #[test]
@@ -43,6 +50,7 @@ fn capabilities_from_empty_list() {
     assert!(!caps.log);
     assert!(!caps.env);
     assert!(!caps.http);
+    assert!(!caps.role_orchestration);
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +132,107 @@ async fn call_tool_on_unknown_plugin_returns_error() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn design_code_handoff_plugin_exports_orchestration_metadata() {
+    use std::sync::Arc;
+
+    let wasm = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/design-code-handoff/plugin.wasm");
+    if !wasm.exists() {
+        eprintln!(
+            "skipping design-code handoff wasm e2e: {} missing",
+            wasm.display()
+        );
+        return;
+    }
+
+    let rt = Arc::new(WasmPluginRuntime::new().unwrap());
+    let loaded = rt
+        .load(
+            &wasm,
+            "design-code-handoff",
+            Capabilities {
+                log: false,
+                env: true,
+                http: false,
+                role_orchestration: true,
+            },
+            "design-code-handoff",
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        loaded
+            .tool_defs
+            .iter()
+            .any(|tool| tool.name == "handoff_to_coder")
+    );
+    let orchestration = loaded.orchestration.expect("orchestration metadata");
+    assert!(
+        orchestration
+            .roles
+            .iter()
+            .any(|role| role.name == "designer")
+    );
+    assert!(orchestration.roles.iter().any(|role| role.name == "coder"));
+    assert!(
+        orchestration
+            .hooks
+            .iter()
+            .any(|hook| hook.point == grain_plugin_wasm::HookPoint::PrepareNextTurn)
+    );
+
+    let result = rt
+        .call_tool(
+            "design-code-handoff",
+            "handoff_to_coder",
+            r#"{"task":"add tests","design":"touch the relevant module","acceptance":["tests pass"]}"#,
+            tokio::runtime::Handle::current(),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error);
+
+    let context_json = serde_json::json!({
+        "hook": "prepareNextTurn",
+        "toolResults": [{
+            "toolCallId": "tc",
+            "toolName": "handoff_to_coder",
+            "content": [{ "type": "text", "text": result.content_json }],
+            "details": {},
+            "isError": false,
+            "timestamp": 0
+        }]
+    })
+    .to_string();
+    let actions = rt
+        .call_hook(
+            "design-code-handoff",
+            grain_plugin_wasm::HookPoint::PrepareNextTurn,
+            &context_json,
+            tokio::runtime::Handle::current(),
+        )
+        .await
+        .unwrap();
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        grain_plugin_wasm::HostAction::SwitchRole(role) if role == "coder"
+    )));
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        grain_plugin_wasm::HostAction::InjectUserMessage(message)
+            if message.contains("add tests") && message.contains("tests pass")
+    )));
+    assert!(actions.iter().any(|action| matches!(
+        action,
+        grain_plugin_wasm::HostAction::SetUiHeader(header)
+            if header.provider.as_deref() == Some("deepseek")
+                && header.model.as_deref() == Some("deepseek/deepseek-v4-pro")
+    )));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_web_fetch_plugin_does_not_reenter_tokio_runtime() {
     use grain_agent_core::AgentTool;
     use grain_plugin_wasm::WasmTool;
@@ -182,6 +291,7 @@ async fn wasm_web_fetch_plugin_does_not_reenter_tokio_runtime() {
                 log: false,
                 env: false,
                 http: true,
+                role_orchestration: false,
             },
             "web-search",
             HashMap::new(),

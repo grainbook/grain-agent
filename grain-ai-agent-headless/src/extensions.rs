@@ -103,9 +103,7 @@ impl ExtensionRegistry {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use grain_agent_core::{
-        AgentToolError, AgentToolResult, ToolDefinition, ToolUpdateCallback,
-    };
+    use grain_agent_core::{AgentToolError, AgentToolResult, ToolDefinition, ToolUpdateCallback};
     use tokio_util::sync::CancellationToken;
 
     struct NamedNoop {

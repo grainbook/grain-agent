@@ -42,10 +42,9 @@ impl ListTool {
             def: ToolDefinition {
                 name: "list".into(),
                 label: "List".into(),
-                description:
-                    "List the immediate entries of a directory inside the workspace. \
+                description: "List the immediate entries of a directory inside the workspace. \
                      Directories are suffixed with `/` and sorted ahead of files."
-                        .into(),
+                    .into(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -75,8 +74,8 @@ impl AgentTool for ListTool {
         _cancel: CancellationToken,
         _on_update: ToolUpdateCallback,
     ) -> Result<AgentToolResult, AgentToolError> {
-        let args: ListArgs = serde_json::from_value(args)
-            .map_err(|e| AgentToolError::Validation(e.to_string()))?;
+        let args: ListArgs =
+            serde_json::from_value(args).map_err(|e| AgentToolError::Validation(e.to_string()))?;
         let path = self
             .workspace
             .resolve(&args.path)

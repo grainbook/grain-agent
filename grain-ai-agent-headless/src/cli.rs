@@ -13,14 +13,14 @@ use clap::{CommandFactory, Parser, ValueEnum, parser::ValueSource};
 use grain_agent_core::{
     Agent, AgentEvent, AgentMessage, AgentOptions, AssistantMessageEvent, Message,
 };
-use serde::Serialize;
-use std::io::BufRead;
 use grain_agent_harness::context_guard::{ContextGuard, ContextGuardPolicy};
 use grain_llm_genai::{
     GenaiStream, OpenAiCompatPreset, ProviderKind, ProviderProfile, load_profiles,
     resolve_providers_file,
 };
 use grain_llm_models::Registry;
+use serde::Serialize;
+use std::io::BufRead;
 
 use crate::config::{ArgDefaults, ConfigFile};
 use crate::diagnostics::{render_doctor_report, render_source_info_block};
@@ -303,9 +303,7 @@ pub async fn run(args: Args) -> Result<(), CliError> {
         .map(|p| p.model.clone())
         .unwrap_or_else(|| args.model.clone());
     let mut model = registry.to_core_model(&resolved_model_id).ok_or_else(|| {
-        format!(
-            "unknown model id '{resolved_model_id}': not in the embedded models.dev snapshot"
-        )
+        format!("unknown model id '{resolved_model_id}': not in the embedded models.dev snapshot")
     })?;
     if let Some(p) = active_profile
         && matches!(p.kind, ProviderKind::OpenAiCompat)
@@ -361,7 +359,9 @@ pub async fn run(args: Args) -> Result<(), CliError> {
     // --- Agent options + agent --------------------------------------------
     let deepseek = crate::deepseek::DeepSeekPack::new(&model);
     if deepseek.is_enabled() {
-        eprintln!("[info] DeepSeek pack active — reasoning scavenge + subagent.done detection enabled");
+        eprintln!(
+            "[info] DeepSeek pack active — reasoning scavenge + subagent.done detection enabled"
+        );
     }
     let mut opts = AgentOptions::new(model, stream);
     opts.system_prompt = system_prompt;
@@ -386,11 +386,9 @@ pub async fn run(args: Args) -> Result<(), CliError> {
         }
         #[cfg(not(feature = "rig"))]
         {
-            return Err(
-                "--allow-semantic-search requires the `rig` cargo feature; \
+            return Err("--allow-semantic-search requires the `rig` cargo feature; \
                  rebuild with `cargo build --features rig`"
-                    .into(),
-            );
+                .into());
         }
     }
     // --- JS scripted tools (optional) -------------------------------------
@@ -398,9 +396,10 @@ pub async fn run(args: Args) -> Result<(), CliError> {
     // the `scripts-boa` feature, loads every `*.js`, surfaces any
     // tools the scripts registered, and keeps the extension alive for
     // the agent's lifetime (the worker thread shuts down on drop).
-    let scripts_path = args.scripts_dir.clone().unwrap_or_else(|| {
-        workspace.root().join(".grain").join("scripts")
-    });
+    let scripts_path = args
+        .scripts_dir
+        .clone()
+        .unwrap_or_else(|| workspace.root().join(".grain").join("scripts"));
     #[cfg(feature = "scripts-boa")]
     let _scripts_keepalive = {
         match grain_script_boa::BoaExtension::from_scripts_dir(&scripts_path) {
@@ -929,8 +928,8 @@ mod tests {
     #[test]
     fn event_printer_does_not_panic_on_any_variant() {
         use grain_agent_core::{
-            AssistantContent, AssistantMessage, StopReason, TextContent, ToolResultMessage,
-            Usage, UserContent, UserMessage,
+            AssistantContent, AssistantMessage, StopReason, TextContent, ToolResultMessage, Usage,
+            UserContent, UserMessage,
         };
 
         let printer = EventPrinter::new(false);
@@ -954,7 +953,9 @@ mod tests {
         let trm = ToolResultMessage {
             tool_call_id: "c1".into(),
             tool_name: "echo".into(),
-            content: vec![UserContent::Text(TextContent { text: "echoed".into() })],
+            content: vec![UserContent::Text(TextContent {
+                text: "echoed".into(),
+            })],
             details: serde_json::Value::Null,
             is_error: false,
             timestamp: 0,

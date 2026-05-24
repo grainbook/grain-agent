@@ -894,6 +894,12 @@ pub struct AppState {
     /// `None` — meaning the CLI `--model` flag governs and the picker
     /// shows no `✓` marker.
     pub current_provider_idx: Option<usize>,
+    /// Optional UI-only provider label override supplied by a trusted
+    /// host-side plugin action.
+    pub ui_provider_label: Option<String>,
+    /// Optional UI-only model label override supplied by a trusted
+    /// host-side plugin action.
+    pub ui_model_label: Option<String>,
     /// Plugin-contributed slash command overrides. When the user
     /// types `/<trigger>`, this list is consulted **before** the
     /// built-in slash table; a match dispatches into the plugin's
@@ -1200,6 +1206,7 @@ impl AppState {
         providers: Vec<ProviderProfile>,
         initial_provider_idx: Option<usize>,
         cny_rate: Option<f64>,
+        initial_history: Vec<String>,
     ) -> Self {
         assert!(!themes.is_empty(), "AppState needs at least one theme");
         let current_theme_idx = initial_theme_idx.min(themes.len() - 1);
@@ -1239,10 +1246,19 @@ impl AppState {
             current_theme_idx,
             providers,
             current_provider_idx: initial_provider_idx,
+            ui_provider_label: None,
+            ui_model_label: None,
             plugin_slashes: Vec::new(),
             skills: Vec::new(),
             palette_focused: 0,
-            history: Vec::new(),
+            history: {
+                let mut h = initial_history;
+                if h.len() > MAX_HISTORY {
+                    let excess = h.len() - MAX_HISTORY;
+                    h.drain(..excess);
+                }
+                h
+            },
             history_cursor: None,
             history_draft: String::new(),
             should_quit: false,
@@ -2131,6 +2147,8 @@ impl AppState {
                 // happened out-of-band (e.g. CLI) still align.
                 self.current_provider_idx = self.providers.iter().position(|p| p.name == profile);
                 self.model_id = model.clone();
+                self.ui_provider_label = None;
+                self.ui_model_label = None;
                 self.model_cost = cost;
                 self.push(
                     TranscriptKind::Info,
@@ -2140,8 +2158,19 @@ impl AppState {
             }
             TuiEvent::ModelApplied { model, cost } => {
                 self.model_id = model.clone();
+                self.ui_model_label = None;
                 self.model_cost = cost;
                 self.push(TranscriptKind::Info, format!("(model: {model})"));
+                Vec::new()
+            }
+            TuiEvent::UiHeaderUpdated { provider, model } => {
+                if let Some(provider) = provider {
+                    self.ui_provider_label = Some(provider);
+                }
+                if let Some(model) = model {
+                    self.model_id = model.clone();
+                    self.ui_model_label = Some(model);
+                }
                 Vec::new()
             }
             TuiEvent::ModelsListed(list) => {
@@ -4266,6 +4295,7 @@ mod tests {
             Vec::new(),
             None,
             None,
+            Vec::new(),
         )
     }
 
@@ -4283,6 +4313,7 @@ mod tests {
             providers,
             None,
             None,
+            Vec::new(),
         )
     }
 

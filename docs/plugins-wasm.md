@@ -151,6 +151,44 @@ Each host function is gated by the plugin's declared capabilities. Calls into a 
 | `log` | `log(level, msg)` | Emit log lines to stderr with `[level] wasm plugin 'name': msg` |
 | `env` | `env-get(key)` | Read environment variables. Returns `none` when denied. |
 | `http` | `http-get(...)`, `http-post(...)` | HTTP requests. Returns error string when denied. |
+| `role-orchestration` | `orchestration.list-roles/list-hooks/call-hook` | Enable v2 role-slot and lifecycle-hook metadata. Hooks return requested actions; the host validates them before applying anything. |
+
+### v2 Orchestration Interface
+
+The original `grain-plugin` world is unchanged, so existing plugins do not need to be rebuilt. Plugins that need to declare model roles or hooks can target the new world:
+
+```rust
+wit_bindgen::generate!({
+    world: "grain-plugin-v2",
+    path: "wit",
+});
+```
+
+They must also opt in via `plugin.toml`:
+
+```toml
+[wasm]
+module = "plugin.wasm"
+capabilities = ["log", "role-orchestration"]
+```
+
+A v2 plugin still exports the original `plugin` interface (`init` / `list-tools` / `call-tool`) and additionally exports `orchestration`:
+
+```wit
+list-roles: func() -> list<role-def>;
+list-hooks: func() -> list<hook-def>;
+call-hook: func(point: hook-point, context-json: string)
+    -> result<list<host-action>, string>;
+```
+
+`host-action` values express intent only, such as `switch-role("coder")`, `switch-model("deepseek/...")`, `set-active-tools([...])`, `inject-user-message("...")`, or `set-ui-header(...)`. The host must verify the model exists in the registry, the tools are available, the role was declared by that plugin, and the current hook point permits the action before mutating agent/harness state.
+
+The TUI currently supports two UI actions:
+
+- `set-ui-header({ provider, model })`: update the provider/model labels in the top header.
+- `set-ui-status(text)`: update the single-line ephemeral status above the input.
+
+When the host accepts `switch-model` or `switch-role`, it also synchronizes the new model into the TUI header automatically.
 
 ### Security model
 
@@ -225,6 +263,7 @@ The `spawn_blocking` ensures the synchronous wasmtime execution doesn't block th
 - **No streaming**: tool results are returned as a single JSON string, not streamed.
 - **JSON-in/JSON-out**: arguments and results are serialized as JSON strings. No binary protocol.
 - **Fresh state per call**: each invocation creates a new Store and calls `init` again. Plugins cannot persist state between calls.
+- **v2 hooks are not direct authority**: `call-hook` returns `host-action` requests; the host validates and applies them.
 - **wasmtime version**: grain uses wasmtime 40.0.4 (MSRV: rustc 1.89.0). Plugins must be compatible with this version of the Component Model.
 
 ---
