@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::plugin_ui::{SlashCommand, UiCommand};
-use crate::skills::{SkillsError, find_skills};
+use crate::skills::{SkillsError, find_skills, find_skills_in_dirs};
 use grain_agent_harness::Skill;
 
 // ---------------------------------------------------------------------------
@@ -390,6 +390,25 @@ pub fn find_skills_with_plugins(
     plugins: &[Plugin],
 ) -> Result<Vec<Skill>, SkillsError> {
     let mut out = find_skills(primary_dir)?;
+    for plugin in plugins {
+        let Some(d) = plugin.skills_dir() else {
+            continue;
+        };
+        match find_skills(&d) {
+            Ok(extra) => out.extend(extra),
+            Err(e) => {
+                eprintln!("[warn] plugin '{}' skills scan: {e}", plugin.manifest.name);
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub fn find_skills_in_dirs_with_plugins(
+    primary_dirs: &[PathBuf],
+    plugins: &[Plugin],
+) -> Result<Vec<Skill>, SkillsError> {
+    let mut out = find_skills_in_dirs(primary_dirs)?;
     for plugin in plugins {
         let Some(d) = plugin.skills_dir() else {
             continue;

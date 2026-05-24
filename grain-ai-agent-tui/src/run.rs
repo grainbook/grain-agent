@@ -72,11 +72,10 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
     //   1. `--model <id>` CLI flag (explicit user intent)
     //   2. `persisted.last_model` (previous session's choice)
     //   3. Keep the WorkerConfig default (deepseek/deepseek-chat)
-    if cfg.model == "deepseek/deepseek-chat" {
-        if let Some(ref m) = persisted.last_model {
+    if cfg.model == "deepseek/deepseek-chat"
+        && let Some(ref m) = persisted.last_model {
             cfg.model = m.clone();
         }
-    }
 
     let Worker {
         cmd_tx,

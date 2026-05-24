@@ -504,7 +504,7 @@ fn message_text(msg: &AgentMessage) -> String {
                     }
                     AssistantContent::ToolCall(tc) => {
                         use std::fmt::Write;
-                        let _ = write!(text, "[tool_call:{}] {}\n", tc.name, tc.arguments);
+                        let _ = writeln!(text, "[tool_call:{}] {}", tc.name, tc.arguments);
                     }
                     _ => {}
                 }

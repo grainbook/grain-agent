@@ -50,7 +50,10 @@ pub enum Overlay {
         scroll: usize,
     },
     /// Loaded skill names + descriptions + disabled flag.
-    Skills(Vec<(String, String, bool)>),
+    Skills {
+        skills: Vec<(String, String, bool)>,
+        scroll: usize,
+    },
     /// Theme picker — `focused` is the index into [`AppState::themes`].
     /// Up/Down navigate, Enter applies, Esc cancels.
     ThemePicker {
@@ -571,6 +574,11 @@ pub enum Command {
     /// slash command or automatically by the `hot-reload` feature's
     /// file watcher. Worker emits a [`TuiEvent::Info`] on success.
     ReloadRhaiScripts,
+    /// Run the OAuth PKCE login flow for a provider kind
+    /// (`"anthropic"` or `"openai"`). The worker will emit
+    /// `TuiEvent::Info` for progress and a terminal
+    /// `OauthLoginSucceeded` / `OauthLoginFailed`.
+    OauthLogin { provider_kind: String },
     Quit,
 }
 
@@ -675,10 +683,10 @@ pub struct CommandCatalogItem {
 }
 
 /// An item shown in the slash palette — either a built-in slash command
-/// or a dynamically loaded skill from `.claude/skills/`.
+/// or a dynamically loaded skill from a pi-compatible skills location.
 #[derive(Debug, Clone)]
 pub struct PaletteItem {
-    /// Display trigger shown on the left (e.g. `/help`, `skill: rust-helper`).
+    /// Display trigger shown on the left (e.g. `/help`, `/skill:rust-helper`).
     pub trigger: String,
     pub description: String,
     pub action: PaletteAction,
@@ -693,6 +701,14 @@ pub enum PaletteAction {
     /// Inject the skill body content into the input so the user can
     /// review / edit before submitting to the LLM.
     InjectBody(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputSkillToken {
+    pub label: String,
+    pub body: String,
+    pub start: usize,
+    pub end: usize,
 }
 
 /// Built-in slash commands shown in the palette dropdown. Order is the
@@ -729,6 +745,10 @@ pub(crate) const SLASH_CATALOG: &[CommandCatalogItem] = &[
     CommandCatalogItem {
         trigger: "/log",
         description: "show recent request bodies (needs --debug-log)",
+    },
+    CommandCatalogItem {
+        trigger: "/login",
+        description: "/login <anthropic|openai> — OAuth browser login",
     },
     CommandCatalogItem {
         trigger: "/resume",
@@ -789,6 +809,7 @@ pub struct AppState {
     // ── Input ──────────────────────────────────────────────────
     pub input: String,
     pub cursor: usize,
+    pub skill_tokens: Vec<InputSkillToken>,
     pub focus: Focus,
     // ── Overlay & Focus ───────────────────────────────────────
     pub overlay: Option<Overlay>,
@@ -906,7 +927,7 @@ pub struct AppState {
     /// Rhai handler via [`Command::InvokePluginUi`].
     // ── Plugins & Skills ───────────────────────────────────────
     pub plugin_slashes: Vec<grain_ai_agent_headless::BoundPluginSlashCommand>,
-    /// Skills loaded from `.claude/skills/` at startup. Used in the
+    /// Skills loaded from pi-compatible skill locations at startup. Used in the
     /// slash palette for prompt injection alongside built-in commands.
     pub skills: Vec<grain_agent_harness::Skill>,
     /// Highlighted row inside the slash-command palette. Reset to 0
@@ -1215,6 +1236,7 @@ impl AppState {
             transcript: Vec::new(),
             input: String::new(),
             cursor: 0,
+            skill_tokens: Vec::new(),
             focus: Focus::Input,
             overlay: None,
             scroll_offset: 0,
@@ -1410,7 +1432,10 @@ impl AppState {
     /// overlay is open, and the input starts with `/`. Hidden once the
     /// user submits — re-appears when they type `/` again.
     pub fn palette_visible(&self) -> bool {
-        self.focus == Focus::Input && self.overlay.is_none() && self.input.starts_with('/')
+        self.focus == Focus::Input
+            && self.overlay.is_none()
+            && self.skill_tokens.is_empty()
+            && self.input.starts_with('/')
     }
 
     /// Append a submitted prompt to history (dedup immediate repeats,
@@ -1429,6 +1454,108 @@ impl AppState {
         }
     }
 
+    fn set_input_to_skill_token(&mut self, label: String, body: String) {
+        let end = label.len();
+        self.input = label.clone();
+        self.cursor = end;
+        self.skill_tokens = vec![InputSkillToken {
+            label,
+            body,
+            start: 0,
+            end,
+        }];
+    }
+
+    fn expanded_skill_body(body: &str, args: &str) -> String {
+        let args = args.trim();
+        if args.is_empty() {
+            body.to_string()
+        } else {
+            format!("{body}\n\nUser: {args}")
+        }
+    }
+
+    fn expand_input_for_submission(&self) -> String {
+        if self.skill_tokens.is_empty() {
+            return self.input.trim().to_string();
+        }
+
+        let mut tokens = self.skill_tokens.iter().collect::<Vec<_>>();
+        tokens.sort_by_key(|t| t.start);
+
+        let mut out = String::new();
+        let mut last = 0;
+        for token in tokens {
+            if token.start > self.input.len() || token.end > self.input.len() || token.start < last
+            {
+                continue;
+            }
+            out.push_str(&self.input[last..token.start]);
+            let args = &self.input[token.end..];
+            out.push_str(&Self::expanded_skill_body(&token.body, args));
+            last = token.end;
+            break;
+        }
+        if last == 0 {
+            out.push_str(&self.input);
+        }
+        out.trim().to_string()
+    }
+
+    fn clear_input_skill_tokens(&mut self) {
+        self.skill_tokens.clear();
+    }
+
+    fn token_index_for_backspace(&self) -> Option<usize> {
+        self.skill_tokens
+            .iter()
+            .position(|t| t.start < self.cursor && self.cursor <= t.end)
+    }
+
+    fn token_index_for_delete(&self) -> Option<usize> {
+        self.skill_tokens
+            .iter()
+            .position(|t| t.start <= self.cursor && self.cursor < t.end)
+    }
+
+    fn delete_skill_token_at(&mut self, idx: usize) {
+        let Some(token) = self.skill_tokens.get(idx).cloned() else {
+            return;
+        };
+        self.input.replace_range(token.start..token.end, "");
+        self.cursor = token.start;
+        let removed_len = token.end - token.start;
+        self.skill_tokens.remove(idx);
+        for t in &mut self.skill_tokens {
+            if t.start >= token.end {
+                t.start -= removed_len;
+                t.end -= removed_len;
+            }
+        }
+    }
+
+    fn shift_skill_tokens_after_insert(&mut self, at: usize, len: usize) {
+        self.skill_tokens.retain(|t| at <= t.start || at >= t.end);
+        for t in &mut self.skill_tokens {
+            if t.start >= at {
+                t.start += len;
+                t.end += len;
+            }
+        }
+    }
+
+    fn shift_skill_tokens_after_delete(&mut self, start: usize, end: usize) {
+        let removed_len = end.saturating_sub(start);
+        self.skill_tokens
+            .retain(|t| end <= t.start || start >= t.end);
+        for t in &mut self.skill_tokens {
+            if t.start >= end {
+                t.start -= removed_len;
+                t.end -= removed_len;
+            }
+        }
+    }
+
     /// Walk backwards through history. Saves the user's in-progress
     /// draft on the first move so Down can restore it.
     fn history_up(&mut self) {
@@ -1440,6 +1567,7 @@ impl AppState {
                 // Stepping off the live buffer for the first time —
                 // remember what they were typing.
                 self.history_draft = std::mem::take(&mut self.input);
+                self.clear_input_skill_tokens();
                 self.history.len() - 1
             }
             Some(0) => 0,
@@ -1448,6 +1576,7 @@ impl AppState {
         self.history_cursor = Some(new_idx);
         self.input = self.history[new_idx].clone();
         self.cursor = self.input.len();
+        self.clear_input_skill_tokens();
         self.palette_focused = 0;
     }
 
@@ -1460,11 +1589,13 @@ impl AppState {
                 self.history_cursor = Some(i + 1);
                 self.input = self.history[i + 1].clone();
                 self.cursor = self.input.len();
+                self.clear_input_skill_tokens();
             }
             Some(_) => {
                 self.history_cursor = None;
                 self.input = std::mem::take(&mut self.history_draft);
                 self.cursor = self.input.len();
+                self.clear_input_skill_tokens();
             }
         }
         self.palette_focused = 0;
@@ -1502,7 +1633,10 @@ impl AppState {
         // Add skills: when the needle is just `/`, show all skills.
         // When the needle is e.g. `/ru`, also include skills whose
         // name or description contains the text after `/`.
-        let skill_filter = needle.strip_prefix('/').unwrap_or(&needle);
+        let skill_filter = needle
+            .strip_prefix("/skill:")
+            .or_else(|| needle.strip_prefix('/'))
+            .unwrap_or(&needle);
         for skill in &self.skills {
             if skill.disable_model_invocation {
                 continue;
@@ -1515,7 +1649,7 @@ impl AppState {
                     .contains(skill_filter);
             if show {
                 items.push(PaletteItem {
-                    trigger: format!("skill: {}", skill.name),
+                    trigger: format!("/skill:{}", skill.name),
                     description: skill.description.clone(),
                     action: PaletteAction::InjectBody(skill.body.clone()),
                 });
@@ -1788,7 +1922,11 @@ impl AppState {
                 Vec::new()
             }
             TuiEvent::OverlaySkills(skills) => {
-                self.set_overlay(Some(Overlay::Skills(skills)));
+                let scroll = match &self.overlay {
+                    Some(Overlay::Skills { scroll, .. }) => *scroll,
+                    _ => 0,
+                };
+                self.set_overlay(Some(Overlay::Skills { skills, scroll }));
                 Vec::new()
             }
             TuiEvent::SkillsLoaded(skills) => {
@@ -2049,6 +2187,10 @@ impl AppState {
                 // scrollable; otherwise to the transcript.
                 if let Some(Overlay::Log { scroll }) = &mut self.overlay {
                     *scroll = scroll.saturating_sub(amount as usize);
+                } else if let Some(Overlay::Doctor { scroll, .. }) = &mut self.overlay {
+                    *scroll = scroll.saturating_sub(amount as usize);
+                } else if let Some(Overlay::Skills { scroll, .. }) = &mut self.overlay {
+                    *scroll = scroll.saturating_sub(amount as usize);
                 } else {
                     self.scroll_up(amount as usize);
                 }
@@ -2056,6 +2198,10 @@ impl AppState {
             }
             TuiEvent::ScrollDown { amount } => {
                 if let Some(Overlay::Log { scroll }) = &mut self.overlay {
+                    *scroll = scroll.saturating_add(amount as usize);
+                } else if let Some(Overlay::Doctor { scroll, .. }) = &mut self.overlay {
+                    *scroll = scroll.saturating_add(amount as usize);
+                } else if let Some(Overlay::Skills { scroll, .. }) = &mut self.overlay {
                     *scroll = scroll.saturating_add(amount as usize);
                 } else {
                     self.scroll_down(amount as usize);
@@ -2190,6 +2336,22 @@ impl AppState {
                 }
                 Vec::new()
             }
+            TuiEvent::OauthLoginSucceeded { provider } => {
+                // Tokens are now on disk; the next time the user opens
+                // the provider picker the gate will see them as present.
+                self.push(
+                    TranscriptKind::Info,
+                    format!("(OAuth login succeeded for '{provider}' — you can now select this profile via /provider)"),
+                );
+                Vec::new()
+            }
+            TuiEvent::OauthLoginFailed { provider, error } => {
+                self.push(
+                    TranscriptKind::Error,
+                    format!("(OAuth login failed for '{provider}': {error})"),
+                );
+                Vec::new()
+            }
         }
     }
 
@@ -2259,6 +2421,7 @@ impl AppState {
             if !self.input.is_empty() {
                 self.input.clear();
                 self.cursor = 0;
+                self.clear_input_skill_tokens();
                 self.palette_focused = 0;
                 self.history_cursor = None;
                 self.history_draft.clear();
@@ -2285,6 +2448,9 @@ impl AppState {
         // line still work to switch out or quit.
         if matches!(self.overlay, Some(Overlay::Doctor { .. })) {
             return self.on_key_doctor(key);
+        }
+        if matches!(self.overlay, Some(Overlay::Skills { .. })) {
+            return self.on_key_skills(key);
         }
         if matches!(self.overlay, Some(Overlay::Log { .. })) {
             return self.on_key_log(key);
@@ -2340,7 +2506,10 @@ impl AppState {
                 vec![Command::ReturnDoctor]
             }
             KeyCode::F(3) => {
-                self.set_overlay(Some(Overlay::Skills(Vec::new())));
+                self.set_overlay(Some(Overlay::Skills {
+                    skills: Vec::new(),
+                    scroll: 0,
+                }));
                 vec![Command::ReturnSkills]
             }
             KeyCode::F(5) => {
@@ -2392,6 +2561,7 @@ impl AppState {
                         if matches!(item.action, PaletteAction::DispatchSlash) {
                             self.input = item.trigger.to_string();
                             self.cursor = self.input.len();
+                            self.clear_input_skill_tokens();
                         }
                     }
                 }
@@ -2430,6 +2600,11 @@ impl AppState {
         // motion in a single-line input anyway.
         if self.palette_visible() {
             let matches_len = self.palette_matches().len();
+            if matches_len == 0 {
+                self.palette_focused = 0;
+            } else {
+                self.palette_focused = self.palette_focused.min(matches_len - 1);
+            }
             match key.code {
                 KeyCode::Up => {
                     self.palette_focused = self.palette_focused.saturating_sub(1);
@@ -2467,11 +2642,7 @@ impl AppState {
                     if let Some(item) = matches.get(self.palette_focused) {
                         match &item.action {
                             PaletteAction::InjectBody(body) => {
-                                // Inject the skill body into the input
-                                // so the user can review / edit before
-                                // submitting to the LLM. Don't send yet.
-                                self.input = body.clone();
-                                self.cursor = self.input.len();
+                                self.set_input_to_skill_token(item.trigger.clone(), body.clone());
                                 self.palette_focused = 0;
                                 self.history_cursor = None;
                                 self.history_draft.clear();
@@ -2483,30 +2654,41 @@ impl AppState {
                                 // the full command (`/theme`).
                                 self.input = item.trigger.to_string();
                                 self.cursor = self.input.len();
+                                self.clear_input_skill_tokens();
                             }
                         }
                     }
                 }
-                let line = self.input.trim().to_string();
+                let display_line = self.input.trim().to_string();
+                let line = self.expand_input_for_submission();
+                let is_skill_invocation = !self.skill_tokens.is_empty();
                 if line.is_empty() {
                     return Vec::new();
                 }
-                self.push_history(&line);
+                self.push_history(&display_line);
                 self.input.clear();
                 self.cursor = 0;
+                self.clear_input_skill_tokens();
                 self.palette_focused = 0;
                 self.history_cursor = None;
                 self.history_draft.clear();
-                self.push(TranscriptKind::UserPrompt, line.clone());
-                if let Some(stripped) = line.strip_prefix('/') {
+                self.push(TranscriptKind::UserPrompt, display_line.clone());
+                if !is_skill_invocation && let Some(stripped) = display_line.strip_prefix('/') {
                     return self.dispatch_slash(stripped);
                 }
                 vec![Command::SendPrompt(line)]
             }
             KeyCode::Backspace => {
+                if let Some(idx) = self.token_index_for_backspace() {
+                    self.delete_skill_token_at(idx);
+                    self.palette_focused = 0;
+                    self.detach_history();
+                    return Vec::new();
+                }
                 if self.cursor > 0 && !self.input.is_empty() {
                     let new_cursor = prev_char_boundary(&self.input, self.cursor);
                     self.input.replace_range(new_cursor..self.cursor, "");
+                    self.shift_skill_tokens_after_delete(new_cursor, self.cursor);
                     self.cursor = new_cursor;
                     self.palette_focused = 0;
                     self.detach_history();
@@ -2514,9 +2696,16 @@ impl AppState {
                 Vec::new()
             }
             KeyCode::Delete => {
+                if let Some(idx) = self.token_index_for_delete() {
+                    self.delete_skill_token_at(idx);
+                    self.palette_focused = 0;
+                    self.detach_history();
+                    return Vec::new();
+                }
                 if self.cursor < self.input.len() {
                     let end = next_char_boundary(&self.input, self.cursor);
                     self.input.replace_range(self.cursor..end, "");
+                    self.shift_skill_tokens_after_delete(self.cursor, end);
                     self.palette_focused = 0;
                     self.detach_history();
                 }
@@ -2544,6 +2733,7 @@ impl AppState {
             }
             KeyCode::Char(c) => {
                 self.input.insert(self.cursor, c);
+                self.shift_skill_tokens_after_insert(self.cursor, c.len_utf8());
                 self.cursor += c.len_utf8();
                 self.palette_focused = 0;
                 self.detach_history();
@@ -2591,20 +2781,30 @@ impl AppState {
                     return Vec::new();
                 }
                 let chosen = *focused;
-                // Phase 1: API-key profiles apply via the worker;
-                // OAuth profiles surface a clear "not wired" line so
-                // the user knows what's happening.
-                let is_usable = self.providers[chosen].auth.is_usable();
-                if !is_usable {
+                // API-key profiles apply immediately. OAuth profiles
+                // are allowed through only when tokens are already on
+                // disk (i.e. the user has run `/login <provider>`).
+                let profile = &self.providers[chosen];
+                let oauth_provider_name = match &profile.auth {
+                    grain_llm_genai::ProviderAuth::AnthropicOauth => Some("anthropic"),
+                    grain_llm_genai::ProviderAuth::OpenAiOauth => Some("openai"),
+                    _ => None,
+                };
+                let ready = if let Some(pname) = oauth_provider_name {
+                    grain_llm_genai::oauth::load_tokens(pname)
+                        .ok()
+                        .flatten()
+                        .is_some()
+                } else {
+                    profile.auth.is_usable()
+                };
+                if !ready {
                     let name = self.providers[chosen].name.clone();
+                    let hint = oauth_provider_name.unwrap_or("unknown");
                     self.set_overlay(None);
                     self.push(
                         TranscriptKind::Info,
-                        format!(
-                            "(provider '{name}' uses OAuth; login flow not yet wired — \
-                             this lands in a follow-up patch. Pick an api_key profile \
-                             for now.)"
-                        ),
+                        format!("(provider '{name}' is OAuth — run /login {hint} first)"),
                     );
                     return Vec::new();
                 }
@@ -2712,6 +2912,34 @@ impl AppState {
             }
             KeyCode::End => {
                 // Renderer clamps to actual max; use a big sentinel.
+                *scroll = usize::MAX;
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn on_key_skills(&mut self, key: KeyEvent) -> Vec<Command> {
+        let Some(Overlay::Skills { scroll, .. }) = &mut self.overlay else {
+            return Vec::new();
+        };
+        match key.code {
+            KeyCode::Down => {
+                *scroll = scroll.saturating_add(1);
+            }
+            KeyCode::Up => {
+                *scroll = scroll.saturating_sub(1);
+            }
+            KeyCode::PageDown => {
+                *scroll = scroll.saturating_add(10);
+            }
+            KeyCode::PageUp => {
+                *scroll = scroll.saturating_sub(10);
+            }
+            KeyCode::Home => {
+                *scroll = 0;
+            }
+            KeyCode::End => {
                 *scroll = usize::MAX;
             }
             _ => {}
@@ -3241,7 +3469,10 @@ impl AppState {
                 vec![Command::ReturnDoctor]
             }
             "skills" => {
-                self.set_overlay(Some(Overlay::Skills(Vec::new())));
+                self.set_overlay(Some(Overlay::Skills {
+                    skills: Vec::new(),
+                    scroll: 0,
+                }));
                 vec![Command::ReturnSkills]
             }
             "theme" | "themes" => {
@@ -3389,6 +3620,33 @@ impl AppState {
                 vec![Command::RemovePlugin {
                     name: name.into(),
                     delete_files,
+                }]
+            }
+            "login" => {
+                let mut parts = rest.split_whitespace();
+                let _ = parts.next(); // skip "login"
+                let Some(provider_kind) = parts.next() else {
+                    self.push(
+                        TranscriptKind::Info,
+                        "(usage: /login <anthropic|openai>)".into(),
+                    );
+                    return Vec::new();
+                };
+                if provider_kind != "anthropic" && provider_kind != "openai" {
+                    self.push(
+                        TranscriptKind::Info,
+                        format!(
+                            "(unknown OAuth provider '{provider_kind}'; known providers: anthropic, openai)"
+                        ),
+                    );
+                    return Vec::new();
+                }
+                self.push(
+                    TranscriptKind::Info,
+                    format!("(starting OAuth login for '{provider_kind}' — browser will open…)"),
+                );
+                vec![Command::OauthLogin {
+                    provider_kind: provider_kind.into(),
                 }]
             }
             "exit" | "quit" | "q" => {
@@ -4593,6 +4851,37 @@ mod tests {
     }
 
     #[test]
+    fn skills_overlay_scrolls_with_keys() {
+        let mut s = fresh();
+        s.overlay = Some(Overlay::Skills {
+            skills: vec![("rust".into(), "helps with Rust".into(), false)],
+            scroll: 0,
+        });
+        s.on_event(TuiEvent::Key(press(KeyCode::Down)));
+        s.on_event(TuiEvent::Key(press(KeyCode::PageDown)));
+
+        let Some(Overlay::Skills { scroll, .. }) = s.overlay else {
+            panic!("skills overlay should remain open");
+        };
+        assert_eq!(scroll, 11);
+    }
+
+    #[test]
+    fn wheel_scrolls_skills_overlay_when_open() {
+        let mut s = fresh();
+        s.overlay = Some(Overlay::Skills {
+            skills: vec![("rust".into(), "helps with Rust".into(), false)],
+            scroll: 5,
+        });
+        s.on_event(TuiEvent::ScrollUp { amount: 3 });
+
+        let Some(Overlay::Skills { scroll, .. }) = s.overlay else {
+            panic!("skills overlay should remain open");
+        };
+        assert_eq!(scroll, 2);
+    }
+
+    #[test]
     fn doctor_esc_closes_without_quitting() {
         let mut s = fresh();
         open_doctor(&mut s, "anything");
@@ -4675,7 +4964,7 @@ mod tests {
         assert!(
             s.transcript
                 .iter()
-                .any(|l| l.text.contains("OAuth") && l.text.contains("login flow not yet wired")),
+                .any(|l| l.text.contains("OAuth") && l.text.contains("/login")),
             "user is told why nothing happened"
         );
     }
@@ -6565,7 +6854,7 @@ mod tests {
         assert!(matches.len() > SLASH_CATALOG.len());
         let skill_item = matches
             .iter()
-            .find(|m| m.trigger == "skill: test-skill")
+            .find(|m| m.trigger == "/skill:test-skill")
             .expect("skill must appear in palette");
         assert!(
             matches!(skill_item.action, PaletteAction::InjectBody(ref b) if b == "you are a test skill")
@@ -6593,13 +6882,67 @@ mod tests {
             s.on_event(TuiEvent::Key(press(KeyCode::Down)));
         }
 
-        // Now Enter should inject the body and NOT send anything.
+        // Now Enter should stage a compact skill token and NOT send anything.
         let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
         assert!(cmds.is_empty(), "skill injection should not dispatch");
-        assert_eq!(s.input, "## skill prompt body\n\nDo the thing.");
+        assert_eq!(s.input, "/skill:test-skill");
         assert_eq!(s.cursor, s.input.len());
+        assert_eq!(s.skill_tokens.len(), 1);
+        assert_eq!(
+            s.skill_tokens[0].body,
+            "## skill prompt body\n\nDo the thing."
+        );
         // Palette should be gone because input no longer starts with /.
         assert!(!s.palette_visible());
+    }
+
+    #[test]
+    fn backspace_at_end_of_skill_token_deletes_whole_token() {
+        let mut s = fresh();
+        s.set_input_to_skill_token("/skill:test-skill".into(), "body".into());
+
+        s.on_event(TuiEvent::Key(press(KeyCode::Backspace)));
+
+        assert!(s.input.is_empty());
+        assert_eq!(s.cursor, 0);
+        assert!(s.skill_tokens.is_empty());
+    }
+
+    #[test]
+    fn enter_on_skill_token_sends_body_but_shows_token() {
+        let mut s = fresh();
+        s.set_input_to_skill_token(
+            "/skill:test-skill".into(),
+            "---\nname: test-skill\ndescription: test\n---\n\n## body\nDo the thing.".into(),
+        );
+
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+
+        assert_eq!(
+            cmds,
+            vec![Command::SendPrompt(
+                "---\nname: test-skill\ndescription: test\n---\n\n## body\nDo the thing.".into()
+            )]
+        );
+        assert_eq!(s.transcript.last().unwrap().text, "/skill:test-skill");
+        assert_eq!(s.history.last().unwrap(), "/skill:test-skill");
+        assert!(s.skill_tokens.is_empty());
+    }
+
+    #[test]
+    fn skill_token_arguments_append_user_line() {
+        let mut s = fresh();
+        s.set_input_to_skill_token("/skill:test-skill".into(), "body".into());
+        for c in " run it".chars() {
+            s.on_event(TuiEvent::Key(press(KeyCode::Char(c))));
+        }
+
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+
+        assert_eq!(
+            cmds,
+            vec![Command::SendPrompt("body\n\nUser: run it".into())]
+        );
     }
 
     #[test]
@@ -6701,6 +7044,67 @@ mod tests {
         assert!(
             summary.contains("2 lines"),
             "summary includes line count: {summary}"
+        );
+    }
+
+    #[test]
+    fn slash_login_openai_emits_oauth_login_command() {
+        let mut s = fresh();
+        s.input = "/login openai".into();
+        s.cursor = s.input.len();
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                Command::OauthLogin { provider_kind }
+                if provider_kind == "openai"
+            )),
+            "expected OauthLogin {{provider_kind: \"openai\"}} in {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn slash_login_anthropic_emits_oauth_login_command() {
+        let mut s = fresh();
+        s.input = "/login anthropic".into();
+        s.cursor = s.input.len();
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                Command::OauthLogin { provider_kind }
+                if provider_kind == "anthropic"
+            )),
+            "expected OauthLogin {{provider_kind: \"anthropic\"}} in {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn slash_login_unknown_provider_pushes_info_not_command() {
+        let mut s = fresh();
+        s.input = "/login fakecloud".into();
+        s.cursor = s.input.len();
+        let before_len = s.transcript.len();
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        // No OauthLogin command should be emitted for an unknown provider.
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Command::OauthLogin { .. })),
+            "unexpected OauthLogin command for unknown provider"
+        );
+        // An info line explaining the error should be pushed instead.
+        assert!(
+            s.transcript.len() > before_len,
+            "expected an info transcript line for unknown provider"
+        );
+    }
+
+    #[test]
+    fn slash_login_in_catalog() {
+        assert!(
+            SLASH_CATALOG.iter().any(|c| c.trigger == "/login"),
+            "/login must be discoverable via the slash palette"
         );
     }
 }

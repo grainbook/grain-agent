@@ -13,7 +13,6 @@
 //! See [`crate::plugin_spec`] for the underlying spec-file shape +
 //! syncing rules.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::plugin_spec::{PluginSpec, PluginSpecFile, SyncReport, load_plugin_spec, sync_plugins};

@@ -485,7 +485,7 @@ fn md_spans_for_line(
         // (i.e. `state.streaming` flips false, typically on
         // `AgentEvent::MessageEnd`). On the first post-stream
         // frame the cache branch below parses + memoizes it.
-        return None;
+        None
     } else {
         // Ensure cache capacity.
         state.markdown_cache.resize(state.transcript.len());
@@ -697,11 +697,10 @@ fn build_line(
             sub_spans.insert(0, Span::styled(row.text[..prefix_len].to_string(), style));
         }
         // Apply selection highlight across the sub-spans if needed.
-        if let Some(s) = selection {
-            if let Some((lo, hi)) = s.col_range_for_row(idx, row.text.len()) {
+        if let Some(s) = selection
+            && let Some((lo, hi)) = s.col_range_for_row(idx, row.text.len()) {
                 sub_spans = apply_highlight_to_spans(sub_spans, lo, hi, palette);
             }
-        }
         return Line::from(sub_spans);
     }
 
@@ -999,10 +998,21 @@ fn draw_palette(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &P
         })
         .collect();
 
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
-        area,
-    );
+    let [body_area, scrollbar_area] = if total > visible && area.width > 1 {
+        Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(area)
+    } else {
+        [area, Rect { width: 0, ..area }]
+    };
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), body_area);
+
+    if total > visible && scrollbar_area.width > 0 {
+        let mut sb_state = ScrollbarState::new(total)
+            .position(start)
+            .viewport_content_length(visible.min(total));
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight).style(palette.muted);
+        frame.render_stateful_widget(scrollbar, scrollbar_area, &mut sb_state);
+    }
 }
 
 /// Render the single-row ephemeral status slot above the input box.
@@ -1039,7 +1049,19 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &Pal
     for (i, segment) in wrapped.iter().enumerate() {
         if i == 0 {
             let mut spans = prompt.spans.clone();
-            spans.push(Span::styled(segment.clone(), text_style));
+            if state.skill_tokens.len() == 1 && state.skill_tokens[0].start == 0 {
+                let token_end = state.skill_tokens[0].end.min(segment.len());
+                let (token, rest) = segment.split_at(token_end);
+                spans.push(Span::styled(
+                    token.to_string(),
+                    text_style.fg(palette.accent).add_modifier(Modifier::BOLD),
+                ));
+                if !rest.is_empty() {
+                    spans.push(Span::styled(rest.to_string(), text_style));
+                }
+            } else {
+                spans.push(Span::styled(segment.clone(), text_style));
+            }
             lines.push(Line::from(spans));
         } else {
             lines.push(Line::from(Span::styled(segment.clone(), text_style)));
@@ -1442,7 +1464,7 @@ fn draw_overlay(
     let (target_w, target_h) = match overlay {
         Overlay::Help => (62, 22),
         Overlay::Doctor { .. } => (84, 26),
-        Overlay::Skills(_) => (66, 18),
+        Overlay::Skills { .. } => (66, 18),
         Overlay::ThemePicker { .. } => (60, 20),
         Overlay::ProviderPicker { .. } => (72, 18),
         Overlay::ModelPicker { .. } => (72, 22),
@@ -1514,7 +1536,9 @@ fn draw_overlay(
         } => {
             return draw_doctor(frame, inner, report, query, *scroll, palette);
         }
-        Overlay::Skills(skills) => ("skills", OverlayBody::Skills(skills)),
+        Overlay::Skills { skills, scroll } => {
+            return draw_skills(frame, inner, skills, *scroll, palette);
+        }
         Overlay::ThemePicker { focused } => {
             return draw_theme_picker(frame, inner, *focused, state, palette);
         }
@@ -1642,40 +1666,6 @@ fn draw_overlay(
                 chunks[2],
             );
         }
-        OverlayBody::Skills(skills) => {
-            let lines: Vec<Line> = if skills.is_empty() {
-                vec![Line::from(Span::styled(
-                    "(loading or no skills found)",
-                    Style::default().fg(palette.muted),
-                ))]
-            } else {
-                skills
-                    .iter()
-                    .map(|(name, desc, disabled)| {
-                        let mut spans = vec![Span::styled(
-                            format!("• {name}"),
-                            Style::default().fg(palette.fg).add_modifier(Modifier::BOLD),
-                        )];
-                        if *disabled {
-                            spans.push(Span::styled(
-                                " [disabled]",
-                                Style::default().fg(palette.error),
-                            ));
-                        }
-                        spans.push(Span::raw("  — "));
-                        spans.push(Span::styled(
-                            desc.clone(),
-                            Style::default().fg(palette.muted),
-                        ));
-                        Line::from(spans)
-                    })
-                    .collect()
-            };
-            frame.render_widget(
-                Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
-                chunks[2],
-            );
-        }
     }
 
     frame.render_widget(
@@ -1687,9 +1677,121 @@ fn draw_overlay(
     );
 }
 
-enum OverlayBody<'a> {
+fn draw_skills(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    skills: &[(String, String, bool)],
+    scroll: usize,
+    palette: &Palette,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // title
+            Constraint::Length(1), // pad
+            Constraint::Min(1),    // body
+            Constraint::Length(1), // hint
+        ])
+        .split(popup);
+
+    let title_line = Line::from(vec![
+        Span::styled(
+            "skills",
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("({})", skills.len()),
+            Style::default().fg(palette.muted),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(title_line), chunks[0]);
+
+    let lines: Vec<Line> = if skills.is_empty() {
+        vec![Line::from(Span::styled(
+            "(loading or no skills found)",
+            Style::default().fg(palette.muted),
+        ))]
+    } else {
+        skills
+            .iter()
+            .map(|(name, desc, disabled)| {
+                let mut spans = vec![Span::styled(
+                    format!("• {name}"),
+                    Style::default().fg(palette.fg).add_modifier(Modifier::BOLD),
+                )];
+                if *disabled {
+                    spans.push(Span::styled(
+                        " [disabled]",
+                        Style::default().fg(palette.error),
+                    ));
+                }
+                spans.push(Span::raw("  — "));
+                spans.push(Span::styled(
+                    desc.clone(),
+                    Style::default().fg(palette.muted),
+                ));
+                Line::from(spans)
+            })
+            .collect()
+    };
+
+    let body_area = chunks[2];
+    let [skills_body_area, skills_sb_area] = if body_area.width > 1 {
+        Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(body_area)
+    } else {
+        [
+            body_area,
+            Rect {
+                width: 0,
+                ..body_area
+            },
+        ]
+    };
+    let visible = skills_body_area.height as usize;
+    let paragraph = Paragraph::new(Text::from(lines))
+        .style(Style::default().fg(palette.fg))
+        .wrap(Wrap { trim: false });
+    let total_rows = paragraph.line_count(skills_body_area.width).max(1);
+    let max_scroll = total_rows.saturating_sub(visible);
+    let start = scroll.min(max_scroll);
+
+    frame.render_widget(
+        paragraph.scroll((start.min(u16::MAX as usize) as u16, 0)),
+        skills_body_area,
+    );
+
+    if total_rows > visible && skills_sb_area.width > 0 {
+        let mut sb_state = ScrollbarState::new(total_rows)
+            .position(start)
+            .viewport_content_length(visible.min(total_rows));
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight).style(palette.muted);
+        frame.render_stateful_widget(scrollbar, skills_sb_area, &mut sb_state);
+    }
+
+    let hint = if max_scroll > 0 {
+        format!(
+            "showing row {}-{} of {} · ↑↓/PgUp/PgDn scroll · Esc close",
+            start + 1,
+            (start + visible).min(total_rows),
+            total_rows
+        )
+    } else {
+        "↑↓ scroll · Esc close".to_string()
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            hint,
+            Style::default().fg(palette.muted),
+        ))),
+        chunks[3],
+    );
+}
+
+enum OverlayBody {
     Text(String),
-    Skills(&'a [(String, String, bool)]),
 }
 
 fn draw_doctor(
@@ -3013,7 +3115,22 @@ fn provider_picker_row(
         ProviderKind::Gemini => "gemini",
         ProviderKind::OpenAiCompat => "compat",
     };
-    let usable = profile.auth.is_usable();
+    // For OAuth profiles, "usable" means tokens are already on disk so
+    // the genai layer can actually make requests. API-key profiles keep
+    // the original `is_usable()` semantics (env var present = usable).
+    let oauth_provider_name = match &profile.auth {
+        grain_llm_genai::ProviderAuth::AnthropicOauth => Some("anthropic"),
+        grain_llm_genai::ProviderAuth::OpenAiOauth => Some("openai"),
+        _ => None,
+    };
+    let usable = if let Some(pname) = oauth_provider_name {
+        grain_llm_genai::oauth::load_tokens(pname)
+            .ok()
+            .flatten()
+            .is_some()
+    } else {
+        profile.auth.is_usable()
+    };
     let status_tag = if usable {
         match &profile.auth {
             grain_llm_genai::ProviderAuth::ApiKey { env } => {
@@ -3025,6 +3142,8 @@ fn provider_picker_row(
             }
             _ => "[ready]".to_string(),
         }
+    } else if oauth_provider_name.is_some() {
+        "[login required]".to_string()
     } else {
         "[needs login]".to_string()
     };

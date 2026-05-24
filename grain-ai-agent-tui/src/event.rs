@@ -139,4 +139,10 @@ pub enum TuiEvent {
     /// The TUI stashes them in `AppState.plugin_slashes` and consults
     /// them before the built-in slash table.
     SlashCommandsRegistered(Vec<grain_ai_agent_headless::BoundPluginSlashCommand>),
+    /// OAuth login flow completed successfully for `provider`
+    /// (`"anthropic"` | `"openai"`). The picker should refresh so the
+    /// matching profile becomes selectable.
+    OauthLoginSucceeded { provider: String },
+    /// OAuth login flow failed; `error` is a user-facing message.
+    OauthLoginFailed { provider: String, error: String },
 }

@@ -479,7 +479,7 @@ auth  = { kind = "api_key", env = "OPENAI_API_KEY", value = "sk-openai-123" }
         // User-XDG config declares one plugin; workspace config
         // overrides its src. The merged list keeps the workspace
         // entry and adds non-overlapping ones.
-        let dir = tempfile::tempdir().unwrap();
+        let _dir = tempfile::tempdir().unwrap();
         // Layout: we simulate the user-XDG file by writing to a temp
         // home and shimming via `dirs::config_dir()`... easier: just
         // exercise merge_into directly.

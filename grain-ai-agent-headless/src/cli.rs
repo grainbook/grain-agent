@@ -15,7 +15,7 @@ use grain_agent_core::{
 };
 use grain_agent_harness::context_guard::{ContextGuard, ContextGuardPolicy};
 use grain_llm_genai::{
-    GenaiStream, OpenAiCompatPreset, ProviderKind, ProviderProfile, load_profiles,
+    GenaiStream, OpenAiCompatPreset, ProviderAuth, ProviderKind, ProviderProfile, load_profiles,
     resolve_providers_file,
 };
 use grain_llm_models::Registry;
@@ -27,7 +27,7 @@ use crate::diagnostics::{render_doctor_report, render_source_info_block};
 use crate::prompt::coding_agent_system_prompt;
 use crate::runtime::{coding_bash_tools, coding_read_tools, coding_write_tools};
 use crate::session::{SessionWriter, load_messages};
-use crate::skills::{find_skills, resolve_skills_dir};
+use crate::skills::{find_skills_in_dirs, resolve_skill_dirs};
 use crate::slash::{HELP_TEXT, SlashCommand, parse as parse_slash};
 use crate::workspace::Workspace;
 
@@ -92,10 +92,10 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub allow_semantic_search: bool,
 
-    /// Directory to scan for `<name>/SKILL.md` skill files. Defaults to
-    /// `<workspace>/.claude/skills`. Discovered skills are appended to the
-    /// system prompt automatically. Pass an empty / non-existent path to
-    /// disable disk-based skills.
+    /// Directory to scan for skill files. By default pi-compatible locations
+    /// are scanned (`~/.pi/agent/skills`, `~/.agents/skills`,
+    /// `<workspace>/.pi/skills`, `<workspace>/.agents/skills`, and legacy
+    /// `<workspace>/.claude/skills`). Passing this flag uses only that path.
     #[arg(long)]
     pub skills_dir: Option<PathBuf>,
 
@@ -103,6 +103,14 @@ pub struct Args {
     /// LLM endpoints; safe to run before configuring keys.
     #[arg(long, default_value_t = false)]
     pub doctor: bool,
+
+    /// Run the OAuth browser login flow for a provider (`anthropic` or
+    /// `openai`) and exit.  Tokens are stored under the user data dir
+    /// (`~/Library/Application Support/grain/oauth/<provider>.json` on
+    /// macOS, `~/.config/grain/oauth/<provider>.json` on Linux) and are
+    /// auto-refreshed by the runtime on subsequent runs.
+    #[arg(long, value_name = "PROVIDER")]
+    pub login: Option<String>,
 
     /// Register the `web_fetch` tool. Off by default — opt-in because the
     /// agent can then reach arbitrary HTTP(S) endpoints.
@@ -234,6 +242,22 @@ pub async fn run(args: Args) -> Result<(), CliError> {
         return Ok(());
     }
 
+    // --- Login short-circuit ----------------------------------------------
+    // Opens the browser, runs the PKCE flow, persists tokens, then exits.
+    // No LLM calls; safe to invoke before any provider profile is set up.
+    if let Some(provider) = args.login.as_deref() {
+        let config = grain_llm_genai::oauth::config_for_provider(provider).ok_or_else(|| {
+            format!("unknown OAuth provider '{provider}' (known: anthropic, openai)")
+        })?;
+        grain_llm_genai::oauth::start_login_flow(&config, |msg| println!("{msg}")).await?;
+        println!(
+            "Login successful — tokens saved for '{}'. You can now use a \
+             provider profile with `auth = {{ kind = \"{}_oauth\" }}`.",
+            config.provider, config.provider
+        );
+        return Ok(());
+    }
+
     // --- Provider profiles (optional) -------------------------------------
     // Profiles add OpenAI-compat endpoints + env-var overrides to the
     // genai builder. When `--provider <name>` is set, the named
@@ -288,13 +312,20 @@ pub async fn run(args: Args) -> Result<(), CliError> {
         },
     };
     if let Some(p) = active_profile
-        && !p.auth.is_usable()
+        && !profile_has_credentials(p)
     {
-        return Err(format!(
-            "provider '{}' uses OAuth; login flow is not yet wired — Phase 2",
-            p.name
-        )
-        .into());
+        let hint = match &p.auth {
+            ProviderAuth::AnthropicOauth => {
+                "run `grain-headless --login anthropic` first".to_string()
+            }
+            ProviderAuth::OpenAiOauth => {
+                "run `grain-headless --login openai` first".to_string()
+            }
+            ProviderAuth::ApiKey { env } => {
+                format!("env var `{env}` is empty or unset")
+            }
+        };
+        return Err(format!("provider '{}': {hint}", p.name).into());
     }
 
     // Resolve the model id we'll actually drive: profile overrides
@@ -499,7 +530,7 @@ pub async fn run(args: Args) -> Result<(), CliError> {
         let ctx = InteractiveContext {
             workspace: workspace.clone(),
             registry: registry.clone(),
-            skills_dir: resolve_skills_dir(workspace.root(), args.skills_dir.as_deref()),
+            skill_dirs: resolve_skill_dirs(workspace.root(), args.skills_dir.as_deref()),
             session_path: args.session.clone(),
         };
         run_interactive_loop(&agent, &ctx).await?;
@@ -513,7 +544,7 @@ pub async fn run(args: Args) -> Result<(), CliError> {
 struct InteractiveContext {
     workspace: Arc<Workspace>,
     registry: Arc<Registry>,
-    skills_dir: PathBuf,
+    skill_dirs: Vec<PathBuf>,
     /// Active JSONL session file (if any). `/clear` truncates it so the
     /// next load doesn't show stale messages alongside the new transcript.
     session_path: Option<PathBuf>,
@@ -570,9 +601,9 @@ async fn run_interactive_loop(agent: &Agent, ctx: &InteractiveContext) -> Result
                         eprintln!("(transcript cleared)");
                     }
                 }
-                SlashCommand::Skills => match find_skills(&ctx.skills_dir) {
+                SlashCommand::Skills => match find_skills_in_dirs(&ctx.skill_dirs) {
                     Ok(skills) if skills.is_empty() => {
-                        eprintln!("(no skills found in {})", ctx.skills_dir.display());
+                        eprintln!("(no skills found)");
                     }
                     Ok(skills) => {
                         for s in &skills {
@@ -615,6 +646,29 @@ async fn run_interactive_loop(agent: &Agent, ctx: &InteractiveContext) -> Result
     Ok(())
 }
 
+/// Whether a provider profile is ready to drive a request:
+/// - `ApiKey { env }` → the env var must be set + non-empty
+/// - OAuth variants → tokens must already exist on disk for the matching
+///   provider name (`anthropic` / `openai`); the user obtains them via
+///   `--login <provider>`.  We don't try to refresh here — that happens
+///   lazily at request time inside the auth resolver.
+fn profile_has_credentials(p: &ProviderProfile) -> bool {
+    match &p.auth {
+        ProviderAuth::ApiKey { env } => std::env::var(env)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some(),
+        ProviderAuth::AnthropicOauth => grain_llm_genai::oauth::load_tokens("anthropic")
+            .ok()
+            .flatten()
+            .is_some(),
+        ProviderAuth::OpenAiOauth => grain_llm_genai::oauth::load_tokens("openai")
+            .ok()
+            .flatten()
+            .is_some(),
+    }
+}
+
 fn resolve_prompt(args: &Args) -> Result<String, CliError> {
     if let Some(p) = &args.prompt {
         return Ok(p.clone());
@@ -641,11 +695,11 @@ fn resolve_system_prompt(args: &Args) -> Result<String, CliError> {
 /// the system prompt. Errors during discovery degrade to an empty block —
 /// missing or malformed skill files shouldn't break the agent.
 fn resolve_skills_block(args: &Args, workspace_root: &std::path::Path) -> String {
-    let dir = resolve_skills_dir(workspace_root, args.skills_dir.as_deref());
-    let mut skills = match find_skills(&dir) {
+    let dirs = resolve_skill_dirs(workspace_root, args.skills_dir.as_deref());
+    let mut skills = match find_skills_in_dirs(&dirs) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[warn] skills discovery in {}: {e}", dir.display());
+            eprintln!("[warn] skills discovery: {e}");
             return String::new();
         }
     };

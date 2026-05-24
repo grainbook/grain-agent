@@ -244,13 +244,12 @@ pub fn profile_from_entry(entry: ProfileEntry) -> Result<ProviderProfile, String
             //
             // SAFETY: called during single-threaded boot (profile
             // loading), before any other threads read the env.
-            if let Some(val) = &entry.auth.value {
-                if !val.is_empty() {
+            if let Some(val) = &entry.auth.value
+                && !val.is_empty() {
                     unsafe {
                         std::env::set_var(&env, val);
                     }
                 }
-            }
             ProviderAuth::ApiKey { env }
         }
         "anthropic_oauth" => ProviderAuth::AnthropicOauth,

@@ -556,8 +556,7 @@ mod tests {
         let handles = ext.script_handles();
         let err = handles[0]
             .call_fn_json("always_panics", serde_json::Value::Null)
-            .err()
-            .expect("expected error");
+            .expect_err("expected error");
         assert!(err.contains("boom"), "{err}");
     }
 

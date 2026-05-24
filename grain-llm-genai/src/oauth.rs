@@ -16,9 +16,12 @@
 //!
 //! # CLI login flow
 //!
-//! The module provides `start_login_flow(config)` which opens a browser for
-//! the user to authorize, catches the `http://127.0.0.1:<port>` redirect via a
-//! temporary Tokio listener, exchanges the code for tokens, and persists them.
+//! The module provides `start_login_flow(config, on_message)` which opens a
+//! browser for the user to authorize, catches the `http://127.0.0.1:<port>`
+//! redirect via a temporary Tokio listener, exchanges the code for tokens,
+//! and persists them.  The `on_message` callback receives progress strings
+//! (URLs, warnings) so a TUI host can route them to its event stream
+//! instead of letting them corrupt the terminal.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -491,14 +494,21 @@ pub fn get_valid_access_token_sync(profile_name: &str) -> Result<Option<String>,
 /// Start the OAuth PKCE login flow.  Opens the browser for the user to
 /// authorize, starts a temporary `TcpListener` on a random port to catch the
 /// redirect, exchanges the code for tokens, and persists them.
-pub async fn start_login_flow(config: &OauthConfig) -> Result<StoredTokens, OauthError> {
+///
+/// `on_message` is called with progress strings (the authorize URL, a hint
+/// when `open::that` fails).  Pass `|m| println!("{m}")` from a CLI and a
+/// closure that emits to your event channel from a TUI.
+pub async fn start_login_flow(
+    config: &OauthConfig,
+    on_message: impl Fn(&str) + Send + Sync,
+) -> Result<StoredTokens, OauthError> {
     let code_verifier = generate_code_verifier();
     let code_challenge = compute_code_challenge(&code_verifier);
     let state = generate_code_verifier(); // reuse the same random generation
 
     // Bind to a random port.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| OauthError::Io(e))?;
-    let local_addr = listener.local_addr().map_err(|e| OauthError::Io(e))?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(OauthError::Io)?;
+    let local_addr = listener.local_addr().map_err(OauthError::Io)?;
     let port = local_addr.port();
     let redirect_uri = format!("http://127.0.0.1:{port}");
 
@@ -518,23 +528,23 @@ pub async fn start_login_flow(config: &OauthConfig) -> Result<StoredTokens, Oaut
 
     // Open the browser.
     let url_str = auth_url.to_string();
-    println!(
+    on_message(&format!(
         "Opening browser for {}. If it doesn't open, visit:\n  {url_str}",
         config.provider
-    );
+    ));
     if let Err(e) = open::that(&url_str) {
         // Non-fatal — user can copy-paste the URL.
-        eprintln!("Could not open browser: {e}");
-        eprintln!("Please open the URL manually:\n  {url_str}");
+        on_message(&format!("Could not open browser: {e}"));
+        on_message(&format!("Please open the URL manually:\n  {url_str}"));
     }
 
     // Accept exactly one connection from the listener, with a 5-minute
     // timeout.  Use tokio::net::TcpListener for async accept.
     listener
         .set_nonblocking(true)
-        .map_err(|e| OauthError::Io(e))?;
+        .map_err(OauthError::Io)?;
     let tokio_listener =
-        tokio::net::TcpListener::from_std(listener).map_err(|e| OauthError::Io(e))?;
+        tokio::net::TcpListener::from_std(listener).map_err(OauthError::Io)?;
 
     let timeout = tokio::time::sleep(Duration::from_secs(300));
     let accept = tokio_listener.accept();
@@ -554,8 +564,9 @@ pub async fn start_login_flow(config: &OauthConfig) -> Result<StoredTokens, Oaut
         }
     };
 
-    // Parse the incoming HTTP request for the authorization code.
-    let code = parse_callback_request(stream).await?;
+    // Parse the incoming HTTP request for the authorization code.  We pass
+    // `&state` so the callback parser can reject mismatched values (CSRF).
+    let code = parse_callback_request(stream, &state).await?;
 
     // Exchange the authorization code for tokens.
     let tokens = exchange_code(config, &code, &code_verifier, &redirect_uri).await?;
@@ -566,8 +577,16 @@ pub async fn start_login_flow(config: &OauthConfig) -> Result<StoredTokens, Oaut
     Ok(tokens)
 }
 
-/// Parse the OAuth callback from the browser redirect stream.
-async fn parse_callback_request(stream: tokio::net::TcpStream) -> Result<String, OauthError> {
+/// Parse the OAuth callback from the browser redirect stream and verify
+/// the `state` parameter matches `expected_state` (CSRF protection — the
+/// authorization server echoes back whatever opaque value we sent in the
+/// authorize URL; if a third party tried to trick the browser into
+/// hitting our redirect with a code of their choosing, their `state`
+/// wouldn't match).
+async fn parse_callback_request(
+    stream: tokio::net::TcpStream,
+    expected_state: &str,
+) -> Result<String, OauthError> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (reader_half, mut writer) = stream.into_split();
@@ -623,9 +642,19 @@ async fn parse_callback_request(stream: tokio::net::TcpStream) -> Result<String,
         .cloned()
         .ok_or_else(|| OauthError::CallbackParse("no 'code' parameter in redirect".to_string()))?;
 
-    let _returned_state = params.get("state").cloned();
-    // Note: we'd verify `returned_state` matches here, but we don't have the
-    // original handy.  In production you'd stash the state and compare.
+    match params.get("state") {
+        Some(s) if s == expected_state => {}
+        Some(_) => {
+            return Err(OauthError::AuthServer(
+                "state mismatch — possible CSRF, refusing to exchange code".to_string(),
+            ));
+        }
+        None => {
+            return Err(OauthError::AuthServer(
+                "authorization server did not echo state — refusing to exchange code".to_string(),
+            ));
+        }
+    }
 
     Ok(code)
 }

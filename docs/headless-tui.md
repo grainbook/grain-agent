@@ -81,7 +81,7 @@ Esc closes the picker. The session list is sorted newest-first; files that fail 
 
 ### `/` skill palette
 
-Typing `/` also shows **loaded skills** from `.claude/skills/` alongside built-in slash commands. Each skill appears as `skill: <name>` with its description.
+Typing `/` also shows **loaded skills** from pi-compatible skill locations alongside built-in slash commands. Each skill appears as `/skill:<name>` with its description.
 
 - **Enter on a skill** → injects the skill's full body content into the input for review before submitting to the LLM. This replaces the current input entirely.
 - **Enter on a command** → dispatches the command (existing behavior).
@@ -152,7 +152,7 @@ Boot with a specific profile via `--provider <name>` and override the file path 
 | `--allow-semantic-search` | off | Requires `--features rig` on headless |
 | `--session <FILE>` | none | JSONL session: prior messages load on start, new ones append. Overrides `--sessions-dir` auto-create. |
 | `--sessions-dir <DIR>` | `<workspace>/.grain/sessions` | When `--session` isn't passed, auto-creates a fresh `<uuidv7>.jsonl` here so every run is recoverable via `/resume`. |
-| `--skills-dir <DIR>` | `<workspace>/.claude/skills` | Where to scan for `<name>/SKILL.md` |
+| `--skills-dir <DIR>` | pi-compatible defaults | Override skill discovery with one explicit file/directory path |
 | `--telemetry-file <FILE>` | none | One JSON-serialized `AgentEvent` per line |
 | `--tick-ms <MS>` | `100` | Render tick interval |
 | `--theme <NAME>` | `default` | Initial theme |

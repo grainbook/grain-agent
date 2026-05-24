@@ -237,15 +237,14 @@ impl GenaiStreamBuilder {
                     return Ok(Some(AuthData::from_single(v)));
                 }
                 // 3. OAuth profile for this adapter kind?
-                if let Some((profile_name, config)) = auth_oauth.get(adapter_name) {
-                    if let Some(token) =
+                if let Some((profile_name, config)) = auth_oauth.get(adapter_name)
+                    && let Some(token) =
                         get_valid_access_token_with_config_sync(config, profile_name)
                             .ok()
                             .flatten()
                     {
                         return Ok(Some(AuthData::from_single(token)));
                     }
-                }
                 // 4. Fall through to genai's default lookup by returning None.
                 Ok(None)
             };

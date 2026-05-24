@@ -79,8 +79,8 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub new_session: bool,
 
-    /// Directory scanned for `<name>/SKILL.md` skill files. Defaults to
-    /// `<workspace>/.claude/skills`.
+    /// Directory scanned for skill files. By default pi-compatible locations
+    /// are scanned; passing this flag uses only that path.
     #[arg(long)]
     pub skills_dir: Option<PathBuf>,
 

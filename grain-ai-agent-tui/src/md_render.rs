@@ -107,19 +107,17 @@ impl MarkdownCache {
         palette: &Palette,
     ) -> Vec<Span<'static>> {
         // Never cache the streaming tail — it changes each frame.
-        if !is_streaming {
-            if let Some(Some(cached)) = self.entries.get(idx) {
+        if !is_streaming
+            && let Some(Some(cached)) = self.entries.get(idx) {
                 return cached.iter().map(|s| s.to_ratatui_span(palette)).collect();
             }
-        }
         let spans = render_md_to_spans(line);
         let rat_spans: Vec<Span<'static>> =
             spans.iter().map(|s| s.to_ratatui_span(palette)).collect();
-        if !is_streaming {
-            if idx < self.entries.len() {
+        if !is_streaming
+            && idx < self.entries.len() {
                 self.entries[idx] = Some(Arc::from(spans.into_boxed_slice()));
             }
-        }
         rat_spans
     }
 

@@ -87,7 +87,7 @@ Esc 关闭。会话列表按最新优先排序；无法解析的文件以 `[warn
 
 ### `/` skill 面板
 
-输入 `/` 后，面板中除了内置 slash 命令，还会显示 `.claude/skills/` 中加载的 skill。每个 skill 以 `skill: <名称>` 展示，附带描述。
+输入 `/` 后，面板中除了内置 slash 命令，还会显示 pi 兼容 skill 目录中加载的 skill。每个 skill 以 `/skill:<名称>` 展示，附带描述。
 
 - **在 skill 上按 Enter** → 将 skill 的完整正文注入输入框，供审阅后提交给 LLM。这会替换当前输入内容。
 - **在命令上按 Enter** → 派发命令（原有行为）。
@@ -150,7 +150,7 @@ surface = "#1a0033"
 | `--allow-semantic-search` | off | 需要 headless `--features rig` |
 | `--session <FILE>` | 无 | JSONL 会话恢复。会覆盖 `--sessions-dir` 自动创建 |
 | `--sessions-dir <DIR>` | `<workspace>/.grain/sessions` | 不传 `--session` 时在此目录自动创建 `<uuidv7>.jsonl`，确保每次运行都可通过 `/resume` 恢复 |
-| `--skills-dir <DIR>` | `<workspace>/.claude/skills` | 技能扫描目录 |
+| `--skills-dir <DIR>` | pi 兼容默认目录 | 用单个显式文件/目录覆盖默认 skill 发现 |
 | `--telemetry-file <FILE>` | 无 | 一行一个 `AgentEvent` JSON |
 | `--tick-ms <MS>` | `100` | 渲染 tick 间隔 |
 | `--theme <NAME>` | `default` | 启动主题 |

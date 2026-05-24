@@ -82,8 +82,9 @@ pub use plugin_ui::{
 pub use plugins::{
     Plugin, PluginInfo, PluginManifest, PromptFragment, WasmConfig,
     compose_system_prompt_with_plugins, default_plugins_dir, discover_plugins,
-    discover_plugins_with_spec, find_skills_with_plugins, parse_manifest, plugin_info,
-    plugin_script_dirs, read_plugin_prompt_fragments, summarize_plugin,
+    discover_plugins_with_spec, find_skills_in_dirs_with_plugins, find_skills_with_plugins,
+    parse_manifest, plugin_info, plugin_script_dirs, read_plugin_prompt_fragments,
+    summarize_plugin,
 };
 pub use prompt::{
     DEFAULT_CODING_AGENT_SYSTEM_PROMPT, FULL_CODING_AGENT_SYSTEM_PROMPT,
@@ -97,7 +98,10 @@ pub use session::{SessionError, SessionWriter, is_session_locked, load_messages}
 pub use session_discovery::{
     SessionMeta, TITLE_PREVIEW_MAX, list_sessions, new_session_path, parse_session_meta,
 };
-pub use skills::{DEFAULT_SKILLS_DIR, SkillsError, find_skills, maybe_load_agents_md, resolve_skills_dir};
+pub use skills::{
+    DEFAULT_SKILLS_DIR, SkillsError, find_skills, find_skills_in_dirs, maybe_load_agents_md,
+    resolve_skill_dirs, resolve_skills_dir,
+};
 pub use slash::{HELP_TEXT, SlashCommand, parse as parse_slash_command};
 pub use telemetry::{TelemetryError, TelemetrySink};
 pub use tools::{

@@ -28,8 +28,8 @@ use grain_agent_harness::{
 };
 use grain_ai_agent_headless::{
     SessionWriter, TelemetrySink, Workspace, coding_agent_system_prompt, coding_bash_tools,
-    coding_read_tools, coding_web_tools, coding_write_tools, find_skills, load_messages,
-    render_doctor_report, resolve_skills_dir,
+    coding_read_tools, coding_web_tools, coding_write_tools, find_skills_in_dirs, load_messages,
+    render_doctor_report, resolve_skill_dirs,
 };
 use grain_llm_genai::GenaiStream;
 use grain_llm_models::Registry;
@@ -162,7 +162,7 @@ pub enum WorkerInitError {
     UnknownModel(String),
     #[error("provider profile '{0}': model '{1}' not in registry")]
     ProfileUnknownModel(String, String),
-    #[error("provider profile '{0}': OAuth login is not yet implemented")]
+    #[error("provider profile '{0}': OAuth tokens not found — run /login <provider> first")]
     OauthNotWired(String),
     #[error("read system prompt {path}: {source}")]
     SystemPrompt {
@@ -364,7 +364,23 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     let (model, active_model_id, active_profile_name) = if let Some(idx) = cfg.initial_profile_idx
         && let Some(profile) = cfg.profiles.get(idx)
     {
-        if !profile.auth.is_usable() {
+        // For OAuth profiles, check whether tokens already exist on
+        // disk. If they do, the genai layer will use them; if not,
+        // surface a clear message directing the user to `/login`.
+        let oauth_provider_name = match &profile.auth {
+            ProviderAuth::AnthropicOauth => Some("anthropic"),
+            ProviderAuth::OpenAiOauth => Some("openai"),
+            _ => None,
+        };
+        let boot_ready = if let Some(pname) = oauth_provider_name {
+            grain_llm_genai::oauth::load_tokens(pname)
+                .ok()
+                .flatten()
+                .is_some()
+        } else {
+            profile.auth.is_usable()
+        };
+        if !boot_ready {
             return Err(WorkerInitError::OauthNotWired(profile.name.clone()));
         }
         // Registry-miss for a profile-driven model is **not**
@@ -473,11 +489,11 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     };
     let base_prompt =
         grain_ai_agent_headless::compose_system_prompt_with_plugins(&raw_base, &discovered_plugins);
-    let skills_dir = resolve_skills_dir(workspace.root(), cfg.skills_dir.as_deref());
+    let skill_dirs = resolve_skill_dirs(workspace.root(), cfg.skills_dir.as_deref());
     // Phase A/B: `find_skills_with_plugins` walks the primary skills
     // dir, then folds in each plugin's `<plugin>/skills/`.
     let mut skills =
-        grain_ai_agent_headless::find_skills_with_plugins(&skills_dir, &discovered_plugins)
+        grain_ai_agent_headless::find_skills_in_dirs_with_plugins(&skill_dirs, &discovered_plugins)
             .unwrap_or_default();
     // AGENTS.md standard — auto-discovered skill when present in workspace root.
     if let Some(s) = grain_ai_agent_headless::maybe_load_agents_md(workspace.root()) {
@@ -787,12 +803,11 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                         let mut entries: Vec<_> = spec.auth.iter().collect();
                         entries.sort_by_key(|e| e.priority);
                         for entry in &entries {
-                            if entry.kind == "api_key" {
-                                if let Some(ref val) = entry.value {
+                            if entry.kind == "api_key"
+                                && let Some(ref val) = entry.value {
                                     env_map.insert(entry.env.clone(), val.clone());
                                 }
                                 // If no value: leave it for OS env fallback.
-                            }
                         }
                     }
                     match runtime
@@ -1135,7 +1150,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     let profiles = cfg.profiles.clone();
     let workspace_for_task = workspace.clone();
     let registry_for_task = registry.clone();
-    let skills_dir_for_task = skills_dir.clone();
+    let skill_dirs_for_task = skill_dirs.clone();
     let sessions_dir_for_task = sessions_dir.clone();
     let plugins_dir_for_task = plugins_dir.clone();
     let evt_tx_for_task = evt_tx.clone();
@@ -1310,7 +1325,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             workspace_for_task,
             registry_for_task,
             active_model_handle,
-            skills_dir_for_task,
+            skill_dirs_for_task,
             sessions_dir_for_task,
             plugins_dir_for_task,
             profiles,
@@ -1446,7 +1461,7 @@ async fn run_command_loop(
     workspace: Arc<Workspace>,
     registry: Arc<Registry>,
     active_model_handle: ActiveModelHandle,
-    skills_dir: PathBuf,
+    skill_dirs: Vec<PathBuf>,
     sessions_dir: PathBuf,
     plugins_dir: PathBuf,
     profiles: Vec<ProviderProfile>,
@@ -1543,7 +1558,7 @@ async fn run_command_loop(
                 let text = render_doctor_report(&workspace, &registry);
                 let _ = evt_tx.send(TuiEvent::OverlayDoctor(text));
             }
-            Command::ReturnSkills => match find_skills(&skills_dir) {
+            Command::ReturnSkills => match find_skills_in_dirs(&skill_dirs) {
                 Ok(skills) => {
                     let payload: Vec<(String, String, bool)> = skills
                         .into_iter()
@@ -1571,7 +1586,7 @@ async fn run_command_loop(
                     harness.wait_for_idle().await;
                     // Drop the writer first — it holds an open fd that
                     // would otherwise keep the inode alive on Unix.
-                    session_writer = None;
+                    drop(session_writer.take());
                     match std::fs::remove_file(&path) {
                         Ok(()) => {
                             let _ = evt_tx.send(TuiEvent::Info(format!(
@@ -2019,9 +2034,25 @@ async fn run_command_loop(
                     )));
                     continue;
                 };
-                if !profile.auth.is_usable() {
+                // For OAuth profiles, allow through only when tokens
+                // are already on disk — i.e. the user ran `/login`.
+                let oauth_provider_name = match &profile.auth {
+                    ProviderAuth::AnthropicOauth => Some("anthropic"),
+                    ProviderAuth::OpenAiOauth => Some("openai"),
+                    _ => None,
+                };
+                let ready = if let Some(pname) = oauth_provider_name {
+                    grain_llm_genai::oauth::load_tokens(pname)
+                        .ok()
+                        .flatten()
+                        .is_some()
+                } else {
+                    profile.auth.is_usable()
+                };
+                if !ready {
+                    let hint = oauth_provider_name.unwrap_or("unknown");
                     let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
-                        "provider '{}' uses OAuth; login flow not yet wired",
+                        "provider '{}' is OAuth — run /login {hint} first",
                         profile.name
                     )));
                     continue;
@@ -2121,6 +2152,41 @@ async fn run_command_loop(
                     model: model_id,
                     cost,
                 });
+            }
+            Command::OauthLogin { provider_kind } => {
+                let Some(config) = grain_llm_genai::oauth::config_for_provider(&provider_kind)
+                else {
+                    let _ = evt_tx.send(TuiEvent::OauthLoginFailed {
+                        provider: provider_kind.clone(),
+                        error: format!(
+                            "unknown OAuth provider '{provider_kind}' (known: anthropic, openai)"
+                        ),
+                    });
+                    continue;
+                };
+                // Clone what we need before moving config into the async block.
+                let provider_name = config.provider.clone();
+                let tx_progress = evt_tx.clone();
+                let tx_done = evt_tx.clone();
+                // `start_login_flow` needs `on_message: impl Fn(&str) + Send + Sync`.
+                // An `UnboundedSender` is `Clone + Send + Sync`, so the closure is fine.
+                let on_message = move |msg: &str| {
+                    let _ = tx_progress
+                        .send(TuiEvent::Info(format!("[login:{provider_name}] {msg}")));
+                };
+                match grain_llm_genai::oauth::start_login_flow(&config, on_message).await {
+                    Ok(_tokens) => {
+                        let _ = tx_done.send(TuiEvent::OauthLoginSucceeded {
+                            provider: config.provider.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx_done.send(TuiEvent::OauthLoginFailed {
+                            provider: config.provider.clone(),
+                            error: format!("{e}"),
+                        });
+                    }
+                }
             }
             Command::Quit => {
                 // Make sure any in-flight turn gets cancelled before the

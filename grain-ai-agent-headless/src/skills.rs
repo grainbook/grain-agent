@@ -1,5 +1,5 @@
-//! Disk-based skills loader. Reads `<workspace>/.claude/skills/<name>/SKILL.md`
-//! files, parses their YAML-like frontmatter, and returns
+//! Disk-based skills loader. Reads pi / Agent Skills compatible skill files,
+//! parses their YAML-like frontmatter, and returns
 //! [`grain_agent_harness::Skill`] values ready to feed into
 //! [`grain_agent_harness::format_skills_for_system_prompt`].
 //!
@@ -20,16 +20,17 @@
 //!
 //! - Missing frontmatter: the file is skipped (with a stderr warning).
 //! - Missing `name`: fall back to the parent directory name.
-//! - Missing `description`: defaults to an empty string.
+//! - Missing `description`: skip the skill with a warning.
 //! - `disable_model_invocation` defaults to `false`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use grain_agent_harness::Skill;
 use thiserror::Error;
 
-/// Default directory (relative to workspace root) to search for skills.
-pub const DEFAULT_SKILLS_DIR: &str = ".claude/skills";
+/// Primary pi-native project directory (relative to workspace root).
+pub const DEFAULT_SKILLS_DIR: &str = ".pi/skills";
 
 #[derive(Debug, Error)]
 pub enum SkillsError {
@@ -41,12 +42,50 @@ pub enum SkillsError {
     },
 }
 
-/// Find all skills under `dir`. Each subdirectory whose top-level file is
-/// `SKILL.md` (with a parseable frontmatter) becomes one [`Skill`].
+/// Find all skills under `dir`.
+///
+/// Discovery mirrors pi's Agent Skills rules for an explicit directory:
+/// - if a directory contains `SKILL.md`, it is a skill root and recursion
+///   stops there;
+/// - direct root `.md` files are loaded as individual skills;
+/// - subdirectories are searched recursively for `SKILL.md`.
 ///
 /// Missing directory is a no-op (returns `Ok(vec![])`) — callers don't need
-/// to pre-check, and the absence of `.claude/skills` is the common case.
+/// to pre-check, and the absence of skills is the common case.
 pub fn find_skills(dir: &Path) -> Result<Vec<Skill>, SkillsError> {
+    find_skills_from_dir_internal(dir, true)
+}
+
+pub fn find_skills_in_dirs(dirs: &[PathBuf]) -> Result<Vec<Skill>, SkillsError> {
+    let mut out = Vec::new();
+    let mut seen_names = HashSet::new();
+    let mut seen_paths = HashSet::new();
+    for dir in dirs {
+        let skills = find_skills(dir)?;
+        for skill in skills {
+            let path_key = std::fs::canonicalize(&skill.file_path)
+                .unwrap_or_else(|_| PathBuf::from(&skill.file_path));
+            if !seen_paths.insert(path_key) {
+                continue;
+            }
+            if !seen_names.insert(skill.name.clone()) {
+                eprintln!(
+                    "[warn] grain-headless: skill name collision for {}; keeping first",
+                    skill.name
+                );
+                continue;
+            }
+            out.push(skill);
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+fn find_skills_from_dir_internal(
+    dir: &Path,
+    include_root_files: bool,
+) -> Result<Vec<Skill>, SkillsError> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -55,41 +94,47 @@ pub fn find_skills(dir: &Path) -> Result<Vec<Skill>, SkillsError> {
         source,
     })?;
 
+    let mut entries = entries.flatten().collect::<Vec<_>>();
+    entries.sort_by_key(|e| e.file_name());
+
+    let skill_md = dir.join("SKILL.md");
+    if is_regular_skill_file(&skill_md) {
+        return match read_skill(&skill_md, dir)? {
+            Some(skill) => Ok(vec![skill]),
+            None => Ok(vec![]),
+        };
+    }
+
     let mut skills: Vec<Skill> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for entry in entries {
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
-        // Refuse symlinked skill directories (and symlinked SKILL.md inside
-        // them): a `<dir>/.claude/skills/evil` pointing at `/etc/` lets a
-        // malicious workspace's skill metadata get injected into the system
-        // prompt with a path the LLM might then try to read. `file_type()`
-        // on Unix returns `is_symlink()` (not `is_dir()`) for symlinks-to-
-        // dirs, so this also covers the cross-platform fallback case.
-        if !file_type.is_dir() || file_type.is_symlink() {
+        if file_type.is_symlink() {
             continue;
         }
-        let skill_md = path.join("SKILL.md");
-        match std::fs::symlink_metadata(&skill_md) {
-            Ok(m) if m.file_type().is_symlink() => {
-                eprintln!(
-                    "[warn] grain-headless: skipping symlinked skill file {}",
-                    skill_md.display()
-                );
+
+        let path = entry.path();
+        if file_type.is_dir() {
+            if entry.file_name().to_string_lossy().starts_with('.')
+                || entry.file_name() == "node_modules"
+            {
                 continue;
             }
-            Ok(m) if !m.is_file() => continue,
-            Err(_) => continue,
-            Ok(_) => {}
-        }
-        match read_skill(&skill_md, &path) {
-            Ok(skill) => skills.push(skill),
-            Err(e) => {
-                eprintln!(
-                    "[warn] grain-headless: skipping {}: {e}",
-                    skill_md.display()
-                );
+            match find_skills_from_dir_internal(&path, false) {
+                Ok(extra) => skills.extend(extra),
+                Err(e) => eprintln!("[warn] grain-headless: skills scan {}: {e}", path.display()),
+            }
+        } else if include_root_files
+            && file_type.is_file()
+            && path.extension().and_then(|e| e.to_str()) == Some("md")
+        {
+            match read_skill(&path, dir) {
+                Ok(Some(skill)) => skills.push(skill),
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("[warn] grain-headless: skipping {}: {e}", path.display());
+                }
             }
         }
     }
@@ -98,7 +143,21 @@ pub fn find_skills(dir: &Path) -> Result<Vec<Skill>, SkillsError> {
     Ok(skills)
 }
 
-fn read_skill(skill_md: &Path, dir: &Path) -> Result<Skill, SkillsError> {
+fn is_regular_skill_file(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            eprintln!(
+                "[warn] grain-headless: skipping symlinked skill file {}",
+                path.display()
+            );
+            false
+        }
+        Ok(m) => m.is_file(),
+        Err(_) => false,
+    }
+}
+
+fn read_skill(skill_md: &Path, dir: &Path) -> Result<Option<Skill>, SkillsError> {
     let content = std::fs::read_to_string(skill_md).map_err(|source| SkillsError::Io {
         path: skill_md.display().to_string(),
         source,
@@ -106,7 +165,7 @@ fn read_skill(skill_md: &Path, dir: &Path) -> Result<Skill, SkillsError> {
     Ok(parse_skill(&content, skill_md, dir))
 }
 
-fn parse_skill(content: &str, skill_md: &Path, dir: &Path) -> Skill {
+fn parse_skill(content: &str, skill_md: &Path, dir: &Path) -> Option<Skill> {
     let mut name = String::new();
     let mut description = String::new();
     let mut disable_model_invocation = false;
@@ -125,7 +184,9 @@ fn parse_skill(content: &str, skill_md: &Path, dir: &Path) -> Skill {
             match key {
                 "name" => name = value,
                 "description" => description = value,
-                "disable_model_invocation" | "disableModelInvocation" => {
+                "disable-model-invocation"
+                | "disable_model_invocation"
+                | "disableModelInvocation" => {
                     disable_model_invocation =
                         matches!(value.to_ascii_lowercase().as_str(), "true" | "yes" | "1");
                 }
@@ -142,14 +203,60 @@ fn parse_skill(content: &str, skill_md: &Path, dir: &Path) -> Skill {
             .to_string();
     }
 
-    let body = extract_body(content);
+    if description.trim().is_empty() {
+        eprintln!(
+            "[warn] grain-headless: skipping {}: description is required",
+            skill_md.display()
+        );
+        return None;
+    }
 
-    Skill {
+    validate_skill_name(&name, skill_md);
+    if description.len() > 1024 {
+        eprintln!(
+            "[warn] grain-headless: {} description exceeds 1024 characters ({})",
+            skill_md.display(),
+            description.len()
+        );
+    }
+
+    Some(Skill {
         name,
         description,
         file_path: skill_md.to_path_buf().to_string_lossy().into_owned(),
         disable_model_invocation,
-        body,
+        body: content.to_string(),
+    })
+}
+
+fn validate_skill_name(name: &str, skill_md: &Path) {
+    if name.len() > 64 {
+        eprintln!(
+            "[warn] grain-headless: {} name exceeds 64 characters ({})",
+            skill_md.display(),
+            name.len()
+        );
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        eprintln!(
+            "[warn] grain-headless: {} name contains invalid characters",
+            skill_md.display()
+        );
+    }
+    if name.starts_with('-') || name.ends_with('-') {
+        eprintln!(
+            "[warn] grain-headless: {} name must not start or end with hyphen",
+            skill_md.display()
+        );
+    }
+    if name.contains("--") {
+        eprintln!(
+            "[warn] grain-headless: {} name must not contain consecutive hyphens",
+            skill_md.display()
+        );
     }
 }
 
@@ -180,38 +287,6 @@ fn unquote(s: &str) -> String {
     } else {
         s.to_string()
     }
-}
-
-/// Extract the body content after the frontmatter `---` closing fence.
-/// Returns everything after the second `---` (i.e. the skill instructions
-/// that get read by the LLM on demand).
-fn extract_body(content: &str) -> String {
-    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
-    // Must start with `---` to have frontmatter.
-    let after_open = match content
-        .strip_prefix("---")
-        .and_then(|s| s.strip_prefix('\n').or_else(|| s.strip_prefix("\r\n")))
-    {
-        Some(s) => s,
-        None => return content.to_string(),
-    };
-    // Find the closing `---`.
-    let body_start = match after_open
-        .find("\n---")
-        .or_else(|| after_open.find("\r\n---"))
-    {
-        Some(pos) => {
-            // Skip past the `\n---` marker.
-            let rest = &after_open[pos..];
-            rest.strip_prefix("\n---")
-                .or_else(|| rest.strip_prefix("\r\n---"))
-                .unwrap_or(rest)
-        }
-        None => return String::new(),
-    };
-    // Trim leading whitespace / newlines from the body but preserve
-    // trailing content as-is.
-    body_start.trim_start().to_string()
 }
 
 /// Synthesize a skill entry for `<workspace>/AGENTS.md` when the file
@@ -247,14 +322,44 @@ pub fn maybe_load_agents_md(workspace_root: &Path) -> Option<Skill> {
     }
 }
 
-/// Resolve the skills directory: if `override_path` is set, use it as-is
-/// (relative to cwd); otherwise look under `<workspace>/.claude/skills`.
+/// Resolve the primary skills directory for legacy call sites.
 pub fn resolve_skills_dir(workspace_root: &Path, override_path: Option<&Path>) -> PathBuf {
     if let Some(p) = override_path {
         p.to_path_buf()
     } else {
         workspace_root.join(DEFAULT_SKILLS_DIR)
     }
+}
+
+/// Resolve pi-compatible skill locations. An explicit override disables
+/// default discovery and is treated as a single additive path.
+pub fn resolve_skill_dirs(workspace_root: &Path, override_path: Option<&Path>) -> Vec<PathBuf> {
+    if let Some(p) = override_path {
+        return vec![p.to_path_buf()];
+    }
+
+    let mut dirs = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".pi/agent/skills"));
+        dirs.push(home.join(".agents/skills"));
+    }
+    dirs.push(workspace_root.join(".pi/skills"));
+    dirs.push(workspace_root.join(".agents/skills"));
+    // Backward-compatible with this repo's earlier Claude-style default.
+    dirs.push(workspace_root.join(".claude/skills"));
+
+    let mut current = Some(workspace_root);
+    while let Some(dir) = current {
+        let candidate = dir.join(".agents/skills");
+        if !dirs.iter().any(|d| d == &candidate) {
+            dirs.push(candidate);
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
+        current = dir.parent();
+    }
+    dirs
 }
 
 #[cfg(test)]
@@ -288,6 +393,7 @@ mod tests {
         assert_eq!(skills[0].description, "helps with Rust");
         assert!(!skills[0].disable_model_invocation);
         assert!(skills[0].file_path.ends_with("rust-helper/SKILL.md"));
+        assert!(skills[0].body.contains("description: helps with Rust"));
     }
 
     #[test]
@@ -308,22 +414,22 @@ mod tests {
         write_skill(
             dir.path(),
             "a",
-            "---\nname: a\ndisable_model_invocation: true\n---",
+            "---\nname: a\ndescription: a\ndisable_model_invocation: true\n---",
         );
         write_skill(
             dir.path(),
             "b",
-            "---\nname: b\ndisableModelInvocation: yes\n---",
+            "---\nname: b\ndescription: b\ndisableModelInvocation: yes\n---",
         );
         write_skill(
             dir.path(),
             "c",
-            "---\nname: c\ndisable_model_invocation: 1\n---",
+            "---\nname: c\ndescription: c\ndisable-model-invocation: 1\n---",
         );
         write_skill(
             dir.path(),
             "d",
-            "---\nname: d\ndisable_model_invocation: false\n---",
+            "---\nname: d\ndescription: d\ndisable_model_invocation: false\n---",
         );
         let skills = find_skills(dir.path()).unwrap();
         let by_name: std::collections::HashMap<_, _> =
@@ -338,7 +444,11 @@ mod tests {
     fn skips_dirs_without_skill_md() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("empty")).unwrap();
-        write_skill(dir.path(), "real", "---\nname: real\n---");
+        write_skill(
+            dir.path(),
+            "real",
+            "---\nname: real\ndescription: real\n---",
+        );
         let skills = find_skills(dir.path()).unwrap();
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "real");
@@ -360,9 +470,21 @@ mod tests {
     #[test]
     fn results_sorted_alphabetically() {
         let dir = tempfile::tempdir().unwrap();
-        write_skill(dir.path(), "zebra", "---\nname: zebra\n---");
-        write_skill(dir.path(), "alpha", "---\nname: alpha\n---");
-        write_skill(dir.path(), "mango", "---\nname: mango\n---");
+        write_skill(
+            dir.path(),
+            "zebra",
+            "---\nname: zebra\ndescription: zebra\n---",
+        );
+        write_skill(
+            dir.path(),
+            "alpha",
+            "---\nname: alpha\ndescription: alpha\n---",
+        );
+        write_skill(
+            dir.path(),
+            "mango",
+            "---\nname: mango\ndescription: mango\n---",
+        );
         let skills = find_skills(dir.path()).unwrap();
         assert_eq!(
             skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
@@ -373,7 +495,7 @@ mod tests {
     #[test]
     fn resolve_skills_dir_uses_default_when_no_override() {
         let p = resolve_skills_dir(Path::new("/work"), None);
-        assert_eq!(p, Path::new("/work/.claude/skills"));
+        assert_eq!(p, Path::new("/work/.pi/skills"));
     }
 
     #[test]
@@ -386,11 +508,15 @@ mod tests {
     fn agents_md_present_in_workspace_root() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("AGENTS.md");
-        std::fs::write(&path, "# Project
+        std::fs::write(
+            &path,
+            "# Project
 
 - Rule A
 - Rule B
-").unwrap();
+",
+        )
+        .unwrap();
         let skill = maybe_load_agents_md(dir.path()).expect("should detect AGENTS.md");
         assert_eq!(skill.name, "AGENTS.md");
         assert!(skill.description.contains("AGENTS.md"));
@@ -409,8 +535,11 @@ mod tests {
     fn agents_md_symlink_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("real.md");
-        std::fs::write(&real, "# rules
-").unwrap();
+        std::fs::write(
+            &real, "# rules
+",
+        )
+        .unwrap();
         let link = dir.path().join("AGENTS.md");
         #[cfg(unix)]
         {
@@ -423,5 +552,4 @@ mod tests {
             let _ = (&real, &link); // avoid unused warnings
         }
     }
-
 }
