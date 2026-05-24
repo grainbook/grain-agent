@@ -10,9 +10,10 @@
 //! }
 //! ```
 //!
-//! Default limit is [`grain_agent_harness::DEFAULT_MAX_LINES`] (2000). Output
-//! is suffixed with `[Truncated: kept N of M lines]` when the file is
-//! larger than the budget.
+//! Default limit is [`grain_agent_harness::DEFAULT_MAX_LINES`] (2000) /
+//! [`grain_agent_harness::DEFAULT_MAX_BYTES`] (50 KiB). Output is suffixed
+//! with `[Truncated: kept N of M lines (X); Y remaining]` when the file
+//! exceeds the budget.
 
 use std::sync::Arc;
 
@@ -20,7 +21,7 @@ use async_trait::async_trait;
 use grain_agent_core::{
     AgentTool, AgentToolError, AgentToolResult, ToolDefinition, ToolUpdateCallback, UserContent,
 };
-use grain_agent_harness::{TruncationOptions, truncate_head};
+use grain_agent_harness::{TruncationOptions, format_size, truncate_head};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
@@ -118,9 +119,13 @@ impl AgentTool for ReadTool {
 
         let mut text = result.content;
         if result.truncated {
+            let remaining_bytes = result.total_bytes.saturating_sub(result.output_bytes);
             text.push_str(&format!(
-                "\n\n[Truncated: kept {} of {} lines]",
-                result.output_lines, result.total_lines
+                "\n\n[Truncated: kept {} of {} lines ({}); {} remaining]",
+                result.output_lines,
+                result.total_lines,
+                format_size(result.output_bytes),
+                format_size(remaining_bytes),
             ));
         }
 
@@ -130,6 +135,8 @@ impl AgentTool for ReadTool {
                 "path": self.workspace.display_relative(&path),
                 "lines": result.output_lines,
                 "totalLines": result.total_lines,
+                "bytes": result.output_bytes,
+                "totalBytes": result.total_bytes,
                 "truncated": result.truncated,
                 "offset": offset,
             }),

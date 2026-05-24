@@ -424,12 +424,9 @@ impl WasmPluginRuntime {
         host_rt_handle: tokio::runtime::Handle,
     ) -> Result<CallToolResult, WasmPluginError> {
         let entries = self.components.blocking_lock();
-        let entry = entries
-            .iter()
-            .find(|e| e.id == plugin_id)
-            .ok_or_else(|| {
-                WasmPluginError::ToolCallFailed(format!("plugin '{plugin_id}' not loaded"))
-            })?;
+        let entry = entries.iter().find(|e| e.id == plugin_id).ok_or_else(|| {
+            WasmPluginError::ToolCallFailed(format!("plugin '{plugin_id}' not loaded"))
+        })?;
 
         let wasi = WasiCtxBuilder::new().build();
         let state = PluginState {

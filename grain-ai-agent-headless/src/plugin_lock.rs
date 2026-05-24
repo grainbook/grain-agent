@@ -145,8 +145,7 @@ pub fn origin_of(workspace_root: &Path, config: &ConfigFile, name: &str) -> Opti
 mod tests {
     use super::*;
     use crate::plugin_spec::PluginSpec;
-    use std::collections::HashMap;
-
+    
     fn write_toml(path: &Path, body: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
@@ -176,7 +175,7 @@ mod tests {
                 src: "config-src".into(),
                 rev: None,
                 kind: None,
-            env: HashMap::new(),
+            auth: Vec::new(),
             }],
             ..Default::default()
         };
@@ -231,7 +230,7 @@ src  = "legacy-src"
                 src: "./demo".into(),
                 rev: None,
                 kind: None,
-            env: HashMap::new(),
+            auth: Vec::new(),
             }],
         };
         save_plugin_lock(&path, &lock).unwrap();
@@ -248,7 +247,7 @@ src  = "legacy-src"
                 src: "x".into(),
                 rev: None,
                 kind: None,
-            env: HashMap::new(),
+            auth: Vec::new(),
             }],
             ..Default::default()
         };

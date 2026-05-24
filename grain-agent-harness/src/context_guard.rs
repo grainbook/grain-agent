@@ -29,8 +29,8 @@ use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
 use grain_agent_core::{
-    AgentMessage, AssistantContent, Message, ToolResultMessage, TransformContextFn,
-    UserContent, UserMessage,
+    AgentMessage, AssistantContent, Message, ToolResultMessage, TransformContextFn, UserContent,
+    UserMessage,
 };
 use grain_llm_models::Registry;
 
@@ -160,10 +160,7 @@ impl TokenEstimator {
         self.estimate_user_content(&m.content)
     }
 
-    fn estimate_assistant_message(
-        &self,
-        m: &grain_agent_core::AssistantMessage,
-    ) -> u64 {
+    fn estimate_assistant_message(&self, m: &grain_agent_core::AssistantMessage) -> u64 {
         let mut total: u64 = 0;
         for c in &m.content {
             total += match c {
@@ -252,10 +249,7 @@ impl ContextGuard {
     /// Use this when you need multiple subsystems (context guard, compaction
     /// policy) to track the same active model — pass the same
     /// [`ActiveModelHandle`] to each.
-    pub fn with_active_model_handle(
-        registry: Arc<Registry>,
-        handle: ActiveModelHandle,
-    ) -> Self {
+    pub fn with_active_model_handle(registry: Arc<Registry>, handle: ActiveModelHandle) -> Self {
         ContextGuard {
             registry,
             model_handle: handle,
@@ -337,10 +331,7 @@ impl ContextGuard {
             let registry = registry.clone();
             // Read the *current* model id on every invocation — not a
             // stale snapshot from construction time.
-            let model_id = model_handle
-                .read()
-                .map(|g| g.clone())
-                .unwrap_or_default();
+            let model_id = model_handle.read().map(|g| g.clone()).unwrap_or_default();
             let policy = policy.clone();
             Box::pin(async move {
                 let budget = match registry.lookup(&model_id) {
@@ -562,15 +553,11 @@ mod tests {
     #[tokio::test]
     async fn with_active_model_handle_shares_state() {
         let registry = make_registry(vec![small_model(), big_model()]);
-        let shared_handle: ActiveModelHandle =
-            Arc::new(RwLock::new("test/small".into()));
+        let shared_handle: ActiveModelHandle = Arc::new(RwLock::new("test/small".into()));
 
-        let guard = ContextGuard::with_active_model_handle(
-            registry,
-            shared_handle.clone(),
-        )
-        .with_policy(ContextGuardPolicy::DropOldest)
-        .with_headroom_tokens(0);
+        let guard = ContextGuard::with_active_model_handle(registry, shared_handle.clone())
+            .with_policy(ContextGuardPolicy::DropOldest)
+            .with_headroom_tokens(0);
 
         let transform = guard.into_transform_fn();
         let messages = large_transcript();
@@ -597,6 +584,10 @@ mod tests {
         let transform = guard.into_transform_fn();
         let messages = large_transcript();
         let result = transform(messages.clone(), CancellationToken::new()).await;
-        assert_eq!(result.len(), messages.len(), "unknown model should be no-op");
+        assert_eq!(
+            result.len(),
+            messages.len(),
+            "unknown model should be no-op"
+        );
     }
 }

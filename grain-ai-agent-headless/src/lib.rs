@@ -82,7 +82,7 @@ pub use plugins::{
     plugin_script_dirs, read_plugin_prompt_fragments, summarize_plugin,
 };
 pub use plugin_spec::{
-    PluginSpec, PluginSpecFile, SourceKind, SyncReport, default_spec_path, detect_source_kind,
+    PluginAuthEntry, PluginSpec, PluginSpecFile, SourceKind, SyncReport, default_spec_path, detect_source_kind,
     load_plugin_spec, resolve_local_src, sync_plugins,
 };
 pub use plugin_ui::{

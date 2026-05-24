@@ -71,8 +71,7 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState, elapsed: crate::anim::F
         frame.render_widget(Clear, area);
         // Then overlay a full-screen block with the bg color so the
         // terminal background reads through as theme-bg.
-        let bg_block = ratatui::widgets::Block::default()
-            .style(Style::default().bg(palette.bg));
+        let bg_block = ratatui::widgets::Block::default().style(Style::default().bg(palette.bg));
         frame.render_widget(bg_block, area);
     }
 
@@ -99,7 +98,11 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState, elapsed: crate::anim::F
     // rows (no slot) when empty. Replace-in-place, never appended to
     // the transcript: keeps retry-on-overflow progress visible without
     // stacking N warns per turn.
-    let status_rows: u16 = if state.ephemeral_status.is_some() { 1 } else { 0 };
+    let status_rows: u16 = if state.ephemeral_status.is_some() {
+        1
+    } else {
+        0
+    };
     // Visual spacer between transcript and input when there is content.
     let spacer_rows: u16 = if state.transcript.len() > 1 { 1 } else { 0 };
     let constraints: Vec<Constraint> = if palette_rows > 0 {
@@ -114,12 +117,12 @@ pub fn draw(frame: &mut Frame<'_>, state: &mut AppState, elapsed: crate::anim::F
         ]
     } else {
         vec![
-            Constraint::Length(header_rows),  // header (dynamic)
-            Constraint::Min(1),               // transcript (flex)
-            Constraint::Length(status_rows),  // ephemeral status
-            Constraint::Length(spacer_rows),  // spacer
-            Constraint::Length(input_rows),   // input (dynamic)
-            Constraint::Length(footer_rows),  // footer (dynamic)
+            Constraint::Length(header_rows), // header (dynamic)
+            Constraint::Min(1),              // transcript (flex)
+            Constraint::Length(status_rows), // ephemeral status
+            Constraint::Length(spacer_rows), // spacer
+            Constraint::Length(input_rows),  // input (dynamic)
+            Constraint::Length(footer_rows), // footer (dynamic)
         ]
     };
 
@@ -284,10 +287,8 @@ fn build_header_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
 
 fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, palette: &Palette) {
     // Split off 1 column on the right for the vertical scrollbar.
-    let [content_area, scrollbar_area] = Layout::horizontal([
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ]).areas(area);
+    let [content_area, scrollbar_area] =
+        Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(area);
 
     // Stash the content pane bounds so mouse handlers can translate event
     // coordinates back into rendered-row indices.
@@ -324,10 +325,7 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, pale
         let cursor_mark = if focused { "▶" } else { " " };
         if foldable && !expanded {
             // Single summary line replaces the whole block.
-            let summary = format!(
-                "{cursor_mark}▸ {}",
-                state.block_summary(&block)
-            );
+            let summary = format!("{cursor_mark}▸ {}", state.block_summary(&block));
             wrap_one_line(
                 &TranscriptLine {
                     kind: block_chrome_kind(block.kind),
@@ -344,10 +342,7 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, pale
             // Header row tells the user the block is open + how
             // many child lines fall under it. Child lines follow,
             // each indented.
-            let header = format!(
-                "{cursor_mark}▾ {}",
-                state.block_summary(&block)
-            );
+            let header = format!("{cursor_mark}▾ {}", state.block_summary(&block));
             wrap_one_line(
                 &TranscriptLine {
                     kind: block_chrome_kind(block.kind),
@@ -405,8 +400,7 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, pale
     let mut sb_state = ScrollbarState::new(total_rows)
         .position(skip)
         .viewport_content_length(visible.min(total_rows));
-    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-        .style(palette.muted);
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight).style(palette.muted);
     frame.render_stateful_widget(scrollbar, scrollbar_area, &mut sb_state);
 }
 
@@ -432,8 +426,9 @@ fn md_spans_for_line(
         return None;
     }
     // Is this the last line of a streaming block?
-    let is_streaming =
-        state.streaming && idx == block.last_line && idx == state.transcript.len().saturating_sub(1);
+    let is_streaming = state.streaming
+        && idx == block.last_line
+        && idx == state.transcript.len().saturating_sub(1);
     if is_streaming {
         // Tail-buffer (streamdown-style): the streaming tail is the
         // line whose markdown state changes shape on every delta —
@@ -512,9 +507,7 @@ fn wrap_one_line(
         let initial_prefix = if seg_i == 0 { prefix } else { continuation };
         let initial_prefix_width = if seg_i == 0 { prefix_width } else { cont_width };
 
-        let inner = width
-            .saturating_sub(initial_prefix_width)
-            .max(1);
+        let inner = width.saturating_sub(initial_prefix_width).max(1);
         let wrapped: Vec<String> = if segment.is_empty() {
             vec![String::new()]
         } else {
@@ -558,9 +551,7 @@ fn wrap_markdown_line(
     for (seg_i, segment) in display_text.split('\n').enumerate() {
         let initial_prefix = if seg_i == 0 { prefix } else { continuation };
         let initial_prefix_width = if seg_i == 0 { prefix_width } else { cont_width };
-        let inner = width
-            .saturating_sub(initial_prefix_width)
-            .max(1);
+        let inner = width.saturating_sub(initial_prefix_width).max(1);
         let wrapped: Vec<String> = if segment.is_empty() {
             vec![String::new()]
         } else {
@@ -622,7 +613,6 @@ fn wrapped_fragment_ranges(segment: &str, wrapped: &[String]) -> Vec<(usize, usi
     ranges
 }
 
-
 /// Pick a chrome `TranscriptKind` for a synthetic fold header /
 /// summary line. We borrow an existing kind so style mapping +
 /// prefix glyphs reuse the established palette.
@@ -651,15 +641,9 @@ fn build_line(
         let mut sub_spans =
             crate::md_render::spans_for_fragment(spans, frag_start, frag_end, style, palette);
         let content_len: usize = sub_spans.iter().map(|span| span.content.len()).sum();
-        let prefix_len = clamp_char_boundary(
-            &row.text,
-            row.text.len().saturating_sub(content_len),
-        );
+        let prefix_len = clamp_char_boundary(&row.text, row.text.len().saturating_sub(content_len));
         if prefix_len > 0 {
-            sub_spans.insert(
-                0,
-                Span::styled(row.text[..prefix_len].to_string(), style),
-            );
+            sub_spans.insert(0, Span::styled(row.text[..prefix_len].to_string(), style));
         }
         // Apply selection highlight across the sub-spans if needed.
         if let Some(s) = selection {
@@ -708,10 +692,7 @@ fn apply_highlight_to_spans(
             let hi = clamp_char_boundary(&span.content, hi);
             let highlight_style = span.style.bg(palette.selection);
             if lo > 0 {
-                out.push(Span::styled(
-                    span.content[..lo].to_string(),
-                    span.style,
-                ));
+                out.push(Span::styled(span.content[..lo].to_string(), span.style));
             }
             if hi > lo {
                 out.push(Span::styled(
@@ -720,10 +701,7 @@ fn apply_highlight_to_spans(
                 ));
             }
             if hi < span.content.len() {
-                out.push(Span::styled(
-                    span.content[hi..].to_string(),
-                    span.style,
-                ));
+                out.push(Span::styled(span.content[hi..].to_string(), span.style));
             }
         }
         byte_offset = span_end;
@@ -1036,8 +1014,8 @@ fn build_footer_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
             0
         };
         if estimated > 0 {
-            let pct = ((estimated as f64) / (state.context_window as f64) * 100.0)
-                .clamp(0.0, 100.0) as u64;
+            let pct = ((estimated as f64) / (state.context_window as f64) * 100.0).clamp(0.0, 100.0)
+                as u64;
             let ctx_color = if pct <= 60 {
                 palette.success
             } else if pct <= 85 {
@@ -1057,13 +1035,15 @@ fn build_footer_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
         let msg_count = state
             .transcript
             .iter()
-            .filter(|l| matches!(
-                l.kind,
-                TranscriptKind::UserPrompt
-                    | TranscriptKind::AssistantText
-                    | TranscriptKind::ToolCallEnd
-                    | TranscriptKind::ToolCallError
-            ))
+            .filter(|l| {
+                matches!(
+                    l.kind,
+                    TranscriptKind::UserPrompt
+                        | TranscriptKind::AssistantText
+                        | TranscriptKind::ToolCallEnd
+                        | TranscriptKind::ToolCallError
+                )
+            })
             .count();
         if msg_count > 0 {
             spans.push(Span::styled(
@@ -1085,10 +1065,7 @@ fn build_footer_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
     // lives in the `/help` overlay (F1). Keeping the footer compact
     // means status chips stay on one line even on narrow terminals,
     // and the user isn't drowning in shortcuts they already know.
-    spans.push(Span::styled(
-        "F1 help",
-        Style::default().fg(palette.muted),
-    ));
+    spans.push(Span::styled("F1 help", Style::default().fg(palette.muted)));
     Paragraph::new(Line::from(spans))
         .alignment(ratatui::layout::Alignment::Left)
         .wrap(Wrap { trim: false })
@@ -1097,9 +1074,8 @@ fn build_footer_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
 /// Braille-dot spinner glyph rotating at ~10 fps.
 fn spinning_char(elapsed: std::time::Duration) -> char {
     const SPINNER: &[char] = &[
-        '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}',
-        '\u{283C}', '\u{2834}', '\u{2826}', '\u{2827}',
-        '\u{2807}', '\u{280F}',
+        '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}',
+        '\u{2827}', '\u{2807}', '\u{280F}',
     ];
     let idx = (elapsed.as_millis() / 100) as usize % SPINNER.len();
     SPINNER[idx]
@@ -1227,7 +1203,9 @@ fn draw_overlay(
             // Grow vertically with field count: 4 chrome rows
             // (title + pad + footer + hint) plus 2 rows per field
             // (label + input).
-            let h = 6u16.saturating_add((fields.len() as u16).saturating_mul(2)).min(24);
+            let h = 6u16
+                .saturating_add((fields.len() as u16).saturating_mul(2))
+                .min(24);
             (72, h.max(8))
         }
         Overlay::DynamicModal { .. } => (72, 12),
@@ -1293,7 +1271,11 @@ fn draw_overlay(
         Overlay::ProviderPicker { focused } => {
             return draw_provider_picker(frame, inner, *focused, state, palette);
         }
-        Overlay::ModelPicker { focused, models, query } => {
+        Overlay::ModelPicker {
+            focused,
+            models,
+            query,
+        } => {
             return draw_model_picker(frame, inner, *focused, models, query, state, palette);
         }
         Overlay::Log { scroll } => {
@@ -1304,14 +1286,7 @@ fn draw_overlay(
             sessions,
             confirm_delete,
         } => {
-            return draw_session_resume(
-                frame,
-                inner,
-                *focused,
-                sessions,
-                *confirm_delete,
-                palette,
-            );
+            return draw_session_resume(frame, inner, *focused, sessions, *confirm_delete, palette);
         }
         Overlay::Plugins {
             plugins,
@@ -1359,14 +1334,7 @@ fn draw_overlay(
             lines,
             footer,
         } => {
-            return draw_dynamic_text_panel(
-                frame,
-                inner,
-                title,
-                lines,
-                footer.as_deref(),
-                palette,
-            );
+            return draw_dynamic_text_panel(frame, inner, title, lines, footer.as_deref(), palette);
         }
         Overlay::DynamicProgress {
             title,
@@ -1572,10 +1540,8 @@ fn draw_doctor(
         .collect();
 
     // Split body for scrollbar.
-    let [doc_body_area, doc_sb_area] = Layout::horizontal([
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ]).areas(body_area);
+    let [doc_body_area, doc_sb_area] =
+        Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(body_area);
 
     frame.render_widget(
         Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
@@ -1587,8 +1553,7 @@ fn draw_doctor(
         let mut sb_state = ScrollbarState::new(total)
             .position(start)
             .viewport_content_length(visible.min(total));
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .style(palette.muted);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight).style(palette.muted);
         frame.render_stateful_widget(scrollbar, doc_sb_area, &mut sb_state);
     }
 
@@ -1667,10 +1632,8 @@ fn draw_log(
     let log_lines = body.lines().count();
 
     // Split body area for scrollbar.
-    let [log_body_area, log_sb_area] = Layout::horizontal([
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ]).areas(chunks[2]);
+    let [log_body_area, log_sb_area] =
+        Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(chunks[2]);
 
     frame.render_widget(
         Paragraph::new(body)
@@ -1685,8 +1648,7 @@ fn draw_log(
         let mut sb_state = ScrollbarState::new(log_lines)
             .position(scroll)
             .viewport_content_length(chunks[2].height as usize);
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .style(palette.muted);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight).style(palette.muted);
         frame.render_stateful_widget(scrollbar, log_sb_area, &mut sb_state);
     }
 
@@ -1799,10 +1761,8 @@ fn draw_session_resume(
             0
         };
         // Split body for scrollbar.
-        let [resume_body_area, resume_sb_area] = Layout::horizontal([
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ]).areas(chunks[2]);
+        let [resume_body_area, resume_sb_area] =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(chunks[2]);
 
         frame.render_widget(
             Paragraph::new(Text::from(lines))
@@ -1817,13 +1777,13 @@ fn draw_session_resume(
             let mut sb_state = ScrollbarState::new(resume_total_lines)
                 .position(scroll)
                 .viewport_content_length(visible.min(resume_total_lines));
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .style(palette.muted);
+            let scrollbar =
+                Scrollbar::new(ScrollbarOrientation::VerticalRight).style(palette.muted);
             frame.render_stateful_widget(scrollbar, resume_sb_area, &mut sb_state);
         }
     }
 
-let (hint, hint_style) = if sessions.is_empty() {
+    let (hint, hint_style) = if sessions.is_empty() {
         ("Esc close", Style::default().fg(palette.muted))
     } else if confirm_delete {
         (
@@ -1906,6 +1866,7 @@ fn draw_session_lock_conflict(
             let label = match c {
                 SessionConflictChoice::Fresh => "Start a fresh session",
                 SessionConflictChoice::Fork => "Fork from snapshot",
+                SessionConflictChoice::Resume => "Resume a different session",
                 SessionConflictChoice::Quit => "Quit",
                 SessionConflictChoice::Cancel => "Cancel",
             };
@@ -2029,7 +1990,9 @@ fn draw_plugins(
         footer_spans.push(Span::raw("  "));
         footer_spans.push(Span::styled(
             format!("[{}]", cmd.command.key),
-            Style::default().fg(palette.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
         ));
         footer_spans.push(Span::raw(" "));
         footer_spans.push(Span::styled(
@@ -2078,7 +2041,9 @@ fn draw_dynamic_form(
     for (i, f) in fields.iter().enumerate() {
         let focused = i == focused;
         let label_style = if focused {
-            Style::default().fg(palette.accent).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(palette.muted)
         };
@@ -2093,16 +2058,10 @@ fn draw_dynamic_form(
                 Style::default().fg(palette.muted),
             )
         } else {
-            Span::styled(
-                format!("  {}", f.value),
-                Style::default().fg(palette.fg),
-            )
+            Span::styled(format!("  {}", f.value), Style::default().fg(palette.fg))
         };
         if focused {
-            body = Span::styled(
-                format!("{}_", body.content),
-                body.style.fg(palette.fg),
-            );
+            body = Span::styled(format!("{}_", body.content), body.style.fg(palette.fg));
         }
         lines.push(Line::from(body));
     }
@@ -2230,16 +2189,15 @@ fn map_text_color(c: grain_ai_agent_headless::TextColor, palette: &Palette) -> C
 
 /// Convert a plugin-supplied [`grain_ai_agent_headless::TextLine`] into
 /// a ratatui `Line` with palette-mapped styling.
-fn render_text_line(
-    line: &grain_ai_agent_headless::TextLine,
-    palette: &Palette,
-) -> Line<'static> {
+fn render_text_line(line: &grain_ai_agent_headless::TextLine, palette: &Palette) -> Line<'static> {
     let spans: Vec<Span<'static>> = line
         .spans
         .iter()
         .map(|s| {
-            let mut style = Style::default()
-                .fg(s.color.map(|c| map_text_color(c, palette)).unwrap_or(palette.fg));
+            let mut style = Style::default().fg(s
+                .color
+                .map(|c| map_text_color(c, palette))
+                .unwrap_or(palette.fg));
             if s.bold {
                 style = style.add_modifier(Modifier::BOLD);
             }
@@ -2496,10 +2454,7 @@ fn draw_dynamic_progress(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
-            Span::styled(
-                format!("{pct:.0}%"),
-                Style::default().fg(palette.muted),
-            ),
+            Span::styled(format!("{pct:.0}%"), Style::default().fg(palette.muted)),
         ])),
         chunks[0],
     );
@@ -2927,7 +2882,11 @@ fn draw_model_picker(
         #[derive(Debug, Clone)]
         enum Row {
             Header(String),
-            Item { idx: usize, id: String, name: String },
+            Item {
+                idx: usize,
+                id: String,
+                name: String,
+            },
         }
 
         let mut rows: Vec<Row> = Vec::new();
@@ -2963,14 +2922,12 @@ fn draw_model_picker(
         let lines: Vec<Line> = rows[start..end]
             .iter()
             .map(|row| match row {
-                Row::Header(provider) => Line::from(vec![
-                    Span::styled(
-                        format!("{provider}/"),
-                        Style::default()
-                            .fg(palette.secondary)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
+                Row::Header(provider) => Line::from(vec![Span::styled(
+                    format!("{provider}/"),
+                    Style::default()
+                        .fg(palette.secondary)
+                        .add_modifier(Modifier::BOLD),
+                )]),
                 Row::Item { idx, id, name } => {
                     let is_focused = *idx == focused;
                     let cursor = if is_focused { "▶ " } else { "  " };
@@ -3001,7 +2958,10 @@ fn draw_model_picker(
     let hint = if query.is_empty() {
         "↑↓ navigate · Enter apply · Esc cancel".to_string()
     } else {
-        format!("↑↓ navigate · Enter apply · Esc cancel · {} matches", filtered.len())
+        format!(
+            "↑↓ navigate · Enter apply · Esc cancel · {} matches",
+            filtered.len()
+        )
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(

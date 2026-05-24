@@ -33,12 +33,10 @@ pub type TransformContextFn = Arc<
 >;
 
 /// Resolves an API key for a provider name (e.g. short-lived OAuth tokens).
-pub type GetApiKeyFn =
-    Arc<dyn Fn(String) -> BoxFuture<'static, Option<String>> + Send + Sync>;
+pub type GetApiKeyFn = Arc<dyn Fn(String) -> BoxFuture<'static, Option<String>> + Send + Sync>;
 
 /// Returns queued steering or follow-up messages.
-pub type MessagesProviderFn =
-    Arc<dyn Fn() -> BoxFuture<'static, Vec<AgentMessage>> + Send + Sync>;
+pub type MessagesProviderFn = Arc<dyn Fn() -> BoxFuture<'static, Vec<AgentMessage>> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct BeforeToolCallContext {
@@ -55,8 +53,10 @@ pub struct BeforeToolCallResult {
 }
 
 pub type BeforeToolCallFn = Arc<
-    dyn Fn(BeforeToolCallContext, CancellationToken)
-            -> BoxFuture<'static, Option<BeforeToolCallResult>>
+    dyn Fn(
+            BeforeToolCallContext,
+            CancellationToken,
+        ) -> BoxFuture<'static, Option<BeforeToolCallResult>>
         + Send
         + Sync,
 >;
@@ -80,8 +80,10 @@ pub struct AfterToolCallResult {
 }
 
 pub type AfterToolCallFn = Arc<
-    dyn Fn(AfterToolCallContext, CancellationToken)
-            -> BoxFuture<'static, Option<AfterToolCallResult>>
+    dyn Fn(
+            AfterToolCallContext,
+            CancellationToken,
+        ) -> BoxFuture<'static, Option<AfterToolCallResult>>
         + Send
         + Sync,
 >;
@@ -107,9 +109,7 @@ pub struct AgentLoopTurnUpdate {
 }
 
 pub type PrepareNextTurnFn = Arc<
-    dyn Fn(PrepareNextTurnContext) -> BoxFuture<'static, Option<AgentLoopTurnUpdate>>
-        + Send
-        + Sync,
+    dyn Fn(PrepareNextTurnContext) -> BoxFuture<'static, Option<AgentLoopTurnUpdate>> + Send + Sync,
 >;
 
 // ---------------------------------------------------------------------------
@@ -163,6 +163,16 @@ pub enum AgentLoopError {
     Other(String),
 }
 
+/// Successful agent-loop result.
+#[derive(Debug, Clone)]
+pub(crate) struct AgentLoopResult {
+    /// Messages produced during this loop invocation (the same payload
+    /// surfaced in `AgentEnd`).
+    pub new_messages: Vec<AgentMessage>,
+    /// Final context after any `prepare_next_turn` rewrites.
+    pub context: AgentContext,
+}
+
 // ---------------------------------------------------------------------------
 // Top-level entry points
 // ---------------------------------------------------------------------------
@@ -178,12 +188,27 @@ fn current_time_ms() -> i64 {
 /// Start an agent loop with new prompt messages.
 pub async fn run_agent_loop(
     prompts: Vec<AgentMessage>,
+    context: AgentContext,
+    config: AgentLoopConfig,
+    emit: EventSink,
+    cancel: CancellationToken,
+    stream_fn: StreamFn,
+) -> Result<Vec<AgentMessage>, AgentLoopError> {
+    Ok(
+        run_agent_loop_with_result(prompts, context, config, emit, cancel, stream_fn)
+            .await?
+            .new_messages,
+    )
+}
+
+pub(crate) async fn run_agent_loop_with_result(
+    prompts: Vec<AgentMessage>,
     mut context: AgentContext,
     mut config: AgentLoopConfig,
     emit: EventSink,
     cancel: CancellationToken,
     stream_fn: StreamFn,
-) -> Result<Vec<AgentMessage>, AgentLoopError> {
+) -> Result<AgentLoopResult, AgentLoopError> {
     let mut new_messages: Vec<AgentMessage> = prompts.clone();
     context.messages.extend(prompts.iter().cloned());
 
@@ -217,7 +242,10 @@ pub async fn run_agent_loop(
     )
     .await?;
 
-    Ok(new_messages)
+    Ok(AgentLoopResult {
+        new_messages,
+        context,
+    })
 }
 
 /// Continue an existing transcript without injecting a new prompt.
@@ -226,11 +254,25 @@ pub async fn run_agent_loop(
 /// `toolResult` LLM message; otherwise the provider will reject the request.
 pub async fn run_agent_loop_continue(
     context: AgentContext,
-    mut config: AgentLoopConfig,
+    config: AgentLoopConfig,
     emit: EventSink,
     cancel: CancellationToken,
     stream_fn: StreamFn,
 ) -> Result<Vec<AgentMessage>, AgentLoopError> {
+    Ok(
+        run_agent_loop_continue_with_result(context, config, emit, cancel, stream_fn)
+            .await?
+            .new_messages,
+    )
+}
+
+pub(crate) async fn run_agent_loop_continue_with_result(
+    context: AgentContext,
+    mut config: AgentLoopConfig,
+    emit: EventSink,
+    cancel: CancellationToken,
+    stream_fn: StreamFn,
+) -> Result<AgentLoopResult, AgentLoopError> {
     if context.messages.is_empty() {
         return Err(AgentLoopError::Other(
             "Cannot continue: no messages in context".into(),
@@ -261,7 +303,10 @@ pub async fn run_agent_loop_continue(
     )
     .await?;
 
-    Ok(new_messages)
+    Ok(AgentLoopResult {
+        new_messages,
+        context: current_context,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -277,11 +322,12 @@ async fn run_loop(
     stream_fn: StreamFn,
     mut first_turn_already_started: bool,
 ) -> Result<(), AgentLoopError> {
-    let mut pending_messages: Vec<AgentMessage> = if let Some(provider) = &config.get_steering_messages {
-        provider().await
-    } else {
-        Vec::new()
-    };
+    let mut pending_messages: Vec<AgentMessage> =
+        if let Some(provider) = &config.get_steering_messages {
+            provider().await
+        } else {
+            Vec::new()
+        };
 
     loop {
         let mut has_more_tool_calls = true;
@@ -1009,7 +1055,10 @@ async fn execute_prepared(
         .await;
 
     match exec {
-        Ok(result) => ExecutedOutcome { result, is_error: false },
+        Ok(result) => ExecutedOutcome {
+            result,
+            is_error: false,
+        },
         Err(err) => ExecutedOutcome {
             result: AgentToolResult::error(err.to_string()),
             is_error: true,
@@ -1089,10 +1138,7 @@ async fn finalize_executed_owned(
 /// UI / logging layers can flag single-tool termination requests without
 /// changing loop semantics.
 fn should_terminate(finalized: &[FinalizedCall]) -> bool {
-    !finalized.is_empty()
-        && finalized
-            .iter()
-            .all(|f| f.result.terminate == Some(true))
+    !finalized.is_empty() && finalized.iter().all(|f| f.result.terminate == Some(true))
 }
 
 fn make_tool_result_message(finalized: &FinalizedCall) -> ToolResultMessage {

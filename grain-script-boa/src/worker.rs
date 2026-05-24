@@ -210,8 +210,7 @@ fn install_grain_global(
                 .unwrap_or_default();
             if name.is_empty() {
                 return Err(JsError::from_native(
-                    JsNativeError::typ()
-                        .with_message("grain.register_tool: `name` is required"),
+                    JsNativeError::typ().with_message("grain.register_tool: `name` is required"),
                 ));
             }
             let description = opts
@@ -229,19 +228,18 @@ fn install_grain_global(
             };
             let run_val = opts.get(js_string!("run"), ictx)?;
             let Some(run_obj) = run_val.as_object() else {
-                return Err(JsError::from_native(JsNativeError::typ().with_message(
-                    "grain.register_tool: `run` must be a function",
-                )));
+                return Err(JsError::from_native(
+                    JsNativeError::typ()
+                        .with_message("grain.register_tool: `run` must be a function"),
+                ));
             };
             if !run_obj.is_callable() {
-                return Err(JsError::from_native(JsNativeError::typ().with_message(
-                    "grain.register_tool: `run` must be callable",
-                )));
+                return Err(JsError::from_native(
+                    JsNativeError::typ()
+                        .with_message("grain.register_tool: `run` must be callable"),
+                ));
             }
-            state_clone
-                .borrow_mut()
-                .fns
-                .insert(name.clone(), run_obj);
+            state_clone.borrow_mut().fns.insert(name.clone(), run_obj);
             state_clone.borrow_mut().metas.insert(
                 name.clone(),
                 ToolMeta {
@@ -283,10 +281,7 @@ fn install_grain_global(
                     "grain.register_callback: second argument must be callable",
                 )));
             }
-            cb_state
-                .borrow_mut()
-                .callbacks
-                .insert(name, fn_obj);
+            cb_state.borrow_mut().callbacks.insert(name, fn_obj);
             Ok(JsValue::undefined())
         })
     };
@@ -334,7 +329,12 @@ fn install_grain_global(
 
     let grain_obj = JsObject::with_null_proto();
     grain_obj
-        .set(js_string!("register_tool"), register.to_js_function(ctx.realm()), false, ctx)
+        .set(
+            js_string!("register_tool"),
+            register.to_js_function(ctx.realm()),
+            false,
+            ctx,
+        )
         .expect("set register_tool on grain");
     grain_obj
         .set(
@@ -366,9 +366,9 @@ fn install_grain_global(
             let payload = if payload_val.is_undefined() || payload_val.is_null() {
                 serde_json::Value::Object(Default::default())
             } else {
-                payload_val.to_json(ictx)?.unwrap_or_else(|| {
-                    serde_json::Value::Object(Default::default())
-                })
+                payload_val
+                    .to_json(ictx)?
+                    .unwrap_or_else(|| serde_json::Value::Object(Default::default()))
             };
             let _ = notify_tx_push.send(payload);
             Ok(JsValue::undefined())
@@ -409,17 +409,18 @@ fn install_grain_global(
                 .to_std_string()
                 .unwrap_or_default();
             if kind.is_empty() {
-                return Err(JsError::from_native(JsNativeError::typ().with_message(
-                    "grain.modal_request: kind (string) is required",
-                )));
+                return Err(JsError::from_native(
+                    JsNativeError::typ()
+                        .with_message("grain.modal_request: kind (string) is required"),
+                ));
             }
             let payload_val = args.get(1).cloned().unwrap_or(JsValue::undefined());
             let mut payload = if payload_val.is_undefined() || payload_val.is_null() {
                 serde_json::Map::new()
             } else {
-                let v = payload_val.to_json(ictx)?.unwrap_or_else(|| {
-                    serde_json::Value::Object(serde_json::Map::new())
-                });
+                let v = payload_val
+                    .to_json(ictx)?
+                    .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
                 match v {
                     serde_json::Value::Object(m) => m,
                     _ => serde_json::Map::new(),
@@ -501,8 +502,7 @@ fn invoke_tool(
         .get(name)
         .cloned()
         .ok_or_else(|| format!("tool '{name}' not registered"))?;
-    let args_js = JsValue::from_json(&args, ctx)
-        .map_err(|e| e.to_string())?;
+    let args_js = JsValue::from_json(&args, ctx).map_err(|e| e.to_string())?;
     // `JsValue::from_json` returns JsValue directly in 0.21 — no Option wrap.
     let result = func
         .call(&JsValue::undefined(), &[args_js], ctx)
@@ -512,7 +512,9 @@ fn invoke_tool(
 
 fn coerce_tool_reply(ctx: &mut Context, result: JsValue) -> Result<ToolReply, String> {
     if let Some(obj) = result.as_object()
-        && obj.has_property(js_string!("content"), ctx).unwrap_or(false)
+        && obj
+            .has_property(js_string!("content"), ctx)
+            .unwrap_or(false)
     {
         let content = obj
             .get(js_string!("content"), ctx)

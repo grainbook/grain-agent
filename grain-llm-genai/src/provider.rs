@@ -85,10 +85,7 @@ impl ProviderAuth {
     pub fn summary(&self) -> String {
         match self {
             ProviderAuth::ApiKey { env } => {
-                let present = std::env::var(env)
-                    .ok()
-                    .filter(|v| !v.is_empty())
-                    .is_some();
+                let present = std::env::var(env).ok().filter(|v| !v.is_empty()).is_some();
                 if present {
                     format!("env {env} ✓")
                 } else {
@@ -241,7 +238,9 @@ pub fn profile_from_entry(entry: ProfileEntry) -> Result<ProviderProfile, String
             // loading), before any other threads read the env.
             if let Some(val) = &entry.auth.value {
                 if !val.is_empty() {
-                    unsafe { std::env::set_var(&env, val); }
+                    unsafe {
+                        std::env::set_var(&env, val);
+                    }
                 }
             }
             ProviderAuth::ApiKey { env }
@@ -330,7 +329,9 @@ auth = { kind = "api_key", env = "GRAIN_TEST_INLINE_KEY", value = "sk-ant-test-1
 "#,
         );
         // The env var should NOT be set before loading.
-        unsafe { std::env::remove_var("GRAIN_TEST_INLINE_KEY"); }
+        unsafe {
+            std::env::remove_var("GRAIN_TEST_INLINE_KEY");
+        }
         let (profiles, warnings) = load_profiles(&path);
         assert!(warnings.is_empty(), "no warnings: {:?}", warnings);
         assert_eq!(profiles.len(), 1);
@@ -344,7 +345,9 @@ auth = { kind = "api_key", env = "GRAIN_TEST_INLINE_KEY", value = "sk-ant-test-1
             Ok("sk-ant-test-123")
         );
         // Clean up so the test doesn't leak into downstream tests.
-        unsafe { std::env::remove_var("GRAIN_TEST_INLINE_KEY"); }
+        unsafe {
+            std::env::remove_var("GRAIN_TEST_INLINE_KEY");
+        }
     }
 
     #[test]

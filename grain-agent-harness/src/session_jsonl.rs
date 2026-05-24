@@ -181,7 +181,8 @@ impl JsonlSessionStorage {
         inner: &JsonlInner,
         entry: &SessionTreeEntry,
     ) -> Result<(), SessionError> {
-        let line = serde_json::to_string(entry).map_err(|e| SessionError::Storage(e.to_string()))?;
+        let line =
+            serde_json::to_string(entry).map_err(|e| SessionError::Storage(e.to_string()))?;
         let path = inner.dir.join(ENTRIES_FILE);
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)

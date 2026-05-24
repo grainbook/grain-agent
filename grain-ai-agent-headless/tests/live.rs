@@ -23,9 +23,7 @@ use grain_agent_core::{
     AgentEvent, AgentMessage, AgentToolResult, AssistantContent, AssistantStream, LlmContext,
     LlmStream, Message, StopReason, StreamOptions, ToolDefinition, UserContent,
 };
-use grain_ai_agent_headless::{
-    Args, EventPrinter, EventSink, JsonEventPrinter, OutputFormat,
-};
+use grain_ai_agent_headless::{Args, EventPrinter, EventSink, JsonEventPrinter, OutputFormat};
 use grain_llm_genai::GenaiStream;
 use grain_llm_models::Registry;
 use tokio_util::sync::CancellationToken;
@@ -99,7 +97,10 @@ fn cli_args_parse_with_session_path() {
         "hi",
     ])
     .expect("parse");
-    assert_eq!(args.session.as_deref(), Some(std::path::Path::new("/tmp/sess.jsonl")));
+    assert_eq!(
+        args.session.as_deref(),
+        Some(std::path::Path::new("/tmp/sess.jsonl"))
+    );
     assert_eq!(args.prompt.as_deref(), Some("hi"));
 }
 
@@ -192,7 +193,12 @@ async fn live_simple_prompt_round_trip() {
     };
 
     let stream = stream_impl
-        .stream(&model, &ctx, &StreamOptions::default(), CancellationToken::new())
+        .stream(
+            &model,
+            &ctx,
+            &StreamOptions::default(),
+            CancellationToken::new(),
+        )
         .await
         .expect("stream initialised");
     let final_event = drain(stream).await;
@@ -237,7 +243,12 @@ async fn live_tool_call_round_trip() {
         tools: vec![echo],
     };
     let stream = stream_impl
-        .stream(&model, &ctx, &StreamOptions::default(), CancellationToken::new())
+        .stream(
+            &model,
+            &ctx,
+            &StreamOptions::default(),
+            CancellationToken::new(),
+        )
         .await
         .expect("stream initialised");
     let final_event = drain(stream).await;
@@ -280,8 +291,11 @@ async fn live_agent_with_workspace_tools_round_trip() {
     // Use a tempdir with a tiny project so the test isn't sensitive to
     // the agent's own source tree.
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(dir.path().join("README.md"), "# Tiny Demo\n\nDoes nothing.\n")
-        .expect("write");
+    std::fs::write(
+        dir.path().join("README.md"),
+        "# Tiny Demo\n\nDoes nothing.\n",
+    )
+    .expect("write");
     std::fs::create_dir_all(dir.path().join("src")).expect("mkdir");
     std::fs::write(
         dir.path().join("src").join("main.rs"),
@@ -306,10 +320,17 @@ async fn live_agent_with_workspace_tools_round_trip() {
         .subscribe(Arc::new(|event, _signal| {
             Box::pin(async move {
                 match &event {
-                    AgentEvent::ToolExecutionStart { tool_name, args, .. } => {
+                    AgentEvent::ToolExecutionStart {
+                        tool_name, args, ..
+                    } => {
                         eprintln!("→ {tool_name}({args})");
                     }
-                    AgentEvent::ToolExecutionEnd { tool_name, is_error, result, .. } => {
+                    AgentEvent::ToolExecutionEnd {
+                        tool_name,
+                        is_error,
+                        result,
+                        ..
+                    } => {
                         let preview = result
                             .content
                             .iter()

@@ -54,7 +54,9 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
     //   1. `--provider <name>` CLI flag (explicit user intent)
     //   2. `persisted.last_provider` (previous session's choice)
     //   3. None (use `--model` verbatim)
-    let requested_provider = args.provider.as_deref()
+    let requested_provider = args
+        .provider
+        .as_deref()
         .or(persisted.last_provider.as_deref());
     let (profiles, initial_profile_idx) = resolve_profiles(
         args.providers_file.as_deref(),
@@ -111,12 +113,12 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
         .plugins_dir
         .clone()
         .unwrap_or_else(|| grain_ai_agent_headless::default_plugins_dir(&args.workspace));
-    let plugin_theme_dirs: Vec<std::path::PathBuf> = grain_ai_agent_headless::discover_plugins(&plugins_dir)
-        .into_iter()
-        .filter_map(|p| p.themes_dir())
-        .collect();
-    let (themes, initial_idx) =
-        resolve_themes(&themes_dir, &plugin_theme_dirs, &requested_theme);
+    let plugin_theme_dirs: Vec<std::path::PathBuf> =
+        grain_ai_agent_headless::discover_plugins(&plugins_dir)
+            .into_iter()
+            .filter_map(|p| p.themes_dir())
+            .collect();
+    let (themes, initial_idx) = resolve_themes(&themes_dir, &plugin_theme_dirs, &requested_theme);
 
     install_panic_hook();
     let mut terminal = init_terminal()?;
@@ -443,7 +445,8 @@ async fn event_loop(
         // Persist provider / model changes so they survive restarts.
         // Only write when they actually changed to avoid churning
         // the file on every unrelated event.
-        let current_provider = state.current_provider_idx
+        let current_provider = state
+            .current_provider_idx
             .and_then(|i| state.providers.get(i))
             .map(|p| p.name.clone());
         if current_provider != ctx.persisted.last_provider {
@@ -466,9 +469,7 @@ async fn event_loop(
             mouse_capture_applied = state.mouse_capture_on;
         }
         let now = std::time::Instant::now();
-        let fx_elapsed = crate::anim::FxDuration::from_millis(
-            (now - last_tick).as_millis() as u32,
-        );
+        let fx_elapsed = crate::anim::FxDuration::from_millis((now - last_tick).as_millis() as u32);
         last_tick = now;
         ctx.terminal.draw(|f| ui::draw(f, &mut state, fx_elapsed))?;
 

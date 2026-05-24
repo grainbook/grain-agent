@@ -100,7 +100,7 @@ pub fn install(
         src: src.into(),
         rev: rev.map(str::to_string),
         kind: None,
-    env: HashMap::new(),
+        auth: Vec::new(),
     });
     write_spec(spec_path, &spec)?;
     let base_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));

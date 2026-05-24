@@ -46,7 +46,9 @@ pub fn scavenge_tool_calls(reasoning: &str) -> Vec<ScavengedToolCall> {
         let Ok(parsed) = serde_json::from_str::<Value>(slice) else {
             continue;
         };
-        let Some(obj) = parsed.as_object() else { continue };
+        let Some(obj) = parsed.as_object() else {
+            continue;
+        };
         let Some(name) = obj.get("name").and_then(|v| v.as_str()) else {
             continue;
         };
@@ -243,10 +245,7 @@ mod tests {
         let r = r#"{"name": "write", "arguments": {"text": "say \"hi\""}}"#;
         let calls = scavenge_tool_calls(r);
         assert_eq!(calls.len(), 1);
-        assert_eq!(
-            calls[0].arguments,
-            json!({"text": "say \"hi\""})
-        );
+        assert_eq!(calls[0].arguments, json!({"text": "say \"hi\""}));
     }
 
     #[test]

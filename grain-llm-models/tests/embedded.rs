@@ -4,15 +4,16 @@
 //! schema mapping behaves the way adapters and harness hooks will expect.
 
 use grain_agent_core::{Cost, ThinkingLevel};
-use grain_llm_models::{
-    ApiKind, ModelDescriptor, ProviderId, Registry, Snapshot, ThinkingProfile,
-};
+use grain_llm_models::{ApiKind, ModelDescriptor, ProviderId, Registry, Snapshot, ThinkingProfile};
 
 #[test]
 fn embedded_snapshot_parses_and_is_nonempty() {
     let snapshot = Snapshot::from_embedded().expect("embedded snapshot parses");
     assert_eq!(snapshot.version, 1);
-    assert!(!snapshot.models.is_empty(), "snapshot ships at least one model");
+    assert!(
+        !snapshot.models.is_empty(),
+        "snapshot ships at least one model"
+    );
 }
 
 #[test]
@@ -33,7 +34,9 @@ fn embedded_registry_lookups_known_models() {
         Some("thinking")
     );
 
-    let gpt4o = registry.lookup("openai/gpt-4o").expect("openai/gpt-4o present");
+    let gpt4o = registry
+        .lookup("openai/gpt-4o")
+        .expect("openai/gpt-4o present");
     assert_eq!(gpt4o.provider, ProviderId::OpenAi);
     assert_eq!(gpt4o.api, ApiKind::OpenAi);
     assert!(!gpt4o.thinking.supported);
@@ -142,6 +145,9 @@ fn unsupported_snapshot_version_is_rejected() {
     let err = Snapshot::from_json_str(json).unwrap_err();
     assert!(matches!(
         err,
-        grain_llm_models::SnapshotError::UnsupportedVersion { found: 999, expected: 1 }
+        grain_llm_models::SnapshotError::UnsupportedVersion {
+            found: 999,
+            expected: 1
+        }
     ));
 }

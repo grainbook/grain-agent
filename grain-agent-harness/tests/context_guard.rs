@@ -100,7 +100,7 @@ fn estimator_assistant_thinking_counts_text_plus_signature() {
     let est = TokenEstimator::approximate();
     let m = AgentMessage::assistant(AssistantMessage {
         content: vec![AssistantContent::Thinking(ThinkingContent {
-            thinking: "abcd".into(),       // 1 token
+            thinking: "abcd".into(),        // 1 token
             signature: Some("efgh".into()), // 1 token
             provider_metadata: None,
         })],
@@ -121,8 +121,8 @@ fn estimator_tool_call_counts_name_plus_arguments() {
     let m = AgentMessage::assistant(AssistantMessage {
         content: vec![AssistantContent::ToolCall(ToolCall {
             id: "c1".into(),
-            name: "echo".into(),                            // 4 chars / 4 = 1
-            arguments: serde_json::json!({ "v": "ab" }),  // {"v":"ab"} = 10 chars / 4 = 3
+            name: "echo".into(),                         // 4 chars / 4 = 1
+            arguments: serde_json::json!({ "v": "ab" }), // {"v":"ab"} = 10 chars / 4 = 3
         })],
         api: "x".into(),
         provider: "x".into(),
@@ -140,7 +140,11 @@ fn estimator_messages_sums_each_entry() {
     // Disable per-message framing here so we're testing pure content
     // accumulation; framing is exercised by its own dedicated tests.
     let est = TokenEstimator::approximate().with_per_message_overhead(0);
-    let msgs = vec![user_text("aaaa"), assistant_text("bbbb"), tool_result("cccc")];
+    let msgs = vec![
+        user_text("aaaa"),
+        assistant_text("bbbb"),
+        tool_result("cccc"),
+    ];
     assert_eq!(est.estimate_messages(&msgs), 3);
 }
 
@@ -148,7 +152,11 @@ fn estimator_messages_sums_each_entry() {
 fn estimator_messages_charges_per_message_framing_by_default() {
     let est = TokenEstimator::approximate();
     let default_framing = est.per_message_overhead();
-    let msgs = vec![user_text("aaaa"), assistant_text("bbbb"), tool_result("cccc")];
+    let msgs = vec![
+        user_text("aaaa"),
+        assistant_text("bbbb"),
+        tool_result("cccc"),
+    ];
     // 3 messages × 1 content token + 3 × default framing tokens.
     assert_eq!(est.estimate_messages(&msgs), 3 + 3 * default_framing);
 }
@@ -287,5 +295,9 @@ async fn headroom_is_subtracted_from_budget() {
         user_text(&"d".repeat(20)),
     ];
     let out = transform(msgs, CancellationToken::new()).await;
-    assert_eq!(out.len(), 1, "only the last message fits within 5-token budget");
+    assert_eq!(
+        out.len(),
+        1,
+        "only the last message fits within 5-token budget"
+    );
 }

@@ -3,24 +3,13 @@
 # next to the compiled `plugin.wasm`.
 
 name = "web-search"
-version = "0.1.0"
-description = "Exa search + URL fetch (WASM, sandboxed)"
+version = "0.2.0"
+description = "Multi-provider web search (Exa / Tavily / SearXNG) + URL fetch (WASM, sandboxed)"
 author = "grain"
 
 [wasm]
-# `http` — host_http_get / host_http_post (REQUIRED: Exa API + fetch)
-# `env` — host_env_get (REQUIRED: read EXA_API_KEY)
+# `http` — host_http_get / host_http_post (REQUIRED: external API calls)
+# `env` — host_env_get (REQUIRED: read API keys / base URLs)
 # `log` — host_log (recommended: see plugin logs)
 module = "target/wasm32-wasip1/release/web_search_plugin.wasm"
 capabilities = ["http", "env", "log"]
-
-# Optional: set EXA_API_KEY directly here instead of exporting it.
-# The wasm host checks this map before falling back to OS env vars.
-#
-# You can also set it in plugin-spec.toml at the top level:
-#   [[plugin]]
-#   name = "web-search"
-#   src = "..."
-#   EXA_API_KEY = "your-key"
-[wasm.env]
-# EXA_API_KEY = "your-exa-api-key"

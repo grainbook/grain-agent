@@ -43,19 +43,17 @@ pub use compaction::{
     CompactionError, CompactionPolicy, CompactionSettings, DEFAULT_COMPACTION_PROMPT,
     DEFAULT_COMPACTION_SETTINGS, DEFAULT_KEEP_RECENT, DEFAULT_MESSAGE_THRESHOLD,
     DEFAULT_TOOL_RESULT_TRUNCATION_CAP_CHARS, MessageCountPolicy, TokenBudgetPolicy,
-    compact_transcript, compaction_prepare_next_turn, resolve_threshold_tokens,
-    semantic_compress, should_compact, snap_to_safe_boundary,
- tool_result_truncation_hook, truncate_tool_results,
+    compact_transcript, compaction_prepare_next_turn, resolve_threshold_tokens, semantic_compress,
+    should_compact, snap_to_safe_boundary, tool_result_truncation_hook, truncate_tool_results,
 };
 pub use context_guard::{ActiveModelHandle, ContextGuard, ContextGuardPolicy, TokenEstimator};
-pub use messages::{
-    BRANCH_SUMMARY_PREFIX, BRANCH_SUMMARY_SUFFIX, COMPACTION_SUMMARY_PREFIX,
-    COMPACTION_SUMMARY_SUFFIX, BranchSummaryMessage, CompactionSummaryMessage, CustomMessage,
-    branch_summary_message, compaction_summary_message, convert_to_llm, custom_message,
-};
 pub use escalation::{
-    EscalationConfig, EscalationState, count_failures, decide_escalation,
-    failure_escalation_hook,
+    EscalationConfig, EscalationState, count_failures, decide_escalation, failure_escalation_hook,
+};
+pub use messages::{
+    BRANCH_SUMMARY_PREFIX, BRANCH_SUMMARY_SUFFIX, BranchSummaryMessage, COMPACTION_SUMMARY_PREFIX,
+    COMPACTION_SUMMARY_SUFFIX, CompactionSummaryMessage, CustomMessage, branch_summary_message,
+    compaction_summary_message, convert_to_llm, custom_message,
 };
 pub use prefix_pin::{PinnedSystemPrompt, append_only_guard};
 pub use pruning::{PruneConfig, PruneOutcome, prune_tool_outputs};
@@ -65,8 +63,7 @@ pub use retry_overflow::{
 };
 pub use session::{
     InMemorySessionRepo, InMemorySessionStorage, Session, SessionContext, SessionError,
-    SessionMetadata, SessionRepo, SessionStorage, SessionTreeEntry, SessionTreeEntryKind,
-    uuidv7,
+    SessionMetadata, SessionRepo, SessionStorage, SessionTreeEntry, SessionTreeEntryKind, uuidv7,
 };
 pub use session_jsonl::{JsonlSessionRepo, JsonlSessionStorage};
 pub use system_prompt::{Skill, format_skills_for_system_prompt};

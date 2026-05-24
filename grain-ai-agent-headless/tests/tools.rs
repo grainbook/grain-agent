@@ -137,11 +137,7 @@ async fn read_rejects_path_outside_workspace() {
 
 #[tokio::test]
 async fn list_shows_directories_first() {
-    let (_dir, ws) = workspace_with_files(&[
-        ("a.txt", ""),
-        ("b.txt", ""),
-        ("sub/inside.txt", ""),
-    ]);
+    let (_dir, ws) = workspace_with_files(&[("a.txt", ""), ("b.txt", ""), ("sub/inside.txt", "")]);
     let tool = ListTool::new(ws);
     let result = tool
         .execute(
@@ -228,7 +224,10 @@ async fn glob_no_matches_yields_friendly_output() {
 #[tokio::test]
 async fn grep_finds_pattern_with_line_and_column() {
     let (_dir, ws) = workspace_with_files(&[
-        ("src/lib.rs", "fn foo() {}\nfn bar() {}\n// TODO: refactor\n"),
+        (
+            "src/lib.rs",
+            "fn foo() {}\nfn bar() {}\n// TODO: refactor\n",
+        ),
         ("src/other.rs", "fn baz() {}\n"),
     ]);
     let tool = GrepTool::new(ws);
@@ -248,10 +247,8 @@ async fn grep_finds_pattern_with_line_and_column() {
 
 #[tokio::test]
 async fn grep_honors_file_glob() {
-    let (_dir, ws) = workspace_with_files(&[
-        ("src/foo.rs", "MATCH\n"),
-        ("docs/notes.md", "MATCH\n"),
-    ]);
+    let (_dir, ws) =
+        workspace_with_files(&[("src/foo.rs", "MATCH\n"), ("docs/notes.md", "MATCH\n")]);
     let tool = GrepTool::new(ws);
     let result = tool
         .execute(
@@ -305,7 +302,15 @@ async fn coding_all_tools_includes_write_and_edit() {
     let names: Vec<&str> = tools.iter().map(|t| t.definition().name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["read", "list", "glob", "grep", "source_info", "write", "edit"]
+        vec![
+            "read",
+            "list",
+            "glob",
+            "grep",
+            "source_info",
+            "write",
+            "edit"
+        ]
     );
 }
 
@@ -339,7 +344,9 @@ fn workspace_resolve_for_write_rejects_missing_parent() {
 #[test]
 fn workspace_resolve_for_write_rejects_outside_root() {
     let (_dir, ws) = workspace_with_files(&[]);
-    let err = ws.resolve_for_write("/tmp/somewhere_else/foo.txt").unwrap_err();
+    let err = ws
+        .resolve_for_write("/tmp/somewhere_else/foo.txt")
+        .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("escape") || msg.contains("io"));
 }
@@ -547,8 +554,14 @@ async fn bash_runs_simple_echo() {
         .expect("ok");
     let text = text_of(&result);
     assert!(text.contains("hello"));
-    assert_eq!(result.details.get("exitCode").and_then(|v| v.as_i64()), Some(0));
-    assert_eq!(result.details.get("success").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        result.details.get("exitCode").and_then(|v| v.as_i64()),
+        Some(0)
+    );
+    assert_eq!(
+        result.details.get("success").and_then(|v| v.as_bool()),
+        Some(true)
+    );
 }
 
 #[cfg(unix)]
@@ -585,8 +598,14 @@ async fn bash_reports_nonzero_exit_as_success_false() {
         )
         .await
         .expect("tool result returned even for non-zero exit");
-    assert_eq!(result.details.get("exitCode").and_then(|v| v.as_i64()), Some(7));
-    assert_eq!(result.details.get("success").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(
+        result.details.get("exitCode").and_then(|v| v.as_i64()),
+        Some(7)
+    );
+    assert_eq!(
+        result.details.get("success").and_then(|v| v.as_bool()),
+        Some(false)
+    );
 }
 
 #[cfg(unix)]

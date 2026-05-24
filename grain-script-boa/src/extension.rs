@@ -8,8 +8,7 @@ use std::sync::mpsc;
 
 use async_trait::async_trait;
 use grain_agent_core::{
-    AgentTool, AgentToolError, AgentToolResult, ToolDefinition, ToolUpdateCallback,
-    UserContent,
+    AgentTool, AgentToolError, AgentToolResult, ToolDefinition, ToolUpdateCallback, UserContent,
 };
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -63,11 +62,7 @@ impl BoaExtension {
     ///
     /// Calling with an unknown id is harmless — the worker will
     /// just drop the message in its filter loop.
-    pub fn resolve_modal(
-        &self,
-        request_id: u64,
-        value: serde_json::Value,
-    ) -> Result<(), String> {
+    pub fn resolve_modal(&self, request_id: u64, value: serde_json::Value) -> Result<(), String> {
         self.worker
             .modal_tx
             .send((request_id, value))
@@ -118,11 +113,7 @@ impl BoaExtension {
     /// events into JS handlers. Unregistered names are a silent
     /// no-op — callers can fire every event without checking which
     /// names a particular script subscribed to.
-    pub async fn invoke_callback(
-        &self,
-        name: &str,
-        args: serde_json::Value,
-    ) -> Result<(), String> {
+    pub async fn invoke_callback(&self, name: &str, args: serde_json::Value) -> Result<(), String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .worker
@@ -166,9 +157,7 @@ impl BoaExtension {
     /// Tool registration order matters when two scripts register the
     /// same name (last one wins) — keep this in mind when stacking
     /// plugin scripts over a base set.
-    pub fn from_scripts_dirs(
-        dirs: &[impl AsRef<Path>],
-    ) -> Result<Self, BoaExtensionError> {
+    pub fn from_scripts_dirs(dirs: &[impl AsRef<Path>]) -> Result<Self, BoaExtensionError> {
         let worker = Arc::new(spawn_worker());
 
         let mut script_files: Vec<PathBuf> = Vec::new();

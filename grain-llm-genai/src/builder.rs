@@ -7,10 +7,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use genai::Client;
 use genai::adapter::AdapterKind;
 use genai::chat::ChatOptions;
 use genai::resolver::{AuthData, Endpoint};
-use genai::Client;
 use genai::{ModelIden, ServiceTarget};
 use grain_llm_models::Registry;
 

@@ -5,13 +5,10 @@
 //! in Rust, custom messages live under [`grain_agent_core::AgentMessage::Custom`]
 //! as JSON values with a `role` discriminator.
 
-use grain_agent_core::{
-    AgentMessage, Message, TextContent, UserContent, UserMessage,
-};
+use grain_agent_core::{AgentMessage, Message, TextContent, UserContent, UserMessage};
 use serde::{Deserialize, Serialize};
 
-pub const COMPACTION_SUMMARY_PREFIX: &str =
-    "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
+pub const COMPACTION_SUMMARY_PREFIX: &str = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
 pub const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
 
 pub const BRANCH_SUMMARY_PREFIX: &str =
@@ -132,15 +129,15 @@ pub fn convert_to_llm(messages: Vec<AgentMessage>) -> Vec<Message> {
 
 fn convert_custom(value: serde_json::Value) -> Option<Message> {
     let role = value.get("role").and_then(|r| r.as_str())?;
-    let timestamp = value
-        .get("timestamp")
-        .and_then(|t| t.as_i64())
-        .unwrap_or(0);
+    let timestamp = value.get("timestamp").and_then(|t| t.as_i64()).unwrap_or(0);
 
     match role {
         "branchSummary" => {
             let summary = value.get("summary").and_then(|s| s.as_str()).unwrap_or("");
-            let text = format!("{}{}{}", BRANCH_SUMMARY_PREFIX, summary, BRANCH_SUMMARY_SUFFIX);
+            let text = format!(
+                "{}{}{}",
+                BRANCH_SUMMARY_PREFIX, summary, BRANCH_SUMMARY_SUFFIX
+            );
             Some(Message::User(UserMessage {
                 content: vec![UserContent::Text(TextContent { text })],
                 timestamp,
@@ -158,7 +155,10 @@ fn convert_custom(value: serde_json::Value) -> Option<Message> {
             }))
         }
         "custom" => {
-            let content = value.get("content").map(parse_user_content).unwrap_or_default();
+            let content = value
+                .get("content")
+                .map(parse_user_content)
+                .unwrap_or_default();
             if content.is_empty() {
                 return None;
             }

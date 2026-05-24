@@ -22,13 +22,9 @@ pub mod snapshot;
 #[cfg(feature = "fetch")]
 pub mod fetch;
 
-pub use descriptor::{
-    ApiKind, Capabilities, ModelDescriptor, ProviderId, ThinkingProfile,
-};
+pub use descriptor::{ApiKind, Capabilities, ModelDescriptor, ProviderId, ThinkingProfile};
 pub use registry::{Registry, RegistryError};
-pub use snapshot::{
-    CURRENT_SNAPSHOT_VERSION, EMBEDDED_SNAPSHOT_JSON, Snapshot, SnapshotError,
-};
+pub use snapshot::{CURRENT_SNAPSHOT_VERSION, EMBEDDED_SNAPSHOT_JSON, Snapshot, SnapshotError};
 
 #[cfg(feature = "fetch")]
 pub use fetch::{

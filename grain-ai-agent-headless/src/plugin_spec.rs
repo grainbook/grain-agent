@@ -29,7 +29,6 @@
 //! src  = "git@github.com:me/lazy-gagent.git"
 //! ```
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -62,19 +61,41 @@ pub struct PluginSpec {
     /// [`Self::src`].
     #[serde(default)]
     pub kind: Option<SourceKind>,
-/// Per-plugin env vars injected into the wasm sandbox.
-/// Any top-level key not matching `name|src|rev|kind` is captured.
-/// Merged with `plugin.toml`'s `[wasm.env]` at load time;
-/// spec entries override manifest entries on key conflict.
+/// Per-plugin auth entries. Each entry sets an env var inside
+/// the WASM sandbox. When `value` is set the key is injected
+/// directly; otherwise it's read from the host OS environment.
+/// Multiple entries for the same `env` are resolved by
+/// `priority` (higher wins, default 0).
 ///
 /// ```toml
 /// [[plugin]]
 /// name = "web-search"
-/// src = "https://..."
-/// EXA_API_KEY = "your-key"
+/// src = "../grain-plugin-wasm/examples/web-search"
+/// auth = [
+///   { kind = "api_key", env = "TAVILY_API_KEY", value = "tvly-xxx", priority = 1 },
+///   { kind = "api_key", env = "EXA_API_KEY", value = "sk-xxx" },
+/// ]
 /// ```
-#[serde(flatten, default)]
-pub env: HashMap<String, String>,
+#[serde(default)]
+pub auth: Vec<PluginAuthEntry>,
+}
+
+/// One credential entry for a plugin. Mirrors the LLM provider
+/// `AuthEntry` shape with an extra `priority` field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginAuthEntry {
+    /// `"api_key"` — reads `env` / `value`.
+    pub kind: String,
+    /// Env var name the plugin expects (e.g. `"EXA_API_KEY"`).
+    pub env: String,
+    /// Optional inline key. When set, `env` is auto-populated so
+    /// the user doesn't need to `export` it beforehand.
+    #[serde(default)]
+    pub value: Option<String>,
+    /// Precedence when multiple entries target the same `env`.
+    /// Higher wins. Defaults to 0.
+    #[serde(default)]
+    pub priority: i32,
 }
 
 /// How the engine treats [`PluginSpec::src`].
@@ -378,7 +399,7 @@ mod tests {
             src: "https://example.com/x.git".into(),
             rev: None,
             kind: Some(SourceKind::Local),
-        env: HashMap::new(),
+        auth: Vec::new(),
         };
         assert_eq!(spec.resolved_kind(), SourceKind::Local);
     }
@@ -444,7 +465,7 @@ rev = "main"
                 src: "/does/not/exist".into(),
                 rev: None,
                 kind: None,
-            env: HashMap::new(),
+            auth: Vec::new(),
             }],
         };
         let report = sync_plugins(&spec, &plugins_dir, tmp.path());
@@ -464,14 +485,14 @@ rev = "main"
                     src: "/whatever".into(),
                     rev: None,
                     kind: None,
-                env: HashMap::new(),
+                auth: Vec::new(),
                 },
                 PluginSpec {
                     name: "a/b".into(),
                     src: "/whatever".into(),
                     rev: None,
                     kind: None,
-                env: HashMap::new(),
+                auth: Vec::new(),
                 },
             ],
         };
@@ -497,7 +518,7 @@ rev = "main"
                 src: source.to_string_lossy().into_owned(),
                 rev: None,
                 kind: None,
-            env: HashMap::new(),
+            auth: Vec::new(),
             }],
         };
         let report = sync_plugins(&spec, &plugins_dir, tmp.path());
@@ -523,7 +544,7 @@ rev = "main"
                 src: tmp.path().join("does-not-exist").to_string_lossy().into_owned(),
                 rev: None,
                 kind: None,
-            env: HashMap::new(),
+            auth: Vec::new(),
             }],
         };
         let report = sync_plugins(&spec, &plugins_dir, tmp.path());
@@ -544,7 +565,7 @@ rev = "main"
                 src: file_src.to_string_lossy().into_owned(),
                 rev: None,
                 kind: None,
-            env: HashMap::new(),
+            auth: Vec::new(),
             }],
         };
         let report = sync_plugins(&spec, &plugins_dir, tmp.path());
@@ -575,7 +596,7 @@ rev = "main"
                 src: "../lazy-gagent".into(),
                 rev: None,
                 kind: None,
-            env: HashMap::new(),
+            auth: Vec::new(),
             }],
         };
         // Pass `<workspace>/.grain/` as base_dir — the spec file's

@@ -332,7 +332,10 @@ impl Session {
         })
     }
 
-    async fn next_entry(&self, kind: SessionTreeEntryKind) -> Result<SessionTreeEntry, SessionError> {
+    async fn next_entry(
+        &self,
+        kind: SessionTreeEntryKind,
+    ) -> Result<SessionTreeEntry, SessionError> {
         let id = self.storage.create_entry_id().await;
         let parent_id = self.storage.get_leaf_id().await;
         let entry = SessionTreeEntry {
@@ -351,7 +354,9 @@ impl Session {
     ///
     /// Returns [`SessionError`] when the underlying storage write fails.
     pub async fn append_message(&self, message: AgentMessage) -> Result<String, SessionError> {
-        let entry = self.next_entry(SessionTreeEntryKind::Message { message }).await?;
+        let entry = self
+            .next_entry(SessionTreeEntryKind::Message { message })
+            .await?;
         Ok(entry.id)
     }
 
@@ -449,13 +454,19 @@ impl Session {
             return Err(SessionError::NotFound(format!("Entry {target} not found")));
         }
         let entry = self
-            .next_entry(SessionTreeEntryKind::Label { target_id: target, label })
+            .next_entry(SessionTreeEntryKind::Label {
+                target_id: target,
+                label,
+            })
             .await?;
         Ok(entry.id)
     }
 
     /// Set the session display name (persisted as a `session_info` entry).
-    pub async fn append_session_name(&self, name: impl Into<String>) -> Result<String, SessionError> {
+    pub async fn append_session_name(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<String, SessionError> {
         let name = name.into().trim().to_string();
         let entry = self
             .next_entry(SessionTreeEntryKind::SessionInfo { name })
@@ -487,7 +498,9 @@ impl Session {
             parent_id: entry_id.map(|s| s.to_string()),
             timestamp: now_iso(),
             kind: SessionTreeEntryKind::BranchSummary {
-                from_id: entry_id.map(|s| s.to_string()).unwrap_or_else(|| "root".into()),
+                from_id: entry_id
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "root".into()),
                 summary: summary.summary,
                 details: summary.details,
                 from_hook: summary.from_hook,
@@ -513,7 +526,9 @@ pub fn build_session_context(path_entries: &[SessionTreeEntry]) -> SessionContex
 
     for (i, entry) in path_entries.iter().enumerate() {
         match &entry.kind {
-            SessionTreeEntryKind::ThinkingLevelChange { thinking_level: lvl } => {
+            SessionTreeEntryKind::ThinkingLevelChange {
+                thinking_level: lvl,
+            } => {
                 thinking_level = lvl.clone();
             }
             SessionTreeEntryKind::ModelChange { provider, model_id } => {
@@ -551,7 +566,9 @@ pub fn build_session_context(path_entries: &[SessionTreeEntry]) -> SessionContex
                 timestamp,
             ));
         }
-        SessionTreeEntryKind::BranchSummary { summary, from_id, .. } => {
+        SessionTreeEntryKind::BranchSummary {
+            summary, from_id, ..
+        } => {
             if !summary.is_empty() {
                 out.push(branch_summary_message(
                     summary,
@@ -611,7 +628,10 @@ fn parse_iso_to_ms(iso: &str) -> i64 {
     }
     let bytes = iso.as_bytes();
     let parse = |start: usize, len: usize| -> Option<i64> {
-        std::str::from_utf8(&bytes[start..start + len]).ok()?.parse().ok()
+        std::str::from_utf8(&bytes[start..start + len])
+            .ok()?
+            .parse()
+            .ok()
     };
     let year: i64 = parse(0, 4).unwrap_or(0);
     let month: i64 = parse(5, 2).unwrap_or(0);
@@ -678,7 +698,9 @@ impl InMemorySessionStorage {
             labels: HashMap::new(),
         };
         for entry in entries {
-            storage.index.insert(entry.id.clone(), storage.entries.len());
+            storage
+                .index
+                .insert(entry.id.clone(), storage.entries.len());
             if let SessionTreeEntryKind::Label { target_id, label } = &entry.kind {
                 match label {
                     Some(text) => {
@@ -812,7 +834,10 @@ impl SessionRepo for InMemorySessionRepo {
             SessionMetadata::new()
         };
         let storage = Arc::new(InMemorySessionStorage::new(metadata.clone()));
-        self.sessions.lock().await.insert(metadata.id.clone(), storage.clone());
+        self.sessions
+            .lock()
+            .await
+            .insert(metadata.id.clone(), storage.clone());
         Ok(Session::new(storage))
     }
 
@@ -850,9 +875,7 @@ impl SessionRepo for InMemorySessionRepo {
             let guard = self.sessions.lock().await;
             guard
                 .get(&source.id)
-                .ok_or_else(|| {
-                    SessionError::NotFound(format!("Session not found: {}", source.id))
-                })?
+                .ok_or_else(|| SessionError::NotFound(format!("Session not found: {}", source.id)))?
                 .clone()
         };
         let fork_entries = entries_to_fork(&*storage, entry_id, position).await?;
@@ -940,7 +963,10 @@ mod tests {
             .append_compaction("prior summary", &kept_id, 1234, None, None)
             .await
             .unwrap();
-        session.append_message(user("after compaction")).await.unwrap();
+        session
+            .append_message(user("after compaction"))
+            .await
+            .unwrap();
 
         let ctx = session.build_context().await;
         // Expect: compaction summary + "kept" + "after compaction" (3 entries).

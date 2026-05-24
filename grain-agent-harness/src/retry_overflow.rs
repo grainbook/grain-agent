@@ -149,7 +149,10 @@ impl LlmStream for RetryOnOverflowStream {
         for attempt in 0..=self.config.max_retries {
             // Buffer all events from the inner stream.
             let mut events: Vec<AssistantMessageEvent> = Vec::new();
-            let mut stream = self.inner.stream(model, &ctx, options, cancel.clone()).await?;
+            let mut stream = self
+                .inner
+                .stream(model, &ctx, options, cancel.clone())
+                .await?;
             while let Some(evt) = stream.next().await {
                 events.push(evt);
             }
@@ -276,8 +279,8 @@ fn drop_oldest_safe(messages: &mut Vec<Message>) -> usize {
 mod tests {
     use super::*;
     use grain_agent_core::{
-        AssistantMessage, StopReason, TextContent, ToolCall, ToolResultMessage, Usage,
-        UserContent, UserMessage,
+        AssistantMessage, StopReason, TextContent, ToolCall, ToolResultMessage, Usage, UserContent,
+        UserMessage,
     };
 
     // -----------------------------------------------------------------------
@@ -293,9 +296,7 @@ mod tests {
 
     fn assistant_msg(text: &str) -> Message {
         Message::Assistant(AssistantMessage {
-            content: vec![AssistantContent::Text(TextContent {
-                text: text.into(),
-            })],
+            content: vec![AssistantContent::Text(TextContent { text: text.into() })],
             api: "test".into(),
             provider: "test".into(),
             model: "test".into(),
@@ -336,9 +337,7 @@ mod tests {
 
     fn done_msg() -> AssistantMessage {
         AssistantMessage {
-            content: vec![AssistantContent::Text(TextContent {
-                text: "ok".into(),
-            })],
+            content: vec![AssistantContent::Text(TextContent { text: "ok".into() })],
             api: "test".into(),
             provider: "test".into(),
             model: "test".into(),
@@ -417,9 +416,7 @@ mod tests {
                 };
                 Ok(Box::pin(futures::stream::iter(vec![evt])))
             } else {
-                let evt = AssistantMessageEvent::Done {
-                    result: done_msg(),
-                };
+                let evt = AssistantMessageEvent::Done { result: done_msg() };
                 Ok(Box::pin(futures::stream::iter(vec![evt])))
             }
         }
@@ -550,7 +547,12 @@ mod tests {
             tools: vec![],
         };
         let mut stream = wrapper
-            .stream(&dummy_model(), &ctx, &dummy_options(), CancellationToken::new())
+            .stream(
+                &dummy_model(),
+                &ctx,
+                &dummy_options(),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -565,23 +567,20 @@ mod tests {
 
     #[tokio::test]
     async fn retry_twice_on_overflow_then_succeed() {
-        let inner = Arc::new(FailThenSucceed::new(
-            2,
-            "context_length_exceeded",
-        ));
+        let inner = Arc::new(FailThenSucceed::new(2, "context_length_exceeded"));
         let wrapper = RetryOnOverflowStream::new(inner);
         let ctx = LlmContext {
             system_prompt: String::new(),
-            messages: vec![
-                user_msg("a"),
-                user_msg("b"),
-                user_msg("c"),
-                user_msg("d"),
-            ],
+            messages: vec![user_msg("a"), user_msg("b"), user_msg("c"), user_msg("d")],
             tools: vec![],
         };
         let mut stream = wrapper
-            .stream(&dummy_model(), &ctx, &dummy_options(), CancellationToken::new())
+            .stream(
+                &dummy_model(),
+                &ctx,
+                &dummy_options(),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -590,7 +589,10 @@ mod tests {
             events.push(evt);
         }
 
-        assert!(matches!(events.last(), Some(AssistantMessageEvent::Done { .. })));
+        assert!(matches!(
+            events.last(),
+            Some(AssistantMessageEvent::Done { .. })
+        ));
     }
 
     #[tokio::test]
@@ -616,7 +618,12 @@ mod tests {
             tools: vec![],
         };
         let mut stream = wrapper
-            .stream(&dummy_model(), &ctx, &dummy_options(), CancellationToken::new())
+            .stream(
+                &dummy_model(),
+                &ctx,
+                &dummy_options(),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -645,7 +652,12 @@ mod tests {
             tools: vec![],
         };
         let mut stream = wrapper
-            .stream(&dummy_model(), &ctx, &dummy_options(), CancellationToken::new())
+            .stream(
+                &dummy_model(),
+                &ctx,
+                &dummy_options(),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -681,7 +693,12 @@ mod tests {
             tools: vec![],
         };
         let mut stream = wrapper
-            .stream(&dummy_model(), &ctx, &dummy_options(), CancellationToken::new())
+            .stream(
+                &dummy_model(),
+                &ctx,
+                &dummy_options(),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -699,10 +716,7 @@ mod tests {
 
     #[tokio::test]
     async fn drop_oldest_does_not_orphan_tool_results() {
-        let recording = Arc::new(RecordingStream::new(
-            1,
-            "maximum context length exceeded",
-        ));
+        let recording = Arc::new(RecordingStream::new(1, "maximum context length exceeded"));
         let wrapper = RetryOnOverflowStream::new(recording.clone());
         // Transcript: [assistant(tool_call c1), tool_result(c1), user("next")]
         let ctx = LlmContext {
@@ -715,7 +729,12 @@ mod tests {
             tools: vec![],
         };
         let mut stream = wrapper
-            .stream(&dummy_model(), &ctx, &dummy_options(), CancellationToken::new())
+            .stream(
+                &dummy_model(),
+                &ctx,
+                &dummy_options(),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -724,7 +743,10 @@ mod tests {
             events.push(evt);
         }
 
-        assert!(matches!(events.last(), Some(AssistantMessageEvent::Done { .. })));
+        assert!(matches!(
+            events.last(),
+            Some(AssistantMessageEvent::Done { .. })
+        ));
         // First call: 3 messages. After dropping assistant+tool_result: 1 message.
         let counts = recording.counts();
         assert_eq!(counts[0], 3);
@@ -733,10 +755,7 @@ mod tests {
 
     #[tokio::test]
     async fn messages_shrink_on_each_retry() {
-        let recording = Arc::new(RecordingStream::new(
-            3,
-            "prompt is too long",
-        ));
+        let recording = Arc::new(RecordingStream::new(3, "prompt is too long"));
         let wrapper = RetryOnOverflowStream::new(recording.clone());
         let ctx = LlmContext {
             system_prompt: String::new(),
@@ -750,7 +769,12 @@ mod tests {
             tools: vec![],
         };
         let mut stream = wrapper
-            .stream(&dummy_model(), &ctx, &dummy_options(), CancellationToken::new())
+            .stream(
+                &dummy_model(),
+                &ctx,
+                &dummy_options(),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -784,7 +808,9 @@ mod tests {
 
     #[test]
     fn detects_anthropic_style() {
-        assert!(default_is_overflow("maximum context length is 200000 tokens"));
+        assert!(default_is_overflow(
+            "maximum context length is 200000 tokens"
+        ));
     }
 
     #[test]

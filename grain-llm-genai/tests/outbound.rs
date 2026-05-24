@@ -5,8 +5,8 @@
 
 use genai::chat::{ChatRequest, ChatRole, ContentPart, MessageContent};
 use grain_agent_core::{
-    AssistantContent, AssistantMessage, ImageContent, LlmContext, Message, StopReason,
-    TextContent, ToolCall, ToolDefinition, ToolResultMessage, Usage, UserContent, UserMessage,
+    AssistantContent, AssistantMessage, ImageContent, LlmContext, Message, StopReason, TextContent,
+    ToolCall, ToolDefinition, ToolResultMessage, Usage, UserContent, UserMessage,
 };
 use grain_llm_genai::to_chat_request;
 
@@ -40,7 +40,9 @@ fn assistant_text(text: &str) -> Message {
 
 fn collect_text_from_message_content(content: &MessageContent) -> Vec<String> {
     let json = serde_json::to_value(content).expect("MessageContent must serialize");
-    let arr = json.as_array().expect("MessageContent serializes transparent as array");
+    let arr = json
+        .as_array()
+        .expect("MessageContent serializes transparent as array");
     arr.iter()
         .filter_map(|part| {
             // Text is `{ "Text": "..." }` (or similar) under serde tag-less default.
@@ -83,7 +85,9 @@ fn user_text_message_maps_to_user_role() {
 fn user_with_image_uses_parts() {
     let msg = Message::User(UserMessage {
         content: vec![
-            UserContent::Text(TextContent { text: "describe this".into() }),
+            UserContent::Text(TextContent {
+                text: "describe this".into(),
+            }),
             UserContent::Image(ImageContent {
                 data: "AAAA".into(),
                 mime_type: "image/png".into(),
@@ -109,7 +113,9 @@ fn assistant_text_message_maps_to_assistant_role() {
 fn assistant_with_tool_calls_emits_tool_call_part() {
     let msg = Message::Assistant(AssistantMessage {
         content: vec![
-            AssistantContent::Text(TextContent { text: "calling tool".into() }),
+            AssistantContent::Text(TextContent {
+                text: "calling tool".into(),
+            }),
             AssistantContent::ToolCall(ToolCall {
                 id: "call-1".into(),
                 name: "echo".into(),
@@ -127,10 +133,16 @@ fn assistant_with_tool_calls_emits_tool_call_part() {
     let chat = to_chat_request(&ctx(vec![msg], vec![], ""));
     let body = serde_json::to_value(&chat.messages[0].content).unwrap();
     let body_s = body.to_string();
-    assert!(body_s.contains("call-1"), "tool call id preserved: {body_s}");
+    assert!(
+        body_s.contains("call-1"),
+        "tool call id preserved: {body_s}"
+    );
     assert!(body_s.contains("echo"), "fn_name preserved: {body_s}");
     assert!(body_s.contains("hi"), "arguments preserved: {body_s}");
-    assert!(body_s.contains("calling tool"), "text part preserved: {body_s}");
+    assert!(
+        body_s.contains("calling tool"),
+        "text part preserved: {body_s}"
+    );
 }
 
 #[test]
@@ -147,7 +159,9 @@ fn thinking_text_is_echoed_back_via_reasoning_content() {
                 signature: None,
                 provider_metadata: None,
             }),
-            AssistantContent::Text(TextContent { text: "final answer".into() }),
+            AssistantContent::Text(TextContent {
+                text: "final answer".into(),
+            }),
         ],
         api: "openai".into(),
         provider: "openai".into(),
@@ -200,10 +214,7 @@ fn thinking_signature_attaches_to_first_tool_call() {
     let body = serde_json::to_value(&chat.messages[0].content).unwrap();
     let arr = body.as_array().expect("parts");
     // First tool call carries the signature; second does not.
-    let to_calls: Vec<&serde_json::Value> = arr
-        .iter()
-        .filter_map(|v| v.get("ToolCall"))
-        .collect();
+    let to_calls: Vec<&serde_json::Value> = arr.iter().filter_map(|v| v.get("ToolCall")).collect();
     assert_eq!(to_calls.len(), 2);
     assert_eq!(
         to_calls[0].get("thought_signatures"),
@@ -221,7 +232,9 @@ fn tool_result_message_maps_to_tool_role() {
     let msg = Message::ToolResult(ToolResultMessage {
         tool_call_id: "call-1".into(),
         tool_name: "echo".into(),
-        content: vec![UserContent::Text(TextContent { text: "echo: hi".into() })],
+        content: vec![UserContent::Text(TextContent {
+            text: "echo: hi".into(),
+        })],
         details: serde_json::Value::Null,
         is_error: false,
         timestamp: 0,
@@ -255,7 +268,10 @@ fn tools_translate_to_genai_tool_definitions() {
     assert_eq!(t.description.as_deref(), Some("Echo back the value"));
     let schema = t.schema.as_ref().expect("schema attached");
     assert_eq!(
-        schema.get("required").and_then(|r| r.as_array()).map(|a| a.len()),
+        schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|a| a.len()),
         Some(1)
     );
 }

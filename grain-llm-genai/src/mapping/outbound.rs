@@ -19,8 +19,8 @@ use genai::chat::{
     ToolResponse,
 };
 use grain_agent_core::{
-    AssistantContent, AssistantMessage, LlmContext, Message, ToolDefinition,
-    ToolResultMessage, UserContent, UserMessage,
+    AssistantContent, AssistantMessage, LlmContext, Message, ToolDefinition, ToolResultMessage,
+    UserContent, UserMessage,
 };
 
 /// Sensible defaults for any genai chat request driven by the agent loop.
@@ -306,7 +306,9 @@ mod tests {
     #[test]
     fn is_tool_args_corrupt_flags_unparseable_strings() {
         // Truncated JSON — what an interrupted streaming chunk leaves.
-        assert!(is_tool_args_corrupt(&json!(r#"{"path": "/foo", "old": "abc"#)));
+        assert!(is_tool_args_corrupt(&json!(
+            r#"{"path": "/foo", "old": "abc"#
+        )));
         // Valid JSON but not an object.
         assert!(is_tool_args_corrupt(&json!(r#""just a value""#)));
         // Plain object — fine.
@@ -317,9 +319,7 @@ mod tests {
 
     #[test]
     fn collect_corrupt_tool_call_ids_picks_up_only_broken_calls() {
-        use grain_agent_core::{
-            AssistantMessage, StopReason, ToolCall as GrainToolCall, Usage,
-        };
+        use grain_agent_core::{AssistantMessage, StopReason, ToolCall as GrainToolCall, Usage};
         let good = Message::Assistant(AssistantMessage {
             content: vec![AssistantContent::ToolCall(GrainToolCall {
                 id: "call_good".into(),

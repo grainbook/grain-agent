@@ -32,9 +32,7 @@ use grain_agent_core::{Cost, ThinkingLevel};
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::descriptor::{
-    ApiKind, Capabilities, ModelDescriptor, ProviderId, ThinkingProfile,
-};
+use crate::descriptor::{ApiKind, Capabilities, ModelDescriptor, ProviderId, ThinkingProfile};
 use crate::registry::{Registry, RegistryError};
 use crate::snapshot::{CURRENT_SNAPSHOT_VERSION, Snapshot};
 
@@ -76,8 +74,7 @@ pub fn parse_models_dev(bytes: &[u8]) -> Result<Registry, FetchError> {
 /// Project a registry into a serializable [`Snapshot`] (sorted by id so the
 /// vendored file diffs cleanly between refreshes).
 pub fn registry_to_snapshot(registry: &Registry) -> Snapshot {
-    let mut models: Vec<ModelDescriptor> =
-        registry.iter().map(|(_, m)| m.clone()).collect();
+    let mut models: Vec<ModelDescriptor> = registry.iter().map(|(_, m)| m.clone()).collect();
     models.sort_by(|a, b| a.id.cmp(&b.id));
     Snapshot {
         version: CURRENT_SNAPSHOT_VERSION,
@@ -91,7 +88,7 @@ pub fn registry_to_snapshot(registry: &Registry) -> Snapshot {
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)] // `env` / `api` / `name` / `id` are preserved for the upcoming
-                    // grain-llm-genai env-var resolver and base-URL routing.
+// grain-llm-genai env-var resolver and base-URL routing.
 struct RawProvider {
     #[serde(default)]
     id: String,
@@ -215,18 +212,18 @@ fn classify_provider(key: &str, npm: &str) -> ProviderId {
     match key {
         "anthropic" => ProviderId::Anthropic,
         "openai" => ProviderId::OpenAi,
-        "google" | "google-ai-studio" | "google-vertex" | "vertex-anthropic" => {
-            ProviderId::Google
-        }
+        "google" | "google-ai-studio" | "google-vertex" | "vertex-anthropic" => ProviderId::Google,
         "deepseek" => ProviderId::DeepSeek,
         "mistral" => ProviderId::Mistral,
         "meta" => ProviderId::Meta,
         "cohere" => ProviderId::Cohere,
         "xai" => ProviderId::Xai,
-        _ if npm.contains("openai-compatible") => {
-            ProviderId::OpenAiCompatible { id: key.to_string() }
-        }
-        _ => ProviderId::Other { id: key.to_string() },
+        _ if npm.contains("openai-compatible") => ProviderId::OpenAiCompatible {
+            id: key.to_string(),
+        },
+        _ => ProviderId::Other {
+            id: key.to_string(),
+        },
     }
 }
 
@@ -311,7 +308,9 @@ mod tests {
     #[test]
     fn anthropic_model_round_trips() {
         let registry = parse_models_dev(&fixture()).unwrap();
-        let m = registry.lookup("anthropic/claude-opus-4-1").expect("present");
+        let m = registry
+            .lookup("anthropic/claude-opus-4-1")
+            .expect("present");
         assert_eq!(m.provider, ProviderId::Anthropic);
         assert_eq!(m.api, ApiKind::Anthropic);
         assert_eq!(m.context_window, 200_000);

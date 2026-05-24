@@ -31,10 +31,9 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use grain_agent_core::{
-    Agent, AfterToolCallFn, AgentError, AgentEvent, AgentMessage, AgentOptions, AgentTool,
-    AssistantMessage, AssistantMessageEvent, BeforeToolCallFn, ConvertToLlmFn, GetApiKeyFn,
-    Model, PrepareNextTurnFn, QueueMode, StreamFn, ThinkingLevel, ToolExecutionMode,
-    TransformContextFn,
+    AfterToolCallFn, Agent, AgentError, AgentEvent, AgentMessage, AgentOptions, AgentTool,
+    AssistantMessage, AssistantMessageEvent, BeforeToolCallFn, ConvertToLlmFn, GetApiKeyFn, Model,
+    PrepareNextTurnFn, QueueMode, StreamFn, ThinkingLevel, ToolExecutionMode, TransformContextFn,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -261,30 +260,45 @@ pub enum AgentHarnessEvent {
     /// next_turn). Phase 2 carries only a `has_queued` boolean —
     /// `grain-agent-core::Agent` doesn't surface exact lengths.
     /// Higher-fidelity counts can be added when needed.
-    QueueUpdate { has_queued: bool },
+    QueueUpdate {
+        has_queued: bool,
+    },
     /// `set_model` ran successfully. Pi fires this after every
     /// runtime model swap so listeners (e.g. the TUI status bar)
     /// can re-render.
-    ModelSelect { model: Model },
+    ModelSelect {
+        model: Model,
+    },
     /// `set_thinking_level` ran successfully.
-    ThinkingLevelSelect { level: ThinkingLevel },
+    ThinkingLevelSelect {
+        level: ThinkingLevel,
+    },
     /// Active-tool subset changed via `set_active_tools`. Carries
     /// the names that are now exposed to the LLM.
-    ActiveToolsSelect { names: Vec<String> },
+    ActiveToolsSelect {
+        names: Vec<String>,
+    },
     /// `append_entry` ran. Carries the session entry id + type tag —
     /// extensions / persistence layers can use this as a save point
     /// without inspecting the session storage directly.
-    AppendEntry { entry_id: String, type_tag: String },
+    AppendEntry {
+        entry_id: String,
+        type_tag: String,
+    },
     /// `compact()` is about to drive a summarization round trip.
     /// Carries the messages that will be summarized (the prefix
     /// before the keep-recent tail).
-    SessionBeforeCompact { messages: Vec<AgentMessage> },
+    SessionBeforeCompact {
+        messages: Vec<AgentMessage>,
+    },
     /// `compact()` finished successfully. `kept_from` is the session
     /// entry id the new transcript prefix starts from. Pi also
     /// carries the summary text; Phase 3 keeps it minimal —
     /// subscribers wanting the summary can read it from the
     /// preceding `MessageEnd` event.
-    SessionCompact { kept_from: Option<String> },
+    SessionCompact {
+        kept_from: Option<String>,
+    },
     /// `navigate_tree` is about to switch leaves. Both ids are
     /// `Option` because the root leaf is `None`.
     SessionBeforeTree {
@@ -293,7 +307,9 @@ pub enum AgentHarnessEvent {
     },
     /// `navigate_tree` finished — agent transcript now reflects
     /// `current_leaf`'s branch.
-    SessionTree { current_leaf: Option<String> },
+    SessionTree {
+        current_leaf: Option<String>,
+    },
     /// Fired by the harness immediately before kicking off the
     /// agent loop for a new turn (from `prompt_text` / `prompt` /
     /// `prompt_from_template` / `skill`). Mirrors pi's
@@ -374,9 +390,8 @@ impl AgentHarnessEvent {
 
 /// Listener signature mirrors `grain_agent_core::EventListener` but
 /// receives `AgentHarnessEvent`.
-pub type HarnessEventListener = Arc<
-    dyn Fn(AgentHarnessEvent, CancellationToken) -> BoxFuture<'static, ()> + Send + Sync,
->;
+pub type HarnessEventListener =
+    Arc<dyn Fn(AgentHarnessEvent, CancellationToken) -> BoxFuture<'static, ()> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -616,11 +631,7 @@ impl AgentHarness {
     /// user prompt like `"Use the <name> skill with args: <json>"`
     /// and submits it. Phase 5 will wire pi's typed-skill semantics
     /// (validate against `Resources::skills`, structured invocation).
-    pub async fn skill(
-        &self,
-        name: &str,
-        args: serde_json::Value,
-    ) -> Result<(), HarnessError> {
+    pub async fn skill(&self, name: &str, args: serde_json::Value) -> Result<(), HarnessError> {
         let text = format!(
             "Use the `{name}` skill with arguments: {}",
             serde_json::to_string(&args).unwrap_or_else(|_| "{}".into())
@@ -631,10 +642,7 @@ impl AgentHarness {
     /// Swap the harness's resources atomically. Emits
     /// [`AgentHarnessEvent::ResourcesUpdate`] with the new counts.
     pub async fn set_resources(&self, resources: Resources) {
-        let (skills, templates) = (
-            resources.skills.len(),
-            resources.prompt_templates.len(),
-        );
+        let (skills, templates) = (resources.skills.len(), resources.prompt_templates.len());
         self.inner.lock().await.resources = resources;
         self.emit(AgentHarnessEvent::ResourcesUpdate { skills, templates })
             .await;
@@ -733,7 +741,8 @@ impl AgentHarness {
 
     async fn emit_queue_update(&self) {
         let has_queued = self.agent.has_queued_messages().await;
-        self.emit(AgentHarnessEvent::QueueUpdate { has_queued }).await;
+        self.emit(AgentHarnessEvent::QueueUpdate { has_queued })
+            .await;
     }
 
     // ----- Phase 3 — session control -------------------------------------
@@ -761,10 +770,7 @@ impl AgentHarness {
     /// `None`). Rewrites the agent's transcript to the new branch's
     /// `build_context` result so subsequent turns see the right
     /// history. Emits `SessionBeforeTree` then `SessionTree`.
-    pub async fn navigate_tree(
-        &self,
-        target_leaf: Option<String>,
-    ) -> Result<(), HarnessError> {
+    pub async fn navigate_tree(&self, target_leaf: Option<String>) -> Result<(), HarnessError> {
         let from = self.session.leaf_id().await;
         self.emit(AgentHarnessEvent::SessionBeforeTree {
             from: from.clone(),
@@ -993,9 +999,9 @@ mod tests {
     }
 
     fn empty_session() -> Session {
-        Session::new(Arc::new(InMemorySessionStorage::new(
-            SessionMetadata::new(),
-        )))
+        Session::new(Arc::new(
+            InMemorySessionStorage::new(SessionMetadata::new()),
+        ))
     }
 
     fn dummy_model() -> Model {
@@ -1406,18 +1412,14 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_from_template_renders_and_submits() {
-        let mut opts =
-            AgentHarnessOptions::new(empty_session(), dummy_model(), stub_stream_fn());
+        let mut opts = AgentHarnessOptions::new(empty_session(), dummy_model(), stub_stream_fn());
         opts.resources = Resources {
             skills: vec![],
             prompt_templates: vec![PromptTemplate {
                 name: "greet".into(),
                 description: "Hi".into(),
                 render: Arc::new(|args| {
-                    let who = args
-                        .get("who")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("world");
+                    let who = args.get("who").and_then(|v| v.as_str()).unwrap_or("world");
                     format!("Hello, {who}!")
                 }),
             }],
@@ -1568,8 +1570,7 @@ mod tests {
             })
         });
 
-        let mut opts =
-            AgentHarnessOptions::new(empty_session(), dummy_model(), stub_stream_fn());
+        let mut opts = AgentHarnessOptions::new(empty_session(), dummy_model(), stub_stream_fn());
         opts.prepare_next_turn = Some(hook);
         let h = AgentHarness::new(opts).await;
 
@@ -1605,8 +1606,8 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         let calls = Arc::new(AtomicU32::new(0));
         let calls_for_hook = calls.clone();
-        let user_fn: grain_agent_core::ConvertToLlmFn = Arc::new(
-            move |messages: Vec<AgentMessage>| {
+        let user_fn: grain_agent_core::ConvertToLlmFn =
+            Arc::new(move |messages: Vec<AgentMessage>| {
                 let calls = calls_for_hook.clone();
                 Box::pin(async move {
                     calls.fetch_add(1, Ordering::Relaxed);
@@ -1620,10 +1621,8 @@ mod tests {
                         })
                         .collect()
                 })
-            },
-        );
-        let mut opts =
-            AgentHarnessOptions::new(empty_session(), dummy_model(), stub_stream_fn());
+            });
+        let mut opts = AgentHarnessOptions::new(empty_session(), dummy_model(), stub_stream_fn());
         opts.convert_to_llm = Some(user_fn);
         let h = AgentHarness::new(opts).await;
         h.prompt_text("hi").await.unwrap();

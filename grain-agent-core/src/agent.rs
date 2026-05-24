@@ -18,9 +18,8 @@ use crate::types::*;
 // Listener type and helpers
 // ---------------------------------------------------------------------------
 
-pub type EventListener = Arc<
-    dyn Fn(AgentEvent, CancellationToken) -> BoxFuture<'static, ()> + Send + Sync,
->;
+pub type EventListener =
+    Arc<dyn Fn(AgentEvent, CancellationToken) -> BoxFuture<'static, ()> + Send + Sync>;
 
 #[derive(Default)]
 struct PendingMessageQueue {
@@ -244,7 +243,9 @@ impl Agent {
         Agent {
             inner: Arc::new(Mutex::new(inner)),
             stream_fn: options.stream_fn,
-            convert_to_llm: options.convert_to_llm.unwrap_or_else(default_convert_to_llm),
+            convert_to_llm: options
+                .convert_to_llm
+                .unwrap_or_else(default_convert_to_llm),
             transform_context: options.transform_context,
             get_api_key: options.get_api_key,
             before_tool_call: options.before_tool_call,
@@ -464,12 +465,8 @@ impl Agent {
             }
         };
         match action {
-            ContinueAction::ResumeFromSteering(msgs) => {
-                self.run_prompt_messages(msgs, true).await
-            }
-            ContinueAction::ResumeFromFollowUp(msgs) => {
-                self.run_prompt_messages(msgs, false).await
-            }
+            ContinueAction::ResumeFromSteering(msgs) => self.run_prompt_messages(msgs, true).await,
+            ContinueAction::ResumeFromFollowUp(msgs) => self.run_prompt_messages(msgs, false).await,
             ContinueAction::FromTranscript => self.run_continuation().await,
         }
     }
@@ -488,7 +485,7 @@ impl Agent {
         let stream_fn = self.stream_fn.clone();
         let inner = self.inner.clone();
 
-        let result = agent_loop::run_agent_loop(
+        let result = agent_loop::run_agent_loop_with_result(
             messages,
             context,
             config,
@@ -498,7 +495,12 @@ impl Agent {
         )
         .await;
 
-        self.finish_run(inner, result.err(), cancel.is_cancelled()).await;
+        let (loop_error, final_context) = match result {
+            Ok(result) => (None, Some(result.context)),
+            Err(err) => (Some(err), None),
+        };
+        self.finish_run(inner, loop_error, final_context, cancel.is_cancelled())
+            .await;
         Ok(())
     }
 
@@ -510,7 +512,7 @@ impl Agent {
         let stream_fn = self.stream_fn.clone();
         let inner = self.inner.clone();
 
-        let result = agent_loop::run_agent_loop_continue(
+        let result = agent_loop::run_agent_loop_continue_with_result(
             context,
             config,
             emit,
@@ -519,7 +521,12 @@ impl Agent {
         )
         .await;
 
-        self.finish_run(inner, result.err(), cancel.is_cancelled()).await;
+        let (loop_error, final_context) = match result {
+            Ok(result) => (None, Some(result.context)),
+            Err(err) => (Some(err), None),
+        };
+        self.finish_run(inner, loop_error, final_context, cancel.is_cancelled())
+            .await;
         Ok(())
     }
 
@@ -540,6 +547,7 @@ impl Agent {
         &self,
         inner: Arc<Mutex<Inner>>,
         loop_error: Option<agent_loop::AgentLoopError>,
+        final_context: Option<AgentContext>,
         aborted: bool,
     ) {
         if let Some(err) = loop_error {
@@ -592,6 +600,9 @@ impl Agent {
         }
 
         let mut g = inner.lock().await;
+        if let Some(context) = final_context {
+            g.messages = context.messages;
+        }
         g.is_streaming = false;
         g.streaming_message = None;
         g.pending_tool_calls.clear();

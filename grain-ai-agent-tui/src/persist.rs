@@ -78,9 +78,7 @@ mod tests {
 
     #[test]
     fn load_missing_file_returns_default() {
-        let s = PersistedState::load(Path::new(
-            "/tmp/grain-nonexistent-tui-state-xyz-123.toml",
-        ));
+        let s = PersistedState::load(Path::new("/tmp/grain-nonexistent-tui-state-xyz-123.toml"));
         assert_eq!(s, PersistedState::default());
     }
 
@@ -158,9 +156,6 @@ mod tests {
     #[test]
     fn default_path_matches_workspace_convention() {
         let p = default_path(Path::new("/workspace"));
-        assert_eq!(
-            p,
-            PathBuf::from("/workspace/.grain/tui-state.toml")
-        );
+        assert_eq!(p, PathBuf::from("/workspace/.grain/tui-state.toml"));
     }
 }

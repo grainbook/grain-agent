@@ -271,10 +271,7 @@ impl InboundState {
         result.stop_reason = StopReason::Error;
         result.error_message = Some(msg.clone());
         result.timestamp = now_ms();
-        AssistantMessageEvent::Error {
-            error: msg,
-            result,
-        }
+        AssistantMessageEvent::Error { error: msg, result }
     }
 
     fn close_open(&mut self, out: &mut Vec<AssistantMessageEvent>) {
@@ -293,7 +290,10 @@ impl InboundState {
 }
 
 fn infer_stop_reason(content: &[AssistantContent]) -> StopReason {
-    if content.iter().any(|c| matches!(c, AssistantContent::ToolCall(_))) {
+    if content
+        .iter()
+        .any(|c| matches!(c, AssistantContent::ToolCall(_)))
+    {
         StopReason::ToolUse
     } else {
         StopReason::Stop

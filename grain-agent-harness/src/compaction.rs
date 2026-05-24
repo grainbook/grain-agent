@@ -118,10 +118,7 @@ impl CompactionPolicy for MessageCountPolicy {
 /// Returns an adjusted `prefix_len` that is safe to use as a split
 /// point. May return `messages.len()` (the entire transcript is the
 /// prefix — caller should check for degenerate cases).
-pub fn snap_to_safe_boundary(
-    messages: &[AgentMessage],
-    mut prefix_len: usize,
-) -> usize {
+pub fn snap_to_safe_boundary(messages: &[AgentMessage], mut prefix_len: usize) -> usize {
     while prefix_len < messages.len() {
         // Never cut at a ToolResult boundary — the preceding
         // assistant+toolcall is in the prefix, so the result
@@ -410,10 +407,9 @@ fn looks_like_path(s: &str) -> bool {
         return false;
     }
     // Must end with a plausible extension or be a known directory prefix.
-    let has_ext = s
-        .rsplit('.')
-        .next()
-        .is_some_and(|ext| ext.len() >= 2 && ext.len() <= 6 && ext.chars().all(|c| c.is_alphanumeric()));
+    let has_ext = s.rsplit('.').next().is_some_and(|ext| {
+        ext.len() >= 2 && ext.len() <= 6 && ext.chars().all(|c| c.is_alphanumeric())
+    });
     let known_dir = s.starts_with("src/")
         || s.starts_with("tests/")
         || s.starts_with("docs/")
@@ -652,9 +648,7 @@ pub fn compaction_prepare_next_turn(
                     return None;
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[warn] grain-agent-harness: compaction skipped this turn: {e}"
-                    );
+                    eprintln!("[warn] grain-agent-harness: compaction skipped this turn: {e}");
                     return None;
                 }
             };
@@ -666,18 +660,10 @@ pub fn compaction_prepare_next_turn(
             // run benefits.
             let leaf = session.leaf_id().await.unwrap_or_default();
             if let Err(e) = session
-                .append_compaction(
-                    summary.clone(),
-                    leaf,
-                    tokens_before,
-                    None,
-                    Some(true),
-                )
+                .append_compaction(summary.clone(), leaf, tokens_before, None, Some(true))
                 .await
             {
-                eprintln!(
-                    "[warn] grain-agent-harness: compaction session persist failed: {e}"
-                );
+                eprintln!("[warn] grain-agent-harness: compaction session persist failed: {e}");
             }
 
             // Weave the in-memory transcript: [summary_message, ...tail].
@@ -733,7 +719,9 @@ async fn produce_summary(
             .content
             .iter()
             .any(|c| matches!(c, AssistantContent::ToolCall(_)));
-        if !has_tool_call { break; }
+        if !has_tool_call {
+            break;
+        }
         llm_messages.pop();
     }
 
@@ -977,8 +965,16 @@ fn compress_line(line: &str) -> String {
     }
 
     // Delete "There is/are/was/were" at line start.
-    for prefix in ["there is ", "there are ", "there was ", "there were ",
-                   "There is ", "There are ", "There was ", "There were "] {
+    for prefix in [
+        "there is ",
+        "there are ",
+        "there was ",
+        "there were ",
+        "There is ",
+        "There are ",
+        "There was ",
+        "There were ",
+    ] {
         if s.starts_with(prefix) {
             s = s[prefix.len()..].to_string();
             break;
@@ -994,8 +990,18 @@ fn compress_line(line: &str) -> String {
     }
 
     // Delete pure intensifiers (standalone word, no meaning change).
-    for intensifier in ["very ", "quite ", "rather ", "really ", "extremely ",
-                        "Very ", "Quite ", "Rather ", "Really ", "Extremely "] {
+    for intensifier in [
+        "very ",
+        "quite ",
+        "rather ",
+        "really ",
+        "extremely ",
+        "Very ",
+        "Quite ",
+        "Rather ",
+        "Really ",
+        "Extremely ",
+    ] {
         s = s.replace(intensifier, "");
     }
 
@@ -1038,10 +1044,28 @@ fn remove_complementizer_that(s: &str) -> String {
     // Reporting verbs: said, reported, showed, indicated, noted, found,
     // suggested, confirmed, mentioned, stated, claimed.
     let reporting_verbs = [
-        "said", "reported", "showed", "indicated", "noted", "found",
-        "suggested", "confirmed", "mentioned", "stated", "claimed",
-        "Said", "Reported", "Showed", "Indicated", "Noted", "Found",
-        "Suggested", "Confirmed", "Mentioned", "Stated", "Claimed",
+        "said",
+        "reported",
+        "showed",
+        "indicated",
+        "noted",
+        "found",
+        "suggested",
+        "confirmed",
+        "mentioned",
+        "stated",
+        "claimed",
+        "Said",
+        "Reported",
+        "Showed",
+        "Indicated",
+        "Noted",
+        "Found",
+        "Suggested",
+        "Confirmed",
+        "Mentioned",
+        "Stated",
+        "Claimed",
     ];
     let words: Vec<&str> = s.split_whitespace().collect();
     let mut result = Vec::with_capacity(words.len());
@@ -1148,14 +1172,20 @@ mod tests {
 
     #[test]
     fn message_count_policy_below_threshold_returns_none() {
-        let p = MessageCountPolicy { threshold: 10, keep_recent: 2 };
+        let p = MessageCountPolicy {
+            threshold: 10,
+            keep_recent: 2,
+        };
         let msgs: Vec<AgentMessage> = (0..5).map(|i| user(&format!("u{i}"))).collect();
         assert!(p.evaluate(&msgs).is_none());
     }
 
     #[test]
     fn message_count_policy_at_threshold_returns_prefix_len() {
-        let p = MessageCountPolicy { threshold: 10, keep_recent: 3 };
+        let p = MessageCountPolicy {
+            threshold: 10,
+            keep_recent: 3,
+        };
         let msgs: Vec<AgentMessage> = (0..12).map(|i| user(&format!("u{i}"))).collect();
         // 12 messages, keep 3 → compact 9.
         assert_eq!(p.evaluate(&msgs), Some(9));
@@ -1164,7 +1194,10 @@ mod tests {
     #[test]
     fn message_count_policy_refuses_degenerate_compactions() {
         // 11 messages, keep 10 → would only compact 1, return None.
-        let p = MessageCountPolicy { threshold: 11, keep_recent: 10 };
+        let p = MessageCountPolicy {
+            threshold: 11,
+            keep_recent: 10,
+        };
         let msgs: Vec<AgentMessage> = (0..11).map(|i| user(&format!("u{i}"))).collect();
         assert!(p.evaluate(&msgs).is_none());
     }
@@ -1203,7 +1236,10 @@ mod tests {
         assert_eq!(out.len(), 5);
         match &out[0] {
             AgentMessage::Custom(v) => {
-                assert_eq!(v.get("role").and_then(|r| r.as_str()), Some("compactionSummary"));
+                assert_eq!(
+                    v.get("role").and_then(|r| r.as_str()),
+                    Some("compactionSummary")
+                );
                 assert_eq!(
                     v.get("summary").and_then(|s| s.as_str()),
                     Some("this is the rolled-up summary")
@@ -1223,8 +1259,7 @@ mod tests {
 
     #[tokio::test]
     async fn compact_transcript_errors_on_empty_summary() {
-        let summarizer: Arc<dyn LlmStream> =
-            Arc::new(StaticSummarizer { text: "   ".into() });
+        let summarizer: Arc<dyn LlmStream> = Arc::new(StaticSummarizer { text: "   ".into() });
         let model = Model::unknown();
         let messages: Vec<AgentMessage> = (0..6).map(|i| user(&format!("u{i}"))).collect();
         let err = compact_transcript(
@@ -1314,12 +1349,20 @@ mod tests {
     #[test]
     fn should_compact_below_threshold() {
         // Default threshold for 100k window = 83616
-        assert!(!should_compact(80_000, 100_000, &DEFAULT_COMPACTION_SETTINGS));
+        assert!(!should_compact(
+            80_000,
+            100_000,
+            &DEFAULT_COMPACTION_SETTINGS
+        ));
     }
 
     #[test]
     fn should_compact_above_threshold() {
-        assert!(should_compact(90_000, 100_000, &DEFAULT_COMPACTION_SETTINGS));
+        assert!(should_compact(
+            90_000,
+            100_000,
+            &DEFAULT_COMPACTION_SETTINGS
+        ));
     }
 
     // Helpers for TokenBudgetPolicy tests
@@ -1440,20 +1483,17 @@ mod tests {
             TokenEstimator::approximate(),
         );
         let msgs = vec![
-            user(&"x".repeat(800)),             // 0: ~200 tokens
+            user(&"x".repeat(800)),                           // 0: ~200 tokens
             tool_call_assistant("think", "tc1", "read_file"), // 1: assistant+toolcall
-            tool_result("tc1", &"y".repeat(400)), // 2: tool result
-            user("follow up"),                    // 3: user
+            tool_result("tc1", &"y".repeat(400)),             // 2: tool result
+            user("follow up"),                                // 3: user
         ];
         if let Some(prefix_len) = policy.evaluate(&msgs) {
             // The cut must NOT land at index 2 (tool result) or leave
             // index 1 (assistant+toolcall) as the last message before
             // the kept tail. Valid cuts: 0 (degenerate, rejected),
             // or >= 3 (after the tool result).
-            assert!(
-                prefix_len != 2,
-                "must not cut at tool result boundary"
-            );
+            assert!(prefix_len != 2, "must not cut at tool result boundary");
             // If prefix_len == 1, the preceding message (index 0) is a
             // user message, which is fine. If prefix_len == 3, the
             // preceding message (index 2) is a tool result which is
@@ -1464,7 +1504,10 @@ mod tests {
                 // assistant with tool calls (would orphan them).
                 let prev = &msgs[prefix_len - 1];
                 if let AgentMessage::Standard(Message::Assistant(a)) = prev {
-                    let has_tc = a.content.iter().any(|c| matches!(c, AssistantContent::ToolCall(_)));
+                    let has_tc = a
+                        .content
+                        .iter()
+                        .any(|c| matches!(c, AssistantContent::ToolCall(_)));
                     assert!(!has_tc, "must not leave orphaned tool call at boundary");
                 }
             }

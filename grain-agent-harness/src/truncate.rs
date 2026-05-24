@@ -198,7 +198,11 @@ pub fn truncate_tail(content: &str, options: TruncationOptions) -> TruncationRes
         kept_vec.join("\n")
     };
     let output_bytes = output.len();
-    let output_lines = if last_line_partial { 1 } else { output.matches('\n').count() + 1 };
+    let output_lines = if last_line_partial {
+        1
+    } else {
+        output.matches('\n').count() + 1
+    };
     TruncationResult {
         content: output,
         truncated: true,
@@ -262,7 +266,10 @@ mod tests {
 
     #[test]
     fn head_truncates_by_lines() {
-        let input: String = (0..50).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let input: String = (0..50)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let result = truncate_head(
             &input,
             TruncationOptions {
@@ -276,7 +283,10 @@ mod tests {
 
     #[test]
     fn tail_truncates_by_lines() {
-        let input: String = (0..50).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let input: String = (0..50)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let result = truncate_tail(
             &input,
             TruncationOptions {

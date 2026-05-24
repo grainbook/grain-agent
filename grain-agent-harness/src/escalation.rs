@@ -147,9 +147,7 @@ mod tests {
         ToolResultMessage {
             tool_call_id: "id".into(),
             tool_name: "grep".into(),
-            content: vec![UserContent::Text(TextContent {
-                text: "x".into(),
-            })],
+            content: vec![UserContent::Text(TextContent { text: "x".into() })],
             details: serde_json::Value::Null,
             is_error,
             timestamp: 0,

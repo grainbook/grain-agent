@@ -44,7 +44,9 @@ fn end_normal() -> ChatStreamEvent {
     ChatStreamEvent::End(StreamEnd::default())
 }
 
-fn run(events: impl IntoIterator<Item = ChatStreamEvent>) -> (Vec<AssistantMessageEvent>, InboundState) {
+fn run(
+    events: impl IntoIterator<Item = ChatStreamEvent>,
+) -> (Vec<AssistantMessageEvent>, InboundState) {
     let mut state = InboundState::new(&model());
     let mut all = Vec::new();
     for ev in events {
@@ -88,7 +90,14 @@ fn text_chunks_aggregate_into_one_block() {
     let tags: Vec<_> = events.iter().map(tag).collect();
     assert_eq!(
         tags,
-        vec!["Start", "TextStart", "TextDelta", "TextDelta", "TextEnd", "Done"]
+        vec![
+            "Start",
+            "TextStart",
+            "TextDelta",
+            "TextDelta",
+            "TextEnd",
+            "Done"
+        ]
     );
     let done = events.last().unwrap();
     if let AssistantMessageEvent::Done { result } = done {
@@ -149,7 +158,13 @@ fn thought_signature_absorbs_silently_into_thinking_block() {
     let tags: Vec<_> = events.iter().map(tag).collect();
     assert_eq!(
         tags,
-        vec!["Start", "ThinkingStart", "ThinkingDelta", "ThinkingEnd", "Done"]
+        vec![
+            "Start",
+            "ThinkingStart",
+            "ThinkingDelta",
+            "ThinkingEnd",
+            "Done"
+        ]
     );
     if let AssistantMessageEvent::Done { result } = events.last().unwrap() {
         if let AssistantContent::Thinking(t) = &result.content[0] {
@@ -187,7 +202,11 @@ fn tool_call_closes_open_text_and_emits_pair() {
     if let AssistantMessageEvent::Done { result } = events.last().unwrap() {
         assert_eq!(result.content.len(), 2);
         assert!(matches!(result.content[1], AssistantContent::ToolCall(_)));
-        assert_eq!(result.stop_reason, StopReason::ToolUse, "inferred from tool call presence");
+        assert_eq!(
+            result.stop_reason,
+            StopReason::ToolUse,
+            "inferred from tool call presence"
+        );
     } else {
         panic!();
     }
@@ -259,7 +278,10 @@ fn into_error_msg_preserves_accumulated_content() {
 #[test]
 fn duplicate_start_event_is_idempotent() {
     let (events, _) = run([ChatStreamEvent::Start, ChatStreamEvent::Start, end_normal()]);
-    let starts = events.iter().filter(|e| matches!(e, AssistantMessageEvent::Start { .. })).count();
+    let starts = events
+        .iter()
+        .filter(|e| matches!(e, AssistantMessageEvent::Start { .. }))
+        .count();
     assert_eq!(starts, 1, "subsequent Start events are absorbed");
 }
 

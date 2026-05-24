@@ -18,8 +18,8 @@ use grain_agent_core::{
 };
 
 use crate::anim::EffectManager;
-use crate::md_render::MarkdownCache;
 use crate::event::TuiEvent;
+use crate::md_render::MarkdownCache;
 use crate::theme::Theme;
 use grain_llm_genai::ProviderProfile;
 
@@ -211,6 +211,8 @@ pub enum SessionConflictChoice {
     /// Copy the locked jsonl to a new uuidv7 path and resume the
     /// copy in place (worker handles via `Command::ForkSession`).
     Fork,
+    /// Jump to the `/resume` picker to browse past sessions.
+    Resume,
     /// (Boot only) Quit the TUI without touching anything.
     Quit,
     /// (Resume only) Close the modal and stay on the current
@@ -261,7 +263,10 @@ pub enum TranscriptKind {
 /// detection, and the message counter to treat both end-of-call
 /// variants uniformly.
 pub(crate) fn is_tool_call_terminator(kind: TranscriptKind) -> bool {
-    matches!(kind, TranscriptKind::ToolCallEnd | TranscriptKind::ToolCallError)
+    matches!(
+        kind,
+        TranscriptKind::ToolCallEnd | TranscriptKind::ToolCallError
+    )
 }
 
 /// Does this transcript kind warrant a fade-in animation when it
@@ -424,10 +429,7 @@ impl AppState {
 
     /// Build the display summary string for a single block.
     /// Mirrors the old `ui::block_summary` free function.
-    fn compute_block_summary(
-        block: &TranscriptBlock,
-        transcript: &[TranscriptLine],
-    ) -> String {
+    fn compute_block_summary(block: &TranscriptBlock, transcript: &[TranscriptLine]) -> String {
         let count = block.line_count();
         match block.kind {
             BlockKind::ToolCall => {
@@ -435,16 +437,30 @@ impl AppState {
                     .get(block.first_line)
                     .map(|l| l.text.as_str())
                     .unwrap_or("");
-                let cleaned = head.trim_start_matches("● ").trim();
-                let trimmed = truncate_oneline(cleaned, 60);
-                if count > 1 {
-                    format!("tool: {trimmed} ({count} lines)")
+                let label = if head.starts_with("❯ ") {
+                    let cmd = &head[3..]; // strip "❯ "
+                    let trimmed = truncate_oneline(cmd, 50);
+                    format!("bash: {}", trimmed)
+                } else if head.starts_with("📖 ") {
+                    let path = &head[4..]; // strip "📖 "
+                    let trimmed = truncate_oneline(path, 55);
+                    format!("read({})", trimmed)
                 } else {
+                    let cleaned = head.trim_start_matches("● ").trim();
+                    let trimmed = truncate_oneline(cleaned, 60);
                     format!("tool: {trimmed}")
+                };
+                if count > 1 {
+                    format!("{label} ({count} lines)")
+                } else {
+                    label
                 }
             }
             BlockKind::Thinking => {
-                format!("thinking ({count} line{})", if count == 1 { "" } else { "s" })
+                format!(
+                    "thinking ({count} line{})",
+                    if count == 1 { "" } else { "s" }
+                )
             }
             BlockKind::Plain => transcript
                 .get(block.first_line)
@@ -508,7 +524,9 @@ pub enum Command {
     /// but the last `keep_recent` messages. Worker emits a
     /// [`TuiEvent::Info`] on success or [`TuiEvent::AgentWorkerError`]
     /// on failure (e.g. empty transcript).
-    Compact { keep_recent: usize },
+    Compact {
+        keep_recent: usize,
+    },
     /// Re-scan `plugins_dir` and reply via [`TuiEvent::PluginsListed`].
     /// Cheap (one shallow `read_dir` + N manifest parses); safe to
     /// call every time the user opens the overlay.
@@ -524,7 +542,9 @@ pub enum Command {
     },
     /// `/update <name>` — `git pull` on a git-sourced plugin or
     /// no-op for a symlink. Same event channel as `InstallPlugin`.
-    UpdatePlugin { name: String },
+    UpdatePlugin {
+        name: String,
+    },
     /// `/remove <name> [--keep-files]` — drop the `[[plugin]]` entry
     /// from the spec; by default also tear down the installed
     /// directory. `--keep-files` preserves the install dir.
@@ -759,17 +779,17 @@ pub struct Capabilities {
 #[derive(Debug)]
 pub struct AppState {
     pub transcript: Vec<TranscriptLine>,
-        // ── Input ──────────────────────────────────────────────────
-pub input: String,
+    // ── Input ──────────────────────────────────────────────────
+    pub input: String,
     pub cursor: usize,
     pub focus: Focus,
-        // ── Overlay & Focus ───────────────────────────────────────
-pub overlay: Option<Overlay>,
+    // ── Overlay & Focus ───────────────────────────────────────
+    pub overlay: Option<Overlay>,
     /// Scroll position when `!follow_bottom`. Counted as "rendered
     /// rows from the top of the wrapped transcript" so new content
     /// arriving doesn't shift the user's frozen view.
-        // ── Scroll & View ─────────────────────────────────────────
-pub scroll_offset: usize,
+    // ── Scroll & View ─────────────────────────────────────────
+    pub scroll_offset: usize,
     /// `true` = anchor the transcript view to the bottom (tail mode,
     /// the default). `false` = freeze at `scroll_offset` so prior
     /// content stays put while new messages arrive offscreen below.
@@ -780,8 +800,8 @@ pub scroll_offset: usize,
     /// absolute `scroll_offset`. `Cell` keeps it interior-mutable
     /// without breaking the `&AppState` render contract.
     pub render_metrics: Cell<RenderMetrics>,
-        // ── Streaming / Token tracking ────────────────────────────
-pub streaming: bool,
+    // ── Streaming / Token tracking ────────────────────────────
+    pub streaming: bool,
     /// Wall-clock start of the current agent run. Reset on
     /// `AgentStart`; cleared on `AgentEnd`. The footer renders an
     /// elapsed counter against this whenever it's set.
@@ -818,8 +838,8 @@ pub streaming: bool,
     /// `Some(rate)` ⇒ render `¥X.XX` instead, multiplied by `rate`.
     /// Set from `--cny-rate` or auto-detected from `$LANG` at startup.
     pub cny_rate: Option<f64>,
-        // ── Model Info ────────────────────────────────────────────
-pub pending_tool_calls: usize,
+    // ── Model Info ────────────────────────────────────────────
+    pub pending_tool_calls: usize,
     pub model_id: String,
     /// Per-million-token pricing for the active model. Driven from the
     /// embedded `models.dev` snapshot at startup, refreshed on
@@ -839,8 +859,8 @@ pub pending_tool_calls: usize,
     /// `TuiEvent::SessionCompacted` is received. Rendered as
     /// `[compact N]` in the footer when > 0.
     pub compaction_count: u32,
-        // ── Capabilities & Config ─────────────────────────────────
-pub workspace_display: String,
+    // ── Capabilities & Config ─────────────────────────────────
+    pub workspace_display: String,
     pub capabilities: Capabilities,
     pub show_thinking: bool,
     pub last_error: Option<String>,
@@ -850,12 +870,12 @@ pub workspace_display: String,
     /// the slot doesn't linger across turns. Used today by
     /// `retry-on-overflow` to surface mid-turn retry progress without
     /// corrupting the alt screen via stderr.
-        // ── Status ────────────────────────────────────────────────
-pub ephemeral_status: Option<String>,
+    // ── Status ────────────────────────────────────────────────
+    pub ephemeral_status: Option<String>,
     /// Available themes (built-ins + user). Index 0 is the default
     /// chosen at startup; the picker walks this list.
-        // ── Themes & Providers ─────────────────────────────────────
-pub themes: Vec<Theme>,
+    // ── Themes & Providers ─────────────────────────────────────
+    pub themes: Vec<Theme>,
     /// Index of the currently applied theme within [`Self::themes`].
     pub current_theme_idx: usize,
     /// Provider profiles loaded from disk (workspace + user fallback).
@@ -869,8 +889,8 @@ pub themes: Vec<Theme>,
     /// types `/<trigger>`, this list is consulted **before** the
     /// built-in slash table; a match dispatches into the plugin's
     /// Rhai handler via [`Command::InvokePluginUi`].
-        // ── Plugins & Skills ───────────────────────────────────────
-pub plugin_slashes: Vec<grain_ai_agent_headless::BoundPluginSlashCommand>,
+    // ── Plugins & Skills ───────────────────────────────────────
+    pub plugin_slashes: Vec<grain_ai_agent_headless::BoundPluginSlashCommand>,
     /// Skills loaded from `.claude/skills/` at startup. Used in the
     /// slash palette for prompt injection alongside built-in commands.
     pub skills: Vec<grain_agent_harness::Skill>,
@@ -882,8 +902,8 @@ pub plugin_slashes: Vec<grain_ai_agent_headless::BoundPluginSlashCommand>,
     /// input pane has focus and the slash palette isn't visible.
     /// Bounded by [`MAX_HISTORY`] to keep memory tidy in long
     /// sessions.
-        // ── History ────────────────────────────────────────────────
-pub history: Vec<String>,
+    // ── History ────────────────────────────────────────────────
+    pub history: Vec<String>,
     /// Position inside [`Self::history`] while the user is walking
     /// it. `None` means "fresh input — not recalling anything", in
     /// which case the buffer is whatever the user typed live.
@@ -903,8 +923,8 @@ pub history: Vec<String>,
     /// Toggled at runtime by F6. The main loop in `run::event_loop`
     /// observes changes and re-issues `EnableMouseCapture` /
     /// `DisableMouseCapture` on the terminal.
-        // ── Render state (interior-mutable / frame-local) ─────────
-pub mouse_capture_on: bool,
+    // ── Render state (interior-mutable / frame-local) ─────────
+    pub mouse_capture_on: bool,
     /// Wrapped transcript rows from the most recent frame. Built by
     /// `ui::draw_transcript`, consumed by mouse handlers to translate
     /// `(terminal_row, terminal_col)` into a position inside the
@@ -927,8 +947,8 @@ pub mouse_capture_on: bool,
     pub request_log: VecDeque<String>,
     /// Default fold state for tool-call blocks. From
     /// `config.toml::fold_tool_calls` (defaults `true`).
-        // ── Fold state ─────────────────────────────────────────────
-pub fold_tool_calls_default: bool,
+    // ── Fold state ─────────────────────────────────────────────
+    pub fold_tool_calls_default: bool,
     /// Default fold state for thinking blocks. From
     /// `config.toml::fold_thinking` (defaults `true`).
     pub fold_thinking_default: bool,
@@ -945,26 +965,26 @@ pub fold_tool_calls_default: bool,
     pub transcript_cursor: Option<usize>,
     /// Active tachyonfx visual effects. Processed each frame in
     /// `ui::draw`; finished effects are auto-retired.
-        // ── Effects & Caches ───────────────────────────────────────
-pub effects: EffectManager,
+    // ── Effects & Caches ───────────────────────────────────────
+    pub effects: EffectManager,
     /// Caches pre-parsed markdown spans for completed transcript
     /// lines so they aren't re-parsed every frame. The last streaming
     /// line is always re-parsed; everything before it hits this cache.
     pub markdown_cache: MarkdownCache,
-/// Cached result of [`build_transcript_blocks`]. Invalidated
-/// whenever new lines are appended to the transcript (which is
-/// append-only), so the hot render path avoids re-scanning the
-/// entire buffer each frame.
-cached_blocks: Vec<TranscriptBlock>,
-/// Number of transcript lines at the time [`Self::cached_blocks`]
-/// was last computed. When this differs from `transcript.len()`,
-/// the cache is stale and gets rebuilt on the next access.
-transcript_len_cached: usize,
-/// Pre-computed display summaries for each block, keyed by
-/// `block.id()` (= `first_line`). Populated alongside
-/// [`Self::cached_blocks`] so the renderer doesn't
-/// `format!()` per frame.
-block_summary_cache: std::collections::HashMap<usize, String>,
+    /// Cached result of [`build_transcript_blocks`]. Invalidated
+    /// whenever new lines are appended to the transcript (which is
+    /// append-only), so the hot render path avoids re-scanning the
+    /// entire buffer each frame.
+    cached_blocks: Vec<TranscriptBlock>,
+    /// Number of transcript lines at the time [`Self::cached_blocks`]
+    /// was last computed. When this differs from `transcript.len()`,
+    /// the cache is stale and gets rebuilt on the next access.
+    transcript_len_cached: usize,
+    /// Pre-computed display summaries for each block, keyed by
+    /// `block.id()` (= `first_line`). Populated alongside
+    /// [`Self::cached_blocks`] so the renderer doesn't
+    /// `format!()` per frame.
+    block_summary_cache: std::collections::HashMap<usize, String>,
 }
 
 /// Cap on the in-memory prompt history. Old entries get truncated
@@ -1067,8 +1087,7 @@ pub(crate) fn filter_models(models: &[(String, String)], query: &str) -> Vec<(St
             if needle.is_empty() {
                 return true;
             }
-            id.to_ascii_lowercase().contains(&needle)
-                || name.to_ascii_lowercase().contains(&needle)
+            id.to_ascii_lowercase().contains(&needle) || name.to_ascii_lowercase().contains(&needle)
         })
         .cloned()
         .collect();
@@ -1382,10 +1401,7 @@ impl AppState {
                 continue;
             }
             let show = skill_filter.is_empty()
-                || skill
-                    .name
-                    .to_ascii_lowercase()
-                    .contains(skill_filter)
+                || skill.name.to_ascii_lowercase().contains(skill_filter)
                 || skill
                     .description
                     .to_ascii_lowercase()
@@ -1402,10 +1418,7 @@ impl AppState {
     }
 
     fn push(&mut self, kind: TranscriptKind, text: String) {
-        self.transcript.push(TranscriptLine {
-            kind,
-            text,
-        });
+        self.transcript.push(TranscriptLine { kind, text });
         // No scroll mutation here. When `follow_bottom == true`
         // (the default), the renderer pins to tail and ignores
         // `scroll_offset`, so new content shows up automatically.
@@ -1538,7 +1551,9 @@ impl AppState {
     /// conversation in the scrollback.
     fn push_agent_message(&mut self, msg: &AgentMessage) {
         use grain_agent_core::AssistantContent;
-        let AgentMessage::Standard(msg) = msg else { return };
+        let AgentMessage::Standard(msg) = msg else {
+            return;
+        };
         match msg {
             Message::User(u) => {
                 let text: String = u
@@ -1567,18 +1582,12 @@ impl AppState {
                             // exactly what the user saw as "repeated
                             // rendering" after a session resume.
                             if !t.text.is_empty() {
-                                self.push(
-                                    TranscriptKind::AssistantText,
-                                    t.text.clone(),
-                                );
+                                self.push(TranscriptKind::AssistantText, t.text.clone());
                             }
                         }
                         AssistantContent::Thinking(t) => {
                             if !t.thinking.is_empty() {
-                                self.push(
-                                    TranscriptKind::ThinkingText,
-                                    t.thinking.clone(),
-                                );
+                                self.push(TranscriptKind::ThinkingText, t.thinking.clone());
                             }
                         }
                         AssistantContent::ToolCall(tc) => {
@@ -1678,10 +1687,7 @@ impl AppState {
                 // auto-open the resume picker so the user can choose which
                 // session to continue.  The auto-resumed row is focused;
                 // Enter confirms it, ↑↓ picks a different one.
-                if self.overlay.is_none()
-                    && self.transcript.len() <= 3
-                    && !list.is_empty()
-                {
+                if self.overlay.is_none() && self.transcript.len() <= 3 && !list.is_empty() {
                     self.set_overlay(Some(Overlay::SessionResume {
                         sessions: list,
                         focused: 0,
@@ -1729,6 +1735,7 @@ impl AppState {
                     choices: vec![
                         SessionConflictChoice::Fresh,
                         SessionConflictChoice::Fork,
+                        SessionConflictChoice::Resume,
                         SessionConflictChoice::Quit,
                     ],
                     focused: 0,
@@ -1764,19 +1771,19 @@ impl AppState {
                 Vec::new()
             }
             TuiEvent::SessionCompacted { messages } => {
-self.transcript.clear();
-self.reset_streaming_state();
-self.compaction_count = self.compaction_count.saturating_add(1);
-for msg in &messages {
-self.push_agent_message(msg);
+                self.transcript.clear();
+                self.reset_streaming_state();
+                self.compaction_count = self.compaction_count.saturating_add(1);
+                for msg in &messages {
+                    self.push_agent_message(msg);
                 }
-// Keep input history — the user's past prompts are
-// still relevant after compacting the transcript.
+                // Keep input history — the user's past prompts are
+                // still relevant after compacting the transcript.
                 Vec::new()
             }
-TuiEvent::Info(text) => {
- self.push(TranscriptKind::Info, text);
- Vec::new()
+            TuiEvent::Info(text) => {
+                self.push(TranscriptKind::Info, text);
+                Vec::new()
             }
             TuiEvent::Status(text) => {
                 // Replace, don't append — the slot exists exactly so the
@@ -2025,16 +2032,18 @@ TuiEvent::Info(text) => {
             TuiEvent::ModelApplied { model, cost } => {
                 self.model_id = model.clone();
                 self.model_cost = cost;
-                self.push(
-                    TranscriptKind::Info,
-                    format!("(model: {model})"),
-                );
+                self.push(TranscriptKind::Info, format!("(model: {model})"));
                 Vec::new()
             }
             TuiEvent::ModelsListed(list) => {
                 // Only swap when the overlay is still open (user may
                 // have hit Esc while the scan was in flight).
-                if let Some(Overlay::ModelPicker { models, focused, query }) = &mut self.overlay {
+                if let Some(Overlay::ModelPicker {
+                    models,
+                    focused,
+                    query,
+                }) = &mut self.overlay
+                {
                     *models = list;
                     let filtered_len = filter_models(models, query).len();
                     if *focused >= filtered_len {
@@ -2471,7 +2480,12 @@ TuiEvent::Info(text) => {
     /// Key handler for the `/model` picker overlay. Up/Down/PageUp/PageDown
     /// navigate the filtered list; typed characters edit the live search query.
     fn on_key_model_picker(&mut self, key: KeyEvent) -> Vec<Command> {
-        let Some(Overlay::ModelPicker { focused, models, query }) = &mut self.overlay else {
+        let Some(Overlay::ModelPicker {
+            focused,
+            models,
+            query,
+        }) = &mut self.overlay
+        else {
             return Vec::new();
         };
         let filtered = filter_models(models, query);
@@ -2635,6 +2649,7 @@ TuiEvent::Info(text) => {
                         choices: vec![
                             SessionConflictChoice::Fresh,
                             SessionConflictChoice::Fork,
+                            SessionConflictChoice::Resume,
                             SessionConflictChoice::Cancel,
                         ],
                         focused: 0,
@@ -2721,6 +2736,17 @@ TuiEvent::Info(text) => {
                         );
                         vec![Command::ForkSession(locked_path)]
                     }
+                    SessionConflictChoice::Resume => {
+                        // Close the lock-conflict modal and open the
+                        // /resume picker so the user can browse all
+                        // past sessions.
+                        self.set_overlay(Some(Overlay::SessionResume {
+                            focused: 0,
+                            sessions: Vec::new(),
+                            confirm_delete: false,
+                        }));
+                        vec![Command::ReturnSessions]
+                    }
                     SessionConflictChoice::Quit => {
                         self.should_quit = true;
                         vec![Command::Quit]
@@ -2790,10 +2816,7 @@ TuiEvent::Info(text) => {
                 let handler = on_submit.clone();
                 let mut obj = serde_json::Map::new();
                 for f in fields.iter() {
-                    obj.insert(
-                        f.name.clone(),
-                        serde_json::Value::String(f.value.clone()),
-                    );
+                    obj.insert(f.name.clone(), serde_json::Value::String(f.value.clone()));
                 }
                 self.set_overlay(None);
                 vec![Command::InvokePluginUi {
@@ -3051,7 +3074,11 @@ TuiEvent::Info(text) => {
         // built-ins — `/plugins` typed by the user goes through
         // lazy-gagent's `ui_plugins_panel` handler (if installed),
         // falling back to the built-in overlay otherwise.
-        if let Some(bound) = self.plugin_slashes.iter().find(|b| b.command.trigger == head) {
+        if let Some(bound) = self
+            .plugin_slashes
+            .iter()
+            .find(|b| b.command.trigger == head)
+        {
             let handler = bound.command.handler.clone();
             return vec![Command::InvokePluginUi {
                 handler,
@@ -3106,8 +3133,7 @@ TuiEvent::Info(text) => {
                 let Some(provider) = provider else {
                     self.push(
                         TranscriptKind::Info,
-                        "(no provider selected — use /provider first, or pass --model)"
-                            .into(),
+                        "(no provider selected — use /provider first, or pass --model)".into(),
                     );
                     return Vec::new();
                 };
@@ -3194,23 +3220,14 @@ TuiEvent::Info(text) => {
                 let mut parts = rest.split_whitespace();
                 let _ = parts.next(); // skip "update"
                 let Some(name) = parts.next() else {
-                    self.push(
-                        TranscriptKind::Info,
-                        "(usage: /update <name>)".into(),
-                    );
+                    self.push(TranscriptKind::Info, "(usage: /update <name>)".into());
                     return Vec::new();
                 };
-                self.push(
-                    TranscriptKind::Info,
-                    format!("(updating '{name}' …)"),
-                );
+                self.push(TranscriptKind::Info, format!("(updating '{name}' …)"));
                 vec![Command::UpdatePlugin { name: name.into() }]
             }
             "reload" => {
-                self.push(
-                    TranscriptKind::Info,
-                    "(reloading Rhai scripts…)".into(),
-                );
+                self.push(TranscriptKind::Info, "(reloading Rhai scripts…)".into());
                 vec![Command::ReloadRhaiScripts]
             }
             "remove" | "uninstall" => {
@@ -3333,17 +3350,29 @@ TuiEvent::Info(text) => {
                 tool_name, args, ..
             } => {
                 self.pending_tool_calls = self.pending_tool_calls.saturating_add(1);
-                let preview = preview_json(&args, 120);
-                self.push(
-                    TranscriptKind::ToolCallStart,
-                    format!("● {tool_name}({preview})"),
-                );
+                let line = match tool_name.as_str() {
+                    "bash" => {
+                        let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                        format!("❯ {cmd}")
+                    }
+                    "read" => {
+                        let path = args
+                            .get("path")
+                            .or_else(|| args.get("file_path"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        format!("📖 {path}")
+                    }
+                    _ => {
+                        let preview = preview_json(&args, 120);
+                        format!("● {tool_name}({preview})")
+                    }
+                };
+                self.push(TranscriptKind::ToolCallStart, line);
             }
             AgentEvent::ToolExecutionUpdate { .. } => {}
             AgentEvent::ToolExecutionEnd {
-                is_error,
-                result,
-                ..
+                is_error, result, ..
             } => {
                 if self.pending_tool_calls > 0 {
                     self.pending_tool_calls -= 1;
@@ -3356,7 +3385,7 @@ TuiEvent::Info(text) => {
                         _ => None,
                     })
                     .next()
-                    .map(|t| truncate(t, 200))
+                    .map(|t| t.to_string())
                     .unwrap_or_default();
                 // Claude-Code-style continuation: `  ⎿  result` (or
                 // `  ⎿  [error] result` for failures). The matching
@@ -3431,8 +3460,7 @@ TuiEvent::Info(text) => {
                 line.text.push_str(canonical);
                 return;
             }
-            if matches!(line.kind, TranscriptKind::UserPrompt)
-                || is_tool_call_terminator(line.kind)
+            if matches!(line.kind, TranscriptKind::UserPrompt) || is_tool_call_terminator(line.kind)
             {
                 break;
             }
@@ -4441,9 +4469,7 @@ mod tests {
         };
 
         let make = |text: &str| AssistantMessage {
-            content: vec![AssistantContent::Text(TextContent {
-                text: text.into(),
-            })],
+            content: vec![AssistantContent::Text(TextContent { text: text.into() })],
             api: "x".into(),
             provider: "x".into(),
             model: "x".into(),
@@ -4915,8 +4941,7 @@ mod tests {
             title: Some(format!("first prompt of {id}")),
             model: Some("anthropic/claude-sonnet-4-5".into()),
             message_count: 3,
-            modified_at: std::time::SystemTime::now()
-                - std::time::Duration::from_secs(secs_ago),
+            modified_at: std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago),
             locked: false,
         }
     }
@@ -4956,10 +4981,7 @@ mod tests {
         assert!(s.overlay.is_none());
         s.on_event(TuiEvent::SessionsListed(vec![fake_session_meta("a", 0)]));
         // Boot-list auto-opens the picker.
-        assert!(matches!(
-            s.overlay,
-            Some(Overlay::SessionResume { .. })
-        ));
+        assert!(matches!(s.overlay, Some(Overlay::SessionResume { .. })));
     }
 
     #[test]
@@ -5009,13 +5031,9 @@ mod tests {
         let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
         assert!(s.overlay.is_none());
         assert_eq!(cmds, vec![Command::ResumeSession(path)]);
-        assert!(
-            s.transcript
-                .iter()
-                .any(|l| l.kind == TranscriptKind::Info
-                    && l.text.contains("resuming session")
-                    && l.text.contains("xyz.jsonl"))
-        );
+        assert!(s.transcript.iter().any(|l| l.kind == TranscriptKind::Info
+            && l.text.contains("resuming session")
+            && l.text.contains("xyz.jsonl")));
     }
 
     #[test]
@@ -5134,7 +5152,7 @@ mod tests {
                 assert_eq!(lp, &locked_path);
                 assert_eq!(*focused, 0);
                 assert_eq!(choices[0], SessionConflictChoice::Fresh);
-                assert!(matches!(choices[2], SessionConflictChoice::Cancel));
+                assert!(matches!(choices[3], SessionConflictChoice::Cancel));
             }
             other => panic!("expected SessionLockConflict, got {other:?}"),
         }
@@ -5158,7 +5176,7 @@ mod tests {
                 assert_eq!(lp, &locked_path);
                 assert_eq!(*focused, 0, "Fresh must be preselected at boot");
                 assert_eq!(choices[0], SessionConflictChoice::Fresh);
-                assert!(matches!(choices[2], SessionConflictChoice::Quit));
+                assert!(matches!(choices[3], SessionConflictChoice::Quit));
             }
             other => panic!("expected SessionLockConflict, got {other:?}"),
         }
@@ -5178,7 +5196,10 @@ mod tests {
             focused: 0,
         });
         let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
-        assert!(cmds.is_empty(), "boot Fresh = stay on already-fresh session");
+        assert!(
+            cmds.is_empty(),
+            "boot Fresh = stay on already-fresh session"
+        );
         assert!(s.overlay.is_none());
     }
 
@@ -5373,9 +5394,7 @@ mod tests {
         });
         let assistant1 = AgentMessage::assistant(grain_agent_core::AssistantMessage {
             content: vec![grain_agent_core::AssistantContent::Text(
-                grain_agent_core::TextContent {
-                    text: "ok".into(),
-                },
+                grain_agent_core::TextContent { text: "ok".into() },
             )],
             api: "openai".into(),
             provider: "openai".into(),
@@ -5492,7 +5511,9 @@ mod tests {
         let mut s = fresh();
         s.streaming = true;
         s.pending_tool_calls = 3;
-        s.on_event(TuiEvent::Agent(Box::new(AgentEvent::AgentEnd { messages: vec![] })));
+        s.on_event(TuiEvent::Agent(Box::new(AgentEvent::AgentEnd {
+            messages: vec![],
+        })));
         assert!(!s.streaming);
         assert_eq!(s.pending_tool_calls, 0);
     }
@@ -5809,7 +5830,10 @@ mod tests {
 
         // Cache should rebuild since transcript grew.
         let new_blocks = s.cached_blocks().to_vec();
-        assert!(new_blocks.len() > initial_len, "cache must rebuild on growth");
+        assert!(
+            new_blocks.len() > initial_len,
+            "cache must rebuild on growth"
+        );
     }
 
     #[test]
@@ -5829,10 +5853,16 @@ mod tests {
 
         let blocks = s.cached_blocks().to_vec();
         // Find the tool-call block.
-        let tc = blocks.iter().find(|b| b.kind == BlockKind::ToolCall).unwrap();
+        let tc = blocks
+            .iter()
+            .find(|b| b.kind == BlockKind::ToolCall)
+            .unwrap();
         let summary = s.block_summary(tc);
         assert!(summary.contains("tool:"), "summary identifies tool");
-        assert!(summary.contains("(3 lines)"), "summary includes line count: {summary}");
+        assert!(
+            summary.contains("(3 lines)"),
+            "summary includes line count: {summary}"
+        );
     }
 
     #[test]
@@ -5842,10 +5872,18 @@ mod tests {
         s.push(TranscriptKind::ThinkingText, "Let me think more...".into());
 
         let blocks = s.cached_blocks().to_vec();
-        let th = blocks.iter().find(|b| b.kind == BlockKind::Thinking).unwrap();
+        let th = blocks
+            .iter()
+            .find(|b| b.kind == BlockKind::Thinking)
+            .unwrap();
         let summary = s.block_summary(th);
-        assert!(summary.contains("thinking"), "summary identifies thinking: {summary}");
-        assert!(summary.contains("2 lines"), "summary includes line count: {summary}");
+        assert!(
+            summary.contains("thinking"),
+            "summary identifies thinking: {summary}"
+        );
+        assert!(
+            summary.contains("2 lines"),
+            "summary includes line count: {summary}"
+        );
     }
-
 }

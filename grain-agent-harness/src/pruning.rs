@@ -13,9 +13,7 @@
 
 use std::collections::HashMap;
 
-use grain_agent_core::{
-    AgentMessage, AssistantContent, Message, TextContent, UserContent,
-};
+use grain_agent_core::{AgentMessage, AssistantContent, Message, TextContent, UserContent};
 
 use crate::context_guard::TokenEstimator;
 
@@ -130,11 +128,7 @@ pub fn prune_tool_outputs(
             .get(&tr.tool_call_id)
             .map(|s| s.as_str())
             .unwrap_or(&tr.tool_name);
-        if config
-            .protected_tools
-            .iter()
-            .any(|p| p == tool_name)
-        {
+        if config.protected_tools.iter().any(|p| p == tool_name) {
             continue;
         }
 
@@ -168,9 +162,7 @@ pub fn prune_tool_outputs(
             .placeholder_template
             .replace("{tokens}", &c.current_tokens.to_string());
         if let AgentMessage::Standard(Message::ToolResult(tr)) = &mut messages[c.msg_index] {
-            tr.content = vec![UserContent::Text(TextContent {
-                text: placeholder,
-            })];
+            tr.content = vec![UserContent::Text(TextContent { text: placeholder })];
             outcome.pruned_count += 1;
             outcome.tokens_saved += c.current_tokens.saturating_sub(PLACEHOLDER_TOKENS);
         }
@@ -212,8 +204,8 @@ fn is_already_pruned(tr: &grain_agent_core::ToolResultMessage) -> bool {
 mod tests {
     use super::*;
     use grain_agent_core::{
-        AssistantContent, AssistantMessage, StopReason, TextContent, ToolCall,
-        ToolResultMessage, Usage, UserContent, UserMessage,
+        AssistantContent, AssistantMessage, StopReason, TextContent, ToolCall, ToolResultMessage,
+        Usage, UserContent, UserMessage,
     };
 
     fn user(text: &str) -> AgentMessage {
@@ -269,7 +261,12 @@ mod tests {
     fn protects_recent_results() {
         let mut msgs = vec![
             user("go"),
-            assistant_with_tool_calls(&[("tc1", "bash"), ("tc2", "bash"), ("tc3", "bash"), ("tc4", "bash")]),
+            assistant_with_tool_calls(&[
+                ("tc1", "bash"),
+                ("tc2", "bash"),
+                ("tc3", "bash"),
+                ("tc4", "bash"),
+            ]),
             big_tool_result("tc1", "bash", 40000),
             big_tool_result("tc2", "bash", 40000),
             big_tool_result("tc3", "bash", 40000),
@@ -390,8 +387,11 @@ mod tests {
     #[test]
     fn empty_messages_noop() {
         let mut msgs: Vec<AgentMessage> = Vec::new();
-        let outcome =
-            prune_tool_outputs(&mut msgs, &standard_config(), &TokenEstimator::approximate());
+        let outcome = prune_tool_outputs(
+            &mut msgs,
+            &standard_config(),
+            &TokenEstimator::approximate(),
+        );
         assert_eq!(outcome, PruneOutcome::default());
     }
 

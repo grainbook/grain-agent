@@ -1,12 +1,9 @@
 //! End-to-end check: harness pieces compose with grain-agent-core.
 
-use grain_agent_core::{
-    AgentMessage, Message, TextContent, UserContent, UserMessage,
-};
+use grain_agent_core::{AgentMessage, Message, TextContent, UserContent, UserMessage};
 use grain_agent_harness::{
     InMemorySessionRepo, SessionRepo, branch_summary_message, compaction_summary_message,
-    convert_to_llm, custom_message, format_skills_for_system_prompt,
-    system_prompt::Skill,
+    convert_to_llm, custom_message, format_skills_for_system_prompt, system_prompt::Skill,
 };
 
 #[tokio::test]

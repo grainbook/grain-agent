@@ -20,9 +20,7 @@ pub mod provider;
 pub mod stream;
 
 pub use builder::GenaiStreamBuilder;
-pub use config::{
-    EnvKeyResolver, OpenAiCompatEndpoint, OpenAiCompatPreset, ProviderRouter,
-};
+pub use config::{EnvKeyResolver, OpenAiCompatEndpoint, OpenAiCompatPreset, ProviderRouter};
 pub use mapping::inbound::InboundState;
 pub use mapping::outbound::{baseline_chat_options, to_chat_request};
 pub use mapping::usage::map_usage;

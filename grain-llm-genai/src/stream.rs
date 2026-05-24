@@ -58,10 +58,7 @@ impl GenaiStream {
 
     /// Construct from a fully-configured client. Used by tests that want to
     /// inject a mock client without going through the builder.
-    pub fn with_client_and_options(
-        client: genai::Client,
-        chat_options: ChatOptions,
-    ) -> Self {
+    pub fn with_client_and_options(client: genai::Client, chat_options: ChatOptions) -> Self {
         GenaiStream {
             client,
             chat_options,

@@ -23,11 +23,7 @@ fn capabilities_default_is_all_false() {
 
 #[test]
 fn capabilities_from_list_parses_known_strings() {
-    let caps = Capabilities::from_list(&[
-        "log".to_string(),
-        "env".to_string(),
-        "http".to_string(),
-    ]);
+    let caps = Capabilities::from_list(&["log".to_string(), "env".to_string(), "http".to_string()]);
     assert!(caps.log);
     assert!(caps.env);
     assert!(caps.http);
@@ -76,7 +72,13 @@ async fn load_invalid_wasm_returns_error() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), b"not a valid wasm module").unwrap();
     let result = rt
-        .load(tmp.path(), "bad", Capabilities::default(), "bad-plugin", HashMap::new())
+        .load(
+            tmp.path(),
+            "bad",
+            Capabilities::default(),
+            "bad-plugin",
+            HashMap::new(),
+        )
         .await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -153,9 +155,7 @@ async fn wasm_web_fetch_plugin_does_not_reenter_tokio_runtime() {
         let (mut stream, _) = loop {
             match listener.accept() {
                 Ok(pair) => break pair,
-                Err(e)
-                    if e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline =>
-                {
+                Err(e) if e.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 Err(e) => panic!("accept local test connection: {e}"),
@@ -241,10 +241,7 @@ fn wasm_tool_definition_from_tool_def() {
     assert_eq!(def.name, "echo");
     assert_eq!(def.label, "Echo");
     assert_eq!(def.description, "Returns args verbatim");
-    assert_eq!(
-        def.parameters,
-        serde_json::json!({"type": "object"})
-    );
+    assert_eq!(def.parameters, serde_json::json!({"type": "object"}));
     assert!(def.execution_mode.is_none());
 }
 
@@ -315,11 +312,7 @@ fn plugin_wasm_module_returns_none_when_no_file() {
     let tmp = tempfile::tempdir().unwrap();
     let plugin_dir = tmp.path().join("my-plugin");
     std::fs::create_dir_all(&plugin_dir).unwrap();
-    std::fs::write(
-        plugin_dir.join("plugin.toml"),
-        "name = \"my-plugin\"\n",
-    )
-    .unwrap();
+    std::fs::write(plugin_dir.join("plugin.toml"), "name = \"my-plugin\"\n").unwrap();
     let plugins = grain_ai_agent_headless::discover_plugins(tmp.path());
     assert_eq!(plugins.len(), 1);
     assert!(plugins[0].wasm_module().is_none());
@@ -330,11 +323,7 @@ fn plugin_wasm_module_returns_path_when_default_file_exists() {
     let tmp = tempfile::tempdir().unwrap();
     let plugin_dir = tmp.path().join("my-plugin");
     std::fs::create_dir_all(&plugin_dir).unwrap();
-    std::fs::write(
-        plugin_dir.join("plugin.toml"),
-        "name = \"my-plugin\"\n",
-    )
-    .unwrap();
+    std::fs::write(plugin_dir.join("plugin.toml"), "name = \"my-plugin\"\n").unwrap();
     // Create a dummy plugin.wasm
     std::fs::write(plugin_dir.join("plugin.wasm"), b"fake wasm").unwrap();
     let plugins = grain_ai_agent_headless::discover_plugins(tmp.path());

@@ -228,7 +228,8 @@ impl HarnessBuilder {
     /// with the separate `SessionWriter` subscription installed in
     /// [`install_subscriptions`].
     async fn build(&self, prior_messages: Vec<AgentMessage>) -> Arc<AgentHarness> {
-        self.build_with_model(prior_messages, self.model.clone()).await
+        self.build_with_model(prior_messages, self.model.clone())
+            .await
     }
 
     /// Same as [`Self::build`] but pins the new harness to the
@@ -242,9 +243,9 @@ impl HarnessBuilder {
         prior_messages: Vec<AgentMessage>,
         model: Model,
     ) -> Arc<AgentHarness> {
-        let session = Session::new(Arc::new(InMemorySessionStorage::new(
-            SessionMetadata::new(),
-        )));
+        let session = Session::new(Arc::new(
+            InMemorySessionStorage::new(SessionMetadata::new()),
+        ));
         for msg in prior_messages {
             if let Err(e) = session.append_message(msg).await {
                 eprintln!("[warn] seed session message failed: {e}");
@@ -411,17 +412,15 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // here so worker doesn't depend on the earlier apply pass —
     // the file read is cheap and the call site stays self-contained.
     let plugin_spec = {
-        let config = grain_ai_agent_headless::ConfigFile::load(workspace.root())
-            .unwrap_or_default();
-        let (spec, warnings) =
-            grain_ai_agent_headless::effective_spec(workspace.root(), &config);
+        let config =
+            grain_ai_agent_headless::ConfigFile::load(workspace.root()).unwrap_or_default();
+        let (spec, warnings) = grain_ai_agent_headless::effective_spec(workspace.root(), &config);
         for w in warnings {
             eprintln!("[warn] {w}");
             deferred_warnings.push(w);
         }
         if !spec.plugins.is_empty() {
-            let report =
-                grain_ai_agent_headless::sync_plugins(&spec, &plugins_dir, &spec_base);
+            let report = grain_ai_agent_headless::sync_plugins(&spec, &plugins_dir, &spec_base);
             report.log_to_stderr();
             for (name, reason) in &report.failed {
                 deferred_warnings.push(format!("plugin '{name}' install failed: {reason}"));
@@ -433,11 +432,8 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // — gets git-cloned + legacy-symlinked + hand-placed dirs) and
     // **local-source** entries from the spec (no filesystem entry
     // under `plugins_dir`; engine reads them straight from `src`).
-    let discovered_plugins = grain_ai_agent_headless::discover_plugins_with_spec(
-        &plugins_dir,
-        &plugin_spec,
-        &spec_base,
-    );
+    let discovered_plugins =
+        grain_ai_agent_headless::discover_plugins_with_spec(&plugins_dir, &plugin_spec, &spec_base);
     for p in &discovered_plugins {
         eprintln!("[info] {}", grain_ai_agent_headless::summarize_plugin(p));
     }
@@ -464,15 +460,14 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         })?,
         None => coding_agent_system_prompt(cfg.allow_write, cfg.allow_bash).to_string(),
     };
-    let base_prompt = grain_ai_agent_headless::compose_system_prompt_with_plugins(
-        &raw_base,
-        &discovered_plugins,
-    );
+    let base_prompt =
+        grain_ai_agent_headless::compose_system_prompt_with_plugins(&raw_base, &discovered_plugins);
     let skills_dir = resolve_skills_dir(workspace.root(), cfg.skills_dir.as_deref());
     // Phase A/B: `find_skills_with_plugins` walks the primary skills
     // dir, then folds in each plugin's `<plugin>/skills/`.
-    let skills = grain_ai_agent_headless::find_skills_with_plugins(&skills_dir, &discovered_plugins)
-        .unwrap_or_default();
+    let skills =
+        grain_ai_agent_headless::find_skills_with_plugins(&skills_dir, &discovered_plugins)
+            .unwrap_or_default();
     // Clone for the UI's slash-palette skill injection — the original
     // moves into `PinnedSystemPrompt::build` below.
     let skills_for_ui = skills.clone();
@@ -620,8 +615,9 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             "retry-on-overflow: dropped {dropped} msg, attempt {attempt}/{max}"
         )));
     }));
-    let stream: StreamFn =
-        Arc::new(grain_agent_harness::RetryOnOverflowStream::with_config(stream, retry_cfg));
+    let stream: StreamFn = Arc::new(grain_agent_harness::RetryOnOverflowStream::with_config(
+        stream, retry_cfg,
+    ));
     eprintln!(
         "[info] retry-on-overflow active: \u{2264} {max_retries} retries before surfacing error"
     );
@@ -678,10 +674,8 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     };
     #[cfg(not(feature = "scripts-boa"))]
     {
-        let any_plugin_scripts = !grain_ai_agent_headless::plugin_script_dirs(
-            &discovered_plugins,
-        )
-        .is_empty();
+        let any_plugin_scripts =
+            !grain_ai_agent_headless::plugin_script_dirs(&discovered_plugins).is_empty();
         if cfg.scripts_dir.is_some() || scripts_path.exists() || any_plugin_scripts {
             eprintln!(
                 "[warn] scripts/ present (workspace or plugin) but binary was \
@@ -718,11 +712,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
 
     #[cfg(feature = "scripts-rhai")]
     let rhai_bundle: RhaiBundle = {
-        let bundle = build_rhai_bundle(
-            &workspace_for_rhai,
-            &plugins_dir,
-            &rhai_dirs,
-        );
+        let bundle = build_rhai_bundle(&workspace_for_rhai, &plugins_dir, &rhai_dirs);
         if !bundle.tools.is_empty() {
             eprintln!(
                 "[info] loaded {} Rhai tool(s) from {} dir(s)",
@@ -746,13 +736,12 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         // new log line replaces the previous one; `Status` sink already
         // animates the swap.
         let evt_tx_for_wasm_log = evt_tx.clone();
-        let wasm_log_sink: grain_plugin_wasm::LogSink = StdArc::new(
-            move |level: &str, plugin: &str, msg: &str| {
+        let wasm_log_sink: grain_plugin_wasm::LogSink =
+            StdArc::new(move |level: &str, plugin: &str, msg: &str| {
                 let _ = evt_tx_for_wasm_log.send(TuiEvent::Status(format!(
                     "[{level}] wasm '{plugin}': {msg}"
                 )));
-            },
-        );
+            });
         match grain_plugin_wasm::WasmPluginRuntime::new() {
             Ok(runtime) => {
                 let runtime = runtime.with_log_sink(wasm_log_sink);
@@ -769,15 +758,25 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                     // — calling `Handle::block_on` here panics with
                     // "Cannot start a runtime from within a runtime".
                     // Just `.await` the plugin load directly.
-                    // Merge per-plugin env: plugin.toml [wasm.env] base,
-// plugin-spec.toml [plugin.env] overrides on key conflict.
-let mut env_map = plugin.wasm_env();
-if let Some(spec) = plugin_spec.plugins.iter().find(|s| s.name == plugin_id) {
-for (k, v) in &spec.env {
-env_map.insert(k.clone(), v.clone());
+                    // Resolve auth entries from plugin-spec.toml.
+                    // Priority: higher wins when multiple entries target the same env var.
+                    let mut env_map = std::collections::HashMap::new();
+                    if let Some(spec) = plugin_spec.plugins.iter().find(|s| s.name == plugin_id) {
+                        let mut entries: Vec<_> = spec.auth.iter().collect();
+                        entries.sort_by_key(|e| e.priority);
+                        for entry in &entries {
+                            if entry.kind == "api_key" {
+                                if let Some(ref val) = entry.value {
+                                    env_map.insert(entry.env.clone(), val.clone());
                                 }
+                                // If no value: leave it for OS env fallback.
                             }
-match runtime.load(&wasm_path, &plugin_id, caps, &plugin_name, env_map).await {
+                        }
+                    }
+                    match runtime
+                        .load(&wasm_path, &plugin_id, caps, &plugin_name, env_map)
+                        .await
+                    {
                         Ok(loaded) => {
                             // Boot-time load summary: route through the
                             // event channel as an `Info` line so it
@@ -798,10 +797,8 @@ match runtime.load(&wasm_path, &plugin_id, caps, &plugin_name, env_map).await {
                             }
                         }
                         Err(e) => {
-                            let msg = format!(
-                                "wasm plugin '{}' load failed: {e}",
-                                plugin.manifest.name
-                            );
+                            let msg =
+                                format!("wasm plugin '{}' load failed: {e}", plugin.manifest.name);
                             deferred_warnings.push(msg);
                         }
                     }
@@ -819,7 +816,8 @@ match runtime.load(&wasm_path, &plugin_id, caps, &plugin_name, env_map).await {
         if any_wasm {
             deferred_warnings.push(
                 "wasm plugin(s) found but binary was built without \
-                 --features wasm-plugins; ignoring".to_string()
+                 --features wasm-plugins; ignoring"
+                    .to_string(),
             );
         }
     }
@@ -846,14 +844,12 @@ match runtime.load(&wasm_path, &plugin_id, caps, &plugin_name, env_map).await {
             let def = t.definition();
             raw += estimator.estimate_string(&def.name);
             raw += estimator.estimate_string(&def.description);
-            raw += estimator.estimate_string(
-                &serde_json::to_string(&def.parameters).unwrap_or_default(),
-            );
+            raw += estimator
+                .estimate_string(&serde_json::to_string(&def.parameters).unwrap_or_default());
         }
         (raw as f64 * 1.3).ceil() as u64
     };
-    let per_msg_framing = grain_agent_harness::TokenEstimator::approximate()
-        .per_message_overhead();
+    let per_msg_framing = grain_agent_harness::TokenEstimator::approximate().per_message_overhead();
     let overhead_banner = format!(
         "context guard: system+tools overhead ≈ {system_overhead_tokens} tokens \
          ({} tools, system_prompt {} bytes, per-msg framing {per_msg_framing}t)",
@@ -865,14 +861,12 @@ match runtime.load(&wasm_path, &plugin_id, caps, &plugin_name, env_map).await {
     // here so it shows up in the TUI transcript instead of being
     // hidden behind the alt screen.
     let overhead_banner_for_replay = overhead_banner;
-    let guard = ContextGuard::with_active_model_handle(
-        registry.clone(),
-        active_model_handle.clone(),
-    )
-    .with_policy(ContextGuardPolicy::DropOldest)
-    .with_headroom_tokens(cfg.headroom_tokens)
-    .with_system_overhead_tokens(system_overhead_tokens)
-    .into_transform_fn();
+    let guard =
+        ContextGuard::with_active_model_handle(registry.clone(), active_model_handle.clone())
+            .with_policy(ContextGuardPolicy::DropOldest)
+            .with_headroom_tokens(cfg.headroom_tokens)
+            .with_system_overhead_tokens(system_overhead_tokens)
+            .into_transform_fn();
 
     // (Channels are created earlier so the retry-on-overflow notifier
     // can capture `evt_tx`; this slot stays as a comment for the
@@ -1003,10 +997,7 @@ match runtime.load(&wasm_path, &plugin_id, caps, &plugin_name, env_map).await {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
-                    let _ = writeln!(
-                        f,
-                        "\n===== request @ unix {stamp} =====\n{body}\n"
-                    );
+                    let _ = writeln!(f, "\n===== request @ unix {stamp} =====\n{body}\n");
                     let _ = f.flush();
                 }
                 let _ = evt_tx_for_log.send(TuiEvent::RequestLogged { body });
@@ -1121,8 +1112,8 @@ match runtime.load(&wasm_path, &plugin_id, caps, &plugin_name, env_map).await {
         use notify::{RecursiveMode, Watcher};
 
         let (event_tx, event_rx) = std::sync::mpsc::channel::<()>();
-        let watcher_result = notify::recommended_watcher(
-            move |res: notify::Result<notify::Event>| {
+        let watcher_result =
+            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 // Filter: only fire on data changes / file creation /
                 // removal. notify can also emit `Access` events on some
                 // platforms which would spam the bridge.
@@ -1138,8 +1129,7 @@ match runtime.load(&wasm_path, &plugin_id, caps, &plugin_name, env_map).await {
                 if should_fire {
                     let _ = event_tx.send(());
                 }
-            },
-        );
+            });
         match watcher_result {
             Ok(mut watcher) => {
                 let mut watched_any = false;
@@ -1148,10 +1138,7 @@ match runtime.load(&wasm_path, &plugin_id, caps, &plugin_name, env_map).await {
                         continue;
                     }
                     if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
-                        eprintln!(
-                            "[warn] notify watch {}: {e}",
-                            dir.display()
-                        );
+                        eprintln!("[warn] notify watch {}: {e}", dir.display());
                     } else {
                         watched_any = true;
                     }
@@ -1163,16 +1150,12 @@ match runtime.load(&wasm_path, &plugin_id, caps, &plugin_name, env_map).await {
                         // the DEBOUNCE window so an editor's "atomic
                         // save" (write-temp + rename) only triggers
                         // one reload.
-                        const DEBOUNCE: std::time::Duration =
-                            std::time::Duration::from_millis(250);
+                        const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
                         while event_rx.recv().is_ok() {
                             while event_rx.recv_timeout(DEBOUNCE).is_ok() {
                                 // drain
                             }
-                            if cmd_tx_for_watcher
-                                .send(Command::ReloadRhaiScripts)
-                                .is_err()
-                            {
+                            if cmd_tx_for_watcher.send(Command::ReloadRhaiScripts).is_err() {
                                 break;
                             }
                         }
@@ -1218,9 +1201,7 @@ match runtime.load(&wasm_path, &plugin_id, caps, &plugin_name, env_map).await {
         // Ship plugin-contributed slash command overrides so the
         // TUI's dispatch_slash consults them before the built-in
         // table — that's how lazy-gagent claims `/plugins`.
-        let _ = evt_tx_for_task.send(TuiEvent::SlashCommandsRegistered(
-            plugin_slashes_at_boot,
-        ));
+        let _ = evt_tx_for_task.send(TuiEvent::SlashCommandsRegistered(plugin_slashes_at_boot));
 
         // If we booted with a profile, tell the UI so the status line
         // and `✓` marker land correctly on first frame.
@@ -1245,8 +1226,7 @@ match runtime.load(&wasm_path, &plugin_id, caps, &plugin_name, env_map).await {
         // resume picker before the first user interaction.  The
         // auto-resumed (or freshly-minted) session row is
         // focused; Enter confirms it, ↑↓ picks a different one.
-        let boot_session_list =
-            grain_ai_agent_headless::list_sessions(&sessions_dir_for_task);
+        let boot_session_list = grain_ai_agent_headless::list_sessions(&sessions_dir_for_task);
         let _ = evt_tx_for_task.send(TuiEvent::SessionsListed(boot_session_list));
 
         run_command_loop(
@@ -1410,7 +1390,9 @@ async fn run_command_loop(
     #[cfg(feature = "scripts-rhai")] mut rhai_ctx: RhaiReloadCtx,
 ) {
     if deepseek.is_enabled() {
-        eprintln!("[info] DeepSeek pack active — reasoning scavenge + subagent.done detection enabled");
+        eprintln!(
+            "[info] DeepSeek pack active — reasoning scavenge + subagent.done detection enabled"
+        );
     }
 
     // Tracks the model the harness is *currently* driving. Starts
@@ -1457,8 +1439,7 @@ async fn run_command_loop(
                 harness.abort().await;
                 harness.wait_for_idle().await;
                 let new_path = grain_ai_agent_headless::new_session_path(&sessions_dir);
-                let new_writer: Option<Arc<SessionWriter>> = match SessionWriter::open(&new_path)
-                {
+                let new_writer: Option<Arc<SessionWriter>> = match SessionWriter::open(&new_path) {
                     Ok(w) => Some(Arc::new(w)),
                     Err(e) => {
                         let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
@@ -1534,8 +1515,7 @@ async fn run_command_loop(
                         }
                     }
                     // Mint a fresh session so the user can continue.
-                    let new_path =
-                        grain_ai_agent_headless::new_session_path(&sessions_dir);
+                    let new_path = grain_ai_agent_headless::new_session_path(&sessions_dir);
                     let new_writer = match SessionWriter::open(&new_path) {
                         Ok(w) => Some(Arc::new(w)),
                         Err(e) => {
@@ -1565,8 +1545,7 @@ async fn run_command_loop(
                     )));
                     // Refresh the picker so the deleted row vanishes
                     // and the new session row appears.
-                    let list =
-                        grain_ai_agent_headless::list_sessions(&sessions_dir);
+                    let list = grain_ai_agent_headless::list_sessions(&sessions_dir);
                     let _ = evt_tx.send(TuiEvent::SessionsListed(list));
                     let _ = evt_tx.send(TuiEvent::SessionResumed {
                         path: new_path.display().to_string(),
@@ -1586,8 +1565,9 @@ async fn run_command_loop(
                 // is the same).
                 let in_sessions_dir = match (path.parent(), Some(sessions_dir.as_path())) {
                     (Some(parent), Some(dir)) => {
-                        let canon_parent =
-                            parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+                        let canon_parent = parent
+                            .canonicalize()
+                            .unwrap_or_else(|_| parent.to_path_buf());
                         let canon_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
                         canon_parent == canon_dir
                     }
@@ -1623,8 +1603,8 @@ async fn run_command_loop(
             Command::ReturnPlugins => {
                 // Re-read config + lock + legacy spec so entries
                 // the user added since boot show up in the overlay.
-                let config = grain_ai_agent_headless::ConfigFile::load(workspace.root())
-                    .unwrap_or_default();
+                let config =
+                    grain_ai_agent_headless::ConfigFile::load(workspace.root()).unwrap_or_default();
                 let (spec, _warnings) =
                     grain_ai_agent_headless::effective_spec(workspace.root(), &config);
                 let spec_base = workspace.root().join(".grain");
@@ -1637,8 +1617,7 @@ async fn run_command_loop(
                     .iter()
                     .map(grain_ai_agent_headless::plugin_info)
                     .collect();
-                let ui_commands =
-                    grain_ai_agent_headless::collect_ui_commands(&discovered);
+                let ui_commands = grain_ai_agent_headless::collect_ui_commands(&discovered);
                 let _ = evt_tx.send(TuiEvent::PluginsListed {
                     plugins: infos,
                     ui_commands,
@@ -1648,8 +1627,8 @@ async fn run_command_loop(
                 // Block writes that would shadow a config.toml
                 // entry — the runtime can't safely modify
                 // hand-written declarations.
-                let config = grain_ai_agent_headless::ConfigFile::load(workspace.root())
-                    .unwrap_or_default();
+                let config =
+                    grain_ai_agent_headless::ConfigFile::load(workspace.root()).unwrap_or_default();
                 if let Some(grain_ai_agent_headless::PluginOrigin::Config) =
                     grain_ai_agent_headless::origin_of(workspace.root(), &config, &name)
                 {
@@ -1658,8 +1637,7 @@ async fn run_command_loop(
                     )));
                     continue;
                 }
-                let lock_path =
-                    grain_ai_agent_headless::default_lock_path(workspace.root());
+                let lock_path = grain_ai_agent_headless::default_lock_path(workspace.root());
                 match grain_ai_agent_headless::install(
                     &lock_path,
                     &plugins_dir,
@@ -1686,9 +1664,8 @@ async fn run_command_loop(
                         }
                     }
                     Err(e) => {
-                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
-                            "install '{name}': {e}"
-                        )));
+                        let _ = evt_tx
+                            .send(TuiEvent::AgentWorkerError(format!("install '{name}': {e}")));
                     }
                 }
             }
@@ -1705,18 +1682,14 @@ async fn run_command_loop(
                         )));
                     }
                     Err(e) => {
-                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
-                            "update '{name}': {e}"
-                        )));
+                        let _ = evt_tx
+                            .send(TuiEvent::AgentWorkerError(format!("update '{name}': {e}")));
                     }
                 }
             }
-            Command::RemovePlugin {
-                name,
-                delete_files,
-            } => {
-                let config = grain_ai_agent_headless::ConfigFile::load(workspace.root())
-                    .unwrap_or_default();
+            Command::RemovePlugin { name, delete_files } => {
+                let config =
+                    grain_ai_agent_headless::ConfigFile::load(workspace.root()).unwrap_or_default();
                 let target_path = match grain_ai_agent_headless::origin_of(
                     workspace.root(),
                     &config,
@@ -1759,9 +1732,8 @@ async fn run_command_loop(
                         )));
                     }
                     Err(e) => {
-                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
-                            "remove '{name}': {e}"
-                        )));
+                        let _ = evt_tx
+                            .send(TuiEvent::AgentWorkerError(format!("remove '{name}': {e}")));
                     }
                 }
             }
@@ -1869,9 +1841,7 @@ async fn run_command_loop(
                 // the resumed JSONL session's metadata. This
                 // matches what the user is actively driving in
                 // this run.
-                let new_harness = builder
-                    .build_with_model(prior, current_model.clone())
-                    .await;
+                let new_harness = builder.build_with_model(prior, current_model.clone()).await;
                 install_subscriptions(
                     &new_harness,
                     &evt_tx,
@@ -1926,20 +1896,17 @@ async fn run_command_loop(
                     }
                 };
                 let prior_for_ui = prior.clone();
-                let new_writer: Option<Arc<SessionWriter>> =
-                    match SessionWriter::open(&dest_path) {
-                        Ok(w) => Some(Arc::new(w)),
-                        Err(e) => {
-                            let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
-                                "fork session writer open {} failed: {e}",
-                                dest_path.display()
-                            )));
-                            None
-                        }
-                    };
-                let new_harness = builder
-                    .build_with_model(prior, current_model.clone())
-                    .await;
+                let new_writer: Option<Arc<SessionWriter>> = match SessionWriter::open(&dest_path) {
+                    Ok(w) => Some(Arc::new(w)),
+                    Err(e) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "fork session writer open {} failed: {e}",
+                            dest_path.display()
+                        )));
+                        None
+                    }
+                };
+                let new_harness = builder.build_with_model(prior, current_model.clone()).await;
                 install_subscriptions(
                     &new_harness,
                     &evt_tx,
@@ -1963,16 +1930,14 @@ async fn run_command_loop(
                 )));
                 let _ = evt_tx.send(TuiEvent::Info(format!("({overhead_banner})")));
             }
-Command::Compact { keep_recent } => match harness.compact(keep_recent).await {
-Ok(entry_id) => {
-let messages = harness.agent().state().await.messages;
-let _ = evt_tx.send(TuiEvent::SessionCompacted { messages });
-let _ = evt_tx
-.send(TuiEvent::Info(format!("(compacted — entry {entry_id})")));
+            Command::Compact { keep_recent } => match harness.compact(keep_recent).await {
+                Ok(entry_id) => {
+                    let messages = harness.agent().state().await.messages;
+                    let _ = evt_tx.send(TuiEvent::SessionCompacted { messages });
+                    let _ = evt_tx.send(TuiEvent::Info(format!("(compacted — entry {entry_id})")));
                 }
                 Err(e) => {
-let _ = evt_tx
-.send(TuiEvent::AgentWorkerError(format!("compact: {e}")));
+                    let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!("compact: {e}")));
                 }
             },
             Command::ApplyProvider(idx) => {
@@ -2035,9 +2000,10 @@ let _ = evt_tx
                                 let _ = evt_tx_for_fetch.send(TuiEvent::ModelsListed(pairs));
                             }
                             Err(e) => {
-                                let _ = evt_tx_for_fetch.send(TuiEvent::AgentWorkerError(
-                                    format!("list models from '{}': {e}", p.name),
-                                ));
+                                let _ = evt_tx_for_fetch.send(TuiEvent::AgentWorkerError(format!(
+                                    "list models from '{}': {e}",
+                                    p.name
+                                )));
                                 let _ = evt_tx_for_fetch.send(TuiEvent::ModelsListed(Vec::new()));
                             }
                         }
@@ -2138,8 +2104,7 @@ fn build_rhai_bundle(
     engine.register_fn(
         "plugins_install",
         move |name: String, src: String| -> String {
-            let config = grain_ai_agent_headless::ConfigFile::load(&ws_install)
-                .unwrap_or_default();
+            let config = grain_ai_agent_headless::ConfigFile::load(&ws_install).unwrap_or_default();
             if let Some(grain_ai_agent_headless::PluginOrigin::Config) =
                 grain_ai_agent_headless::origin_of(&ws_install, &config, &name)
             {
@@ -2148,13 +2113,7 @@ fn build_rhai_bundle(
                 );
             }
             let lock_path = grain_ai_agent_headless::default_lock_path(&ws_install);
-            match grain_ai_agent_headless::install(
-                &lock_path,
-                &pdir_install,
-                &name,
-                &src,
-                None,
-            ) {
+            match grain_ai_agent_headless::install(&lock_path, &pdir_install, &name, &src, None) {
                 Ok(outcome) => {
                     if let Some((_, reason)) =
                         outcome.report.failed.iter().find(|(n, _)| n == &name)
@@ -2176,16 +2135,11 @@ fn build_rhai_bundle(
     let ws_list = workspace_root.to_path_buf();
     let pdir_list = plugins_dir.to_path_buf();
     engine.register_fn("plugins_list", move || -> rhai::Dynamic {
-        let config = grain_ai_agent_headless::ConfigFile::load(&ws_list)
-            .unwrap_or_default();
-        let (spec, _warnings) =
-            grain_ai_agent_headless::effective_spec(&ws_list, &config);
+        let config = grain_ai_agent_headless::ConfigFile::load(&ws_list).unwrap_or_default();
+        let (spec, _warnings) = grain_ai_agent_headless::effective_spec(&ws_list, &config);
         let spec_base = ws_list.join(".grain");
-        let discovered = grain_ai_agent_headless::discover_plugins_with_spec(
-            &pdir_list,
-            &spec,
-            &spec_base,
-        );
+        let discovered =
+            grain_ai_agent_headless::discover_plugins_with_spec(&pdir_list, &spec, &spec_base);
         let mut arr: Vec<rhai::Dynamic> = Vec::with_capacity(discovered.len());
         for p in discovered {
             let info = grain_ai_agent_headless::plugin_info(&p);
@@ -2207,9 +2161,7 @@ fn build_rhai_bundle(
             );
             m.insert(
                 "rev".into(),
-                rhai::Dynamic::from(
-                    entry.and_then(|e| e.rev.clone()).unwrap_or_default(),
-                ),
+                rhai::Dynamic::from(entry.and_then(|e| e.rev.clone()).unwrap_or_default()),
             );
             m.insert("origin".into(), rhai::Dynamic::from(origin.to_string()));
             m.insert(
@@ -2321,11 +2273,14 @@ async fn fetch_openai_compat_models(
         .base_url
         .as_deref()
         .ok_or("provider profile has no base_url")?;
-    let url = format!("{}models", if base_url.ends_with('/') {
-        base_url.to_string()
-    } else {
-        format!("{base_url}/")
-    });
+    let url = format!(
+        "{}models",
+        if base_url.ends_with('/') {
+            base_url.to_string()
+        } else {
+            format!("{base_url}/")
+        }
+    );
 
     let env_var = match &profile.auth {
         ProviderAuth::ApiKey { env } => Some(env.as_str()),

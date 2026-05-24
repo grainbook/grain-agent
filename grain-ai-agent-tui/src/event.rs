@@ -52,10 +52,7 @@ pub enum TuiEvent {
     /// Worker successfully switched to a new model via `/model`. Carries
     /// the model id + pricing so the UI can refresh the status line
     /// ("(model: deepseek/deepseek-v4-pro)") and cost chip.
-    ModelApplied {
-        model: String,
-        cost: Cost,
-    },
+    ModelApplied { model: String, cost: Cost },
     /// Mouse wheel rolled up — translated into transcript scroll-up by
     /// `amount` rows. Same follow-bottom semantics as PgUp.
     ScrollUp { amount: u16 },
@@ -91,11 +88,16 @@ pub enum TuiEvent {
     /// Worker completed a `/resume` in-place session swap. Carries the
     /// full set of prior messages so the UI can clear the current
     /// transcript and repopulate with the loaded history.
-    SessionResumed { path: String, messages: Vec<grain_agent_core::AgentMessage> },
-/// Worker completed a `/compact` summarization pass. Carries the
-/// full set of post-compaction messages (compaction summary + kept
-/// tail) so the UI can clear the current transcript and repopulate.
-SessionCompacted { messages: Vec<grain_agent_core::AgentMessage> },
+    SessionResumed {
+        path: String,
+        messages: Vec<grain_agent_core::AgentMessage>,
+    },
+    /// Worker completed a `/compact` summarization pass. Carries the
+    /// full set of post-compaction messages (compaction summary + kept
+    /// tail) so the UI can clear the current transcript and repopulate.
+    SessionCompacted {
+        messages: Vec<grain_agent_core::AgentMessage>,
+    },
     /// Worker returned the list of models for the current provider
     /// (id + display name pairs). Fills the `/model` picker.
     ModelsListed(Vec<(String, String)>),

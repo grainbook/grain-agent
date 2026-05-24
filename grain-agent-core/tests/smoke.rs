@@ -12,10 +12,10 @@ use std::sync::{
 use async_trait::async_trait;
 use futures::StreamExt;
 use grain_agent_core::{
-    Agent, AgentEvent, AgentOptions, AgentTool, AgentToolError, AgentToolResult,
-    AssistantContent, AssistantMessage, AssistantMessageEvent, LlmContext, LlmStream, Model,
-    StopReason, StreamError, StreamOptions, TextContent, ToolCall, ToolDefinition,
-    ToolUpdateCallback, UserContent, Usage,
+    Agent, AgentContext, AgentEvent, AgentLoopTurnUpdate, AgentMessage, AgentOptions, AgentTool,
+    AgentToolError, AgentToolResult, AssistantContent, AssistantMessage, AssistantMessageEvent,
+    LlmContext, LlmStream, Message, Model, StopReason, StreamError, StreamOptions, TextContent,
+    ToolCall, ToolDefinition, ToolUpdateCallback, Usage, UserContent,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -54,14 +54,18 @@ impl LlmStream for MockStream {
                     timestamp: 0,
                 };
                 vec![
-                    AssistantMessageEvent::Start { partial: msg.clone() },
+                    AssistantMessageEvent::Start {
+                        partial: msg.clone(),
+                    },
                     AssistantMessageEvent::Done { result: msg },
                 ]
             }
             _ => {
                 // Second turn: short text reply, stop.
                 let msg = AssistantMessage {
-                    content: vec![AssistantContent::Text(TextContent { text: "done".into() })],
+                    content: vec![AssistantContent::Text(TextContent {
+                        text: "done".into(),
+                    })],
                     api: model.api.clone(),
                     provider: model.provider.clone(),
                     model: model.id.clone(),
@@ -71,7 +75,9 @@ impl LlmStream for MockStream {
                     timestamp: 0,
                 };
                 vec![
-                    AssistantMessageEvent::Start { partial: msg.clone() },
+                    AssistantMessageEvent::Start {
+                        partial: msg.clone(),
+                    },
                     AssistantMessageEvent::Done { result: msg },
                 ]
             }
@@ -177,7 +183,12 @@ async fn full_round_trip_with_tool_call() {
     assert!(!state.is_streaming);
     assert!(state.error_message.is_none(), "no error expected");
     // user prompt + assistant(tool_use) + tool_result + assistant(stop)
-    assert_eq!(state.messages.len(), 4, "expected 4 messages, got {:#?}", state.messages);
+    assert_eq!(
+        state.messages.len(),
+        4,
+        "expected 4 messages, got {:#?}",
+        state.messages
+    );
 
     let tags = events.lock().unwrap().clone();
     // Expected high-level order: agent_start, turn_start, prompt msg start/end,
@@ -189,4 +200,61 @@ async fn full_round_trip_with_tool_call() {
     assert!(tags.contains(&"tool_execution_end"));
     assert!(tags.iter().filter(|t| **t == "turn_end").count() >= 2);
     assert_eq!(stream.call_count.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn prepare_next_turn_context_rewrite_persists_to_agent_state() {
+    let stream = Arc::new(MockStream::default());
+    let mut opts = AgentOptions::new(
+        Model {
+            id: "mock-model".into(),
+            name: "mock".into(),
+            api: "mock".into(),
+            provider: "mock".into(),
+            ..Default::default()
+        },
+        stream,
+    );
+    opts.tools = vec![Arc::new(EchoTool::new())];
+    opts.prepare_next_turn = Some(Arc::new(|ctx| {
+        Box::pin(async move {
+            Some(AgentLoopTurnUpdate {
+                context: Some(AgentContext {
+                    system_prompt: ctx.context.system_prompt.clone(),
+                    messages: vec![AgentMessage::user(grain_agent_core::UserMessage {
+                        content: vec![UserContent::text("compacted summary")],
+                        timestamp: 0,
+                    })],
+                    tools: ctx.context.tools.clone(),
+                }),
+                ..Default::default()
+            })
+        })
+    }));
+
+    let agent = Agent::new(opts);
+    agent.prompt_text("hello").await.expect("prompt failed");
+
+    let state = agent.state().await;
+    assert_eq!(
+        state.messages.len(),
+        1,
+        "final context rewrite should be persisted"
+    );
+    match &state.messages[0] {
+        AgentMessage::Standard(Message::User(u)) => {
+            assert_eq!(
+                u.content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::Text(t) => Some(t.text.as_str()),
+                        UserContent::Image(_) => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                "compacted summary"
+            );
+        }
+        other => panic!("expected compacted user message, got {other:#?}"),
+    }
 }

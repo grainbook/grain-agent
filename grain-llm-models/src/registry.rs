@@ -105,8 +105,7 @@ impl Registry {
     /// Intended for `runtime_fetch.merged_over(embedded)` flows added in a
     /// follow-up — pure data merge, no I/O.
     pub fn merged_with(&self, other: &Registry) -> Registry {
-        let mut merged: HashMap<String, ModelDescriptor> =
-            (*self.models).clone();
+        let mut merged: HashMap<String, ModelDescriptor> = (*self.models).clone();
         for (k, v) in other.models.iter() {
             merged.insert(k.clone(), v.clone());
         }

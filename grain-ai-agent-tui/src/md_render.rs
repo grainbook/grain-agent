@@ -197,7 +197,11 @@ pub fn render_md_to_spans(source: &str) -> Vec<MdStyledSpan> {
                 Tag::Paragraph => {} // no-op: paragraphs are implicit
                 Tag::Heading { .. } => {
                     // Push a newline before headings for visual separation.
-                    if !out.is_empty() && !out.last().map(|s: &MdStyledSpan| s.text.ends_with('\n')).unwrap_or(true)
+                    if !out.is_empty()
+                        && !out
+                            .last()
+                            .map(|s: &MdStyledSpan| s.text.ends_with('\n'))
+                            .unwrap_or(true)
                     {
                         out.push(MdStyledSpan {
                             text: "\n".into(),
@@ -207,7 +211,11 @@ pub fn render_md_to_spans(source: &str) -> Vec<MdStyledSpan> {
                     stack.push(StackEntry::Heading);
                 }
                 Tag::CodeBlock(kind) => {
-                    if !out.is_empty() && !out.last().map(|s: &MdStyledSpan| s.text.ends_with('\n')).unwrap_or(true)
+                    if !out.is_empty()
+                        && !out
+                            .last()
+                            .map(|s: &MdStyledSpan| s.text.ends_with('\n'))
+                            .unwrap_or(true)
                     {
                         out.push(MdStyledSpan {
                             text: "\n".into(),
@@ -301,9 +309,7 @@ pub fn render_md_to_spans(source: &str) -> Vec<MdStyledSpan> {
                     }
                 }
                 TagEnd::Emphasis => {
-                    if let Some(pos) =
-                        stack.iter().rposition(|e| matches!(e, StackEntry::Italic))
-                    {
+                    if let Some(pos) = stack.iter().rposition(|e| matches!(e, StackEntry::Italic)) {
                         stack.remove(pos);
                     }
                 }
@@ -375,7 +381,12 @@ pub fn render_md_to_spans(source: &str) -> Vec<MdStyledSpan> {
     // If the parser was in the middle of a streaming block (e.g.
     // unterminated code fence), output never got a trailing newline.
     // Add one so the next block starts fresh.
-    if !out.is_empty() && !out.last().map(|s: &MdStyledSpan| s.text.ends_with('\n')).unwrap_or(true) {
+    if !out.is_empty()
+        && !out
+            .last()
+            .map(|s: &MdStyledSpan| s.text.ends_with('\n'))
+            .unwrap_or(true)
+    {
         out.push(MdStyledSpan {
             text: "\n".into(),
             style_kind: MdStyleKind::Body,
@@ -554,7 +565,11 @@ mod tests {
     fn italic_text() {
         let spans = render_md_to_spans("this is *very* nice");
         let non_newline: Vec<_> = spans.iter().filter(|s| s.text != "\n").collect();
-        assert!(non_newline.iter().any(|s| s.style_kind == MdStyleKind::Italic));
+        assert!(
+            non_newline
+                .iter()
+                .any(|s| s.style_kind == MdStyleKind::Italic)
+        );
     }
 
     #[test]
@@ -607,7 +622,10 @@ mod tests {
         // Strong. The text still renders without panic.
         let non_newline: Vec<_> = spans.iter().filter(|s| s.text != "\n").collect();
         let all_text: String = non_newline.iter().map(|s| s.text.as_str()).collect();
-        assert!(all_text.contains("world"), "should contain 'world': {all_text}");
+        assert!(
+            all_text.contains("world"),
+            "should contain 'world': {all_text}"
+        );
         // The ** appears as literal * * in the output — that's
         // correct CommonMark behavior for unterminated delimiters.
     }

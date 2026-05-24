@@ -170,9 +170,7 @@ mod tests {
 
     fn user_msg(text: &str) -> Message {
         Message::User(UserMessage {
-            content: vec![UserContent::Text(TextContent {
-                text: text.into(),
-            })],
+            content: vec![UserContent::Text(TextContent { text: text.into() })],
             timestamp: 0,
         })
     }
@@ -283,10 +281,8 @@ mod tests {
     async fn guard_records_then_compares_against_prior_call() {
         // Two-call sequence: first establishes baseline, second
         // mutates message 0 — guard must catch it.
-        let state: Arc<Mutex<Vec<Message>>> = Arc::new(Mutex::new(vec![
-            user_msg("alpha"),
-            user_msg("tail-v1"),
-        ]));
+        let state: Arc<Mutex<Vec<Message>>> =
+            Arc::new(Mutex::new(vec![user_msg("alpha"), user_msg("tail-v1")]));
         let state_for_inner = state.clone();
         let inner: ConvertToLlmFn = Arc::new(move |_| {
             let state = state_for_inner.clone();

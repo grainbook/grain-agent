@@ -222,11 +222,7 @@ mod tests {
             ..ConfigFile::default()
         };
         apply_config_to_args(&cfg, &mut args, &explicit);
-        assert_eq!(
-            args.bypass_proxy,
-            Some(true),
-            "CLI must win when explicit"
-        );
+        assert_eq!(args.bypass_proxy, Some(true), "CLI must win when explicit");
     }
 
     #[test]

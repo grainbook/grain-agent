@@ -31,7 +31,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_path = snapshot_path();
     std::fs::write(&out_path, json)?;
 
-    eprintln!("wrote {} models to {}", snapshot.models.len(), out_path.display());
+    eprintln!(
+        "wrote {} models to {}",
+        snapshot.models.len(),
+        out_path.display()
+    );
     Ok(())
 }
 

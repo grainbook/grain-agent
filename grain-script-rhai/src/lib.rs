@@ -164,7 +164,10 @@ impl ScriptHandle {
     /// crate (Rhai's metadata types aren't re-exported as easily as
     /// strings).
     pub fn ast_function_names(&self) -> Vec<String> {
-        self.ast.iter_functions().map(|f| f.name.to_string()).collect()
+        self.ast
+            .iter_functions()
+            .map(|f| f.name.to_string())
+            .collect()
     }
 }
 
@@ -196,9 +199,7 @@ impl RhaiExtension {
     }
 
     /// Multi-directory convenience using [`Self::default_engine`].
-    pub fn from_scripts_dirs(
-        dirs: &[impl AsRef<Path>],
-    ) -> Result<Self, RhaiExtensionError> {
+    pub fn from_scripts_dirs(dirs: &[impl AsRef<Path>]) -> Result<Self, RhaiExtensionError> {
         Self::from_scripts_dirs_with_engine(Self::default_engine(), dirs)
     }
 
@@ -241,12 +242,13 @@ impl RhaiExtension {
         let mut handles: Vec<ScriptHandle> = Vec::new();
         for path in &script_files {
             let label = path.display().to_string();
-            let ast = engine.compile_file(path.clone()).map_err(|e| {
-                RhaiExtensionError::Compile {
-                    label: label.clone(),
-                    reason: e.to_string(),
-                }
-            })?;
+            let ast =
+                engine
+                    .compile_file(path.clone())
+                    .map_err(|e| RhaiExtensionError::Compile {
+                        label: label.clone(),
+                        reason: e.to_string(),
+                    })?;
             let ast = Arc::new(ast);
             handles.push(ScriptHandle {
                 label: label.clone(),
@@ -261,12 +263,12 @@ impl RhaiExtension {
 
             // Call the script's `tools()` manifest.
             let mut scope = Scope::new();
-            let manifest: Dynamic = engine
-                .call_fn(&mut scope, &ast, "tools", ())
-                .map_err(|e| RhaiExtensionError::Manifest {
+            let manifest: Dynamic = engine.call_fn(&mut scope, &ast, "tools", ()).map_err(|e| {
+                RhaiExtensionError::Manifest {
                     label: label.clone(),
                     reason: e.to_string(),
-                })?;
+                }
+            })?;
             let arr = manifest
                 .into_array()
                 .map_err(|t| RhaiExtensionError::Manifest {
@@ -275,13 +277,13 @@ impl RhaiExtension {
                 })?;
 
             for (idx, item) in arr.into_iter().enumerate() {
-                let map = item.try_cast::<rhai::Map>().ok_or_else(|| {
-                    RhaiExtensionError::BadEntry {
-                        label: label.clone(),
-                        index: idx,
-                        reason: "entry is not a map".into(),
-                    }
-                })?;
+                let map =
+                    item.try_cast::<rhai::Map>()
+                        .ok_or_else(|| RhaiExtensionError::BadEntry {
+                            label: label.clone(),
+                            index: idx,
+                            reason: "entry is not a map".into(),
+                        })?;
                 let entry = parse_tool_entry(&map, &label, idx)?;
                 tools.push(Arc::new(ScriptedRhaiTool {
                     def: ToolDefinition {
@@ -636,7 +638,9 @@ mod tests {
     fn malformed_manifest_returns_error_pointing_at_the_script() {
         let tmp = tempfile::tempdir().unwrap();
         write_script(tmp.path(), "bad", r#"fn tools() { 42 }"#);
-        let err = RhaiExtension::from_scripts_dir(tmp.path()).err().expect("expected error");
+        let err = RhaiExtension::from_scripts_dir(tmp.path())
+            .err()
+            .expect("expected error");
         match err {
             RhaiExtensionError::Manifest { label, .. } => {
                 assert!(label.ends_with("bad.rhai"), "{label}");
@@ -661,7 +665,9 @@ mod tests {
                 fn ok(args) { "ok" }
             "#,
         );
-        let err = RhaiExtension::from_scripts_dir(tmp.path()).err().expect("expected error");
+        let err = RhaiExtension::from_scripts_dir(tmp.path())
+            .err()
+            .expect("expected error");
         match err {
             RhaiExtensionError::BadEntry { index, reason, .. } => {
                 assert_eq!(index, 1);
@@ -675,7 +681,9 @@ mod tests {
     fn compile_error_surfaces_with_script_label() {
         let tmp = tempfile::tempdir().unwrap();
         write_script(tmp.path(), "syntax", r#"fn tools() { #! not valid"#);
-        let err = RhaiExtension::from_scripts_dir(tmp.path()).err().expect("expected error");
+        let err = RhaiExtension::from_scripts_dir(tmp.path())
+            .err()
+            .expect("expected error");
         assert!(matches!(err, RhaiExtensionError::Compile { .. }));
     }
 
@@ -737,15 +745,13 @@ mod tests {
             return;
         }
         let mut engine = RhaiExtension::default_engine();
-        engine.register_fn(
-            "plugins_install",
-            |_a: String, _b: String| -> String { "ok".into() },
-        );
+        engine.register_fn("plugins_install", |_a: String, _b: String| -> String {
+            "ok".into()
+        });
         engine.register_fn("plugins_update", |_a: String| -> String { "ok".into() });
-        engine.register_fn(
-            "plugins_remove",
-            |_a: String, _b: bool| -> String { "ok".into() },
-        );
+        engine.register_fn("plugins_remove", |_a: String, _b: bool| -> String {
+            "ok".into()
+        });
         // Stub `plugins_list()` so we can also exercise the
         // /plugins-panel handler end-to-end, catching Rhai-stdlib
         // mistakes (e.g. calling `join` on Array) that wouldn't
@@ -793,7 +799,9 @@ mod tests {
         assert_eq!(handles.len(), 1);
         let h = &handles[0];
 
-        let prompt = h.call_fn_json("ui_install_prompt", serde_json::Value::Null).unwrap();
+        let prompt = h
+            .call_fn_json("ui_install_prompt", serde_json::Value::Null)
+            .unwrap();
         assert_eq!(prompt["kind"], "form");
         assert_eq!(prompt["on_submit"], "ui_install_submit");
         assert_eq!(prompt["fields"].as_array().unwrap().len(), 2);
@@ -819,15 +827,14 @@ mod tests {
         assert_eq!(submit_ok["kind"], "modal");
         assert_eq!(submit_ok["severity"], "success");
 
-        let remove_prompt = h.call_fn_json("ui_remove_prompt", serde_json::Value::Null).unwrap();
+        let remove_prompt = h
+            .call_fn_json("ui_remove_prompt", serde_json::Value::Null)
+            .unwrap();
         assert_eq!(remove_prompt["kind"], "form");
         assert_eq!(remove_prompt["on_submit"], "ui_remove_confirm");
 
         let confirm = h
-            .call_fn_json(
-                "ui_remove_confirm",
-                serde_json::json!({ "name": "demo" }),
-            )
+            .call_fn_json("ui_remove_confirm", serde_json::json!({ "name": "demo" }))
             .unwrap();
         assert_eq!(confirm["kind"], "confirm");
         assert_eq!(confirm["on_yes"], "ui_remove_submit");
@@ -837,7 +844,9 @@ mod tests {
         // the stubbed `plugins_list` registered above, catching
         // Rhai-stdlib usage bugs (`join`, `sub_string`, ...) that
         // wouldn't surface from a passive load.
-        let panel = h.call_fn_json("ui_plugins_panel", serde_json::Value::Null).unwrap();
+        let panel = h
+            .call_fn_json("ui_plugins_panel", serde_json::Value::Null)
+            .unwrap();
         assert_eq!(panel["kind"], "table");
         assert_eq!(panel["on_select"], "ui_plugin_details");
         assert!(

@@ -529,26 +529,18 @@ fn parse_color(s: &str) -> Result<Color, String> {
     let hex = &s[1..];
     match hex.len() {
         6 => {
-            let r = u8::from_str_radix(&hex[0..2], 16)
-                .map_err(|_| format!("invalid hex '{s}'"))?;
-            let g = u8::from_str_radix(&hex[2..4], 16)
-                .map_err(|_| format!("invalid hex '{s}'"))?;
-            let b = u8::from_str_radix(&hex[4..6], 16)
-                .map_err(|_| format!("invalid hex '{s}'"))?;
+            let r = u8::from_str_radix(&hex[0..2], 16).map_err(|_| format!("invalid hex '{s}'"))?;
+            let g = u8::from_str_radix(&hex[2..4], 16).map_err(|_| format!("invalid hex '{s}'"))?;
+            let b = u8::from_str_radix(&hex[4..6], 16).map_err(|_| format!("invalid hex '{s}'"))?;
             Ok(Color::Rgb(r, g, b))
         }
         3 => {
-            let r =
-                u8::from_str_radix(&hex[0..1], 16).map_err(|_| format!("invalid hex '{s}'"))?;
-            let g =
-                u8::from_str_radix(&hex[1..2], 16).map_err(|_| format!("invalid hex '{s}'"))?;
-            let b =
-                u8::from_str_radix(&hex[2..3], 16).map_err(|_| format!("invalid hex '{s}'"))?;
+            let r = u8::from_str_radix(&hex[0..1], 16).map_err(|_| format!("invalid hex '{s}'"))?;
+            let g = u8::from_str_radix(&hex[1..2], 16).map_err(|_| format!("invalid hex '{s}'"))?;
+            let b = u8::from_str_radix(&hex[2..3], 16).map_err(|_| format!("invalid hex '{s}'"))?;
             Ok(Color::Rgb(r * 17, g * 17, b * 17))
         }
-        _ => Err(format!(
-            "color '{s}' must be 3 or 6 hex digits after '#'"
-        )),
+        _ => Err(format!("color '{s}' must be 3 or 6 hex digits after '#'")),
     }
 }
 
@@ -579,14 +571,8 @@ mod tests {
             ts.iter().map(|t| (t.name.as_str(), &t.palette)).collect();
         assert_eq!(by_name["dracula"].accent, Color::Rgb(0xbd, 0x93, 0xf9));
         assert_eq!(by_name["nord"].accent, Color::Rgb(0x88, 0xc0, 0xd0));
-        assert_eq!(
-            by_name["gruvbox-dark"].accent,
-            Color::Rgb(0xfa, 0xbd, 0x2f)
-        );
-        assert_eq!(
-            by_name["tokyo-night"].accent,
-            Color::Rgb(0x7a, 0xa2, 0xf7)
-        );
+        assert_eq!(by_name["gruvbox-dark"].accent, Color::Rgb(0xfa, 0xbd, 0x2f));
+        assert_eq!(by_name["tokyo-night"].accent, Color::Rgb(0x7a, 0xa2, 0xf7));
     }
 
     #[test]
@@ -605,8 +591,7 @@ mod tests {
 
     #[test]
     fn load_user_themes_handles_missing_dir() {
-        let (ts, ws) =
-            load_user_themes(std::path::Path::new("/tmp/grain-no-such-dir-12345"));
+        let (ts, ws) = load_user_themes(std::path::Path::new("/tmp/grain-no-such-dir-12345"));
         assert!(ts.is_empty());
         assert!(ws.is_empty());
     }

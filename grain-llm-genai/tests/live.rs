@@ -19,9 +19,9 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use grain_agent_core::{
-    AgentMessage, AssistantContent, AssistantMessageEvent, AssistantStream, LlmContext,
-    LlmStream, Message, Model, StopReason, StreamOptions, TextContent, ToolDefinition,
-    UserContent, UserMessage,
+    AgentMessage, AssistantContent, AssistantMessageEvent, AssistantStream, LlmContext, LlmStream,
+    Message, Model, StopReason, StreamOptions, TextContent, ToolDefinition, UserContent,
+    UserMessage,
 };
 use grain_llm_genai::{GenaiStream, OpenAiCompatPreset};
 use tokio_util::sync::CancellationToken;
@@ -79,7 +79,10 @@ fn assert_completed(ev: &AssistantMessageEvent) {
             );
         }
         AssistantMessageEvent::Error { error, result } => {
-            panic!("stream failed: error={error}, message={:?}", result.error_message);
+            panic!(
+                "stream failed: error={error}, message={:?}",
+                result.error_message
+            );
         }
         _ => panic!("expected terminal event, got {ev:?}"),
     }
@@ -125,7 +128,12 @@ async fn live_openai_text_round_trip() {
         Vec::new(),
     );
     let stream = stream_impl
-        .stream(&model, &ctx, &StreamOptions::default(), CancellationToken::new())
+        .stream(
+            &model,
+            &ctx,
+            &StreamOptions::default(),
+            CancellationToken::new(),
+        )
         .await
         .expect("stream initialised");
     let final_event = drain(stream).await;
@@ -145,18 +153,19 @@ async fn live_anthropic_text_round_trip() {
         return;
     }
     let stream_impl = Arc::new(GenaiStream::builder().build());
-    let model = model_of(
-        "anthropic/claude-haiku-4-5",
-        "anthropic",
-        "anthropic",
-    );
+    let model = model_of("anthropic/claude-haiku-4-5", "anthropic", "anthropic");
     let ctx = ctx_with(
         "Reply with exactly the word: pong",
         "You are a terse assistant. Answer with a single word.",
         Vec::new(),
     );
     let stream = stream_impl
-        .stream(&model, &ctx, &StreamOptions::default(), CancellationToken::new())
+        .stream(
+            &model,
+            &ctx,
+            &StreamOptions::default(),
+            CancellationToken::new(),
+        )
         .await
         .expect("stream initialised");
     let final_event = drain(stream).await;
@@ -183,18 +192,19 @@ async fn live_anthropic_tool_call_round_trip() {
         execution_mode: None,
     };
     let stream_impl = Arc::new(GenaiStream::builder().build());
-    let model = model_of(
-        "anthropic/claude-haiku-4-5",
-        "anthropic",
-        "anthropic",
-    );
+    let model = model_of("anthropic/claude-haiku-4-5", "anthropic", "anthropic");
     let ctx = LlmContext {
         system_prompt: "Use the echo tool with value=\"ping\" — do not answer in text.".into(),
         messages: vec![user("Please invoke the echo tool with value=ping.")],
         tools: vec![echo],
     };
     let stream = stream_impl
-        .stream(&model, &ctx, &StreamOptions::default(), CancellationToken::new())
+        .stream(
+            &model,
+            &ctx,
+            &StreamOptions::default(),
+            CancellationToken::new(),
+        )
         .await
         .expect("stream initialised");
     let final_event = drain(stream).await;
@@ -236,7 +246,12 @@ async fn live_kimi_openai_compat_round_trip() {
         Vec::new(),
     );
     let stream = stream_impl
-        .stream(&model, &ctx, &StreamOptions::default(), CancellationToken::new())
+        .stream(
+            &model,
+            &ctx,
+            &StreamOptions::default(),
+            CancellationToken::new(),
+        )
         .await
         .expect("stream initialised");
     let final_event = drain(stream).await;

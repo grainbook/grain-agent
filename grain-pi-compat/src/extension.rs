@@ -111,11 +111,7 @@ impl PiExtension {
     /// Dispatch a slash command registered via `pi.registerCommand`.
     /// `args` is forwarded as the first argument to the JS handler.
     /// JS-side throws come back as `Err(msg)`.
-    pub async fn invoke_command(
-        &self,
-        name: &str,
-        args: serde_json::Value,
-    ) -> Result<(), String> {
+    pub async fn invoke_command(&self, name: &str, args: serde_json::Value) -> Result<(), String> {
         self.inner
             .invoke_callback(&format!("cmd:{name}"), args)
             .await
@@ -280,10 +276,9 @@ fn map_agent_event_to_pi(event: &AgentEvent) -> Option<(&'static str, serde_json
             "message_start",
             serde_json::json!({ "role": message.role() }),
         )),
-        AgentEvent::MessageEnd { message } => Some((
-            "message_end",
-            serde_json::json!({ "role": message.role() }),
-        )),
+        AgentEvent::MessageEnd { message } => {
+            Some(("message_end", serde_json::json!({ "role": message.role() })))
+        }
         AgentEvent::ToolExecutionStart {
             tool_call_id,
             tool_name,
@@ -501,10 +496,7 @@ mod tests {
         // Sad path — JS throws, error string surfaces back.
         let err = ext
             .inner
-            .invoke_callback(
-                "on:tool_call",
-                serde_json::json!({ "tool_name": "wrong" }),
-            )
+            .invoke_callback("on:tool_call", serde_json::json!({ "tool_name": "wrong" }))
             .await;
         let Err(msg) = err else {
             panic!("expected JS throw to surface as Err");
@@ -515,11 +507,7 @@ mod tests {
     #[tokio::test]
     async fn unregistered_callback_name_is_a_noop() {
         let tmp = tempfile::tempdir().unwrap();
-        write_script(
-            tmp.path(),
-            "x.js",
-            r#"pi.on("tool_call", () => {});"#,
-        );
+        write_script(tmp.path(), "x.js", r#"pi.on("tool_call", () => {});"#);
         let ext = PiExtension::from_dirs(&[tmp.path().to_path_buf()]).unwrap();
         // No handler subscribed to "agent_end" — must NOT error.
         let res = ext
@@ -654,7 +642,10 @@ mod tests {
         // Sorted by `keys`.
         assert_eq!(scs.len(), 2);
         assert_eq!(scs[0].keys, "ctrl+s");
-        assert_eq!(scs[0].description, "Save — throws if 'saving' state mismatched");
+        assert_eq!(
+            scs[0].description,
+            "Save — throws if 'saving' state mismatched"
+        );
         assert_eq!(scs[1].keys, "ctrl+x");
 
         // Dispatch the no-op shortcut.
@@ -775,7 +766,8 @@ mod tests {
         }
         let confirm_id = confirm_id.expect("confirm modal never appeared");
         // Resolve with `true`.
-        ext.resolve_modal(confirm_id, serde_json::json!(true)).unwrap();
+        ext.resolve_modal(confirm_id, serde_json::json!(true))
+            .unwrap();
         // The handler should now finish and post the answer.
         invoke_task.await.unwrap().unwrap();
         // Drain any remaining notifications — should include the
@@ -826,7 +818,8 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         let input_id = input_id.expect("input modal never appeared");
-        ext.resolve_modal(input_id, serde_json::json!("Yoda")).unwrap();
+        ext.resolve_modal(input_id, serde_json::json!("Yoda"))
+            .unwrap();
         invoke_task.await.unwrap().unwrap();
         let leftover = ext.drain_notifications();
         assert!(
