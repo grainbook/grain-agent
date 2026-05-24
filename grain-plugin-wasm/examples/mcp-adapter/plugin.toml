@@ -1,0 +1,8 @@
+name = "mcp-adapter"
+version = "0.1.0"
+description = "MCP adapter — lazy proxy that turns verbose MCP tool lists into one ~200-token tool. The agent discovers and calls MCP servers on demand. Ported from pi-mcp-adapter (nicobailon)."
+author = "grain"
+
+[wasm]
+module = "plugin.wasm"
+capabilities = ["http", "env", "log"]

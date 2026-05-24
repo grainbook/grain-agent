@@ -6,3 +6,5 @@
 # Local provider keys for live integration tests. Never commit real keys.
 .env.test
 .DS_Store
+
+**/*.wasm

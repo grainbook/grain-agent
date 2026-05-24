@@ -1,0 +1,53 @@
+// WIT contract for grain WASM plugins (Component Model).
+// Shared with all examples — copy from echo-plugin.
+package grain:plugin;
+
+interface host {
+    enum log-level {
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    record http-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: string,
+    }
+
+    log: func(level: log-level, msg: string);
+    env-get: func(key: string) -> option<string>;
+    http-get: func(url: string, headers: list<tuple<string, string>>)
+        -> result<http-response, string>;
+    http-post: func(url: string, headers: list<tuple<string, string>>, body: string)
+        -> result<http-response, string>;
+}
+
+interface plugin {
+    record tool-def {
+        name: string,
+        label: string,
+        description: string,
+        parameters-json: string,
+    }
+
+    record tool-result {
+        content-json: string,
+        is-error: bool,
+    }
+
+    record plugin-info {
+        name: string,
+        version: string,
+    }
+
+    init: func() -> result<plugin-info, string>;
+    list-tools: func() -> list<tool-def>;
+    call-tool: func(name: string, args-json: string) -> tool-result;
+}
+
+world grain-plugin {
+    import host;
+    export plugin;
+}
