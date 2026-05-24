@@ -36,6 +36,8 @@ grain-plugin-wasm = { workspace = true, optional = true }
 # grain-script-rhai bridge.
 rhai = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
+tui-scrollview = "0.6"
+ratatui-widgets = "0.3"
 
 [features]
 # Default to all optional engines on. `--no-default-features` strips

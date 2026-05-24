@@ -1948,6 +1948,7 @@ dependencies = [
  "notify",
  "pulldown-cmark",
  "ratatui",
+ "ratatui-widgets",
  "reqwest 0.12.28",
  "rhai",
  "serde",
@@ -1959,6 +1960,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.8.23",
+ "tui-scrollview",
  "unicode-width",
 ]
 
@@ -5235,6 +5237,17 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "tui-scrollview"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94a94f467c7ac7c291039b0733e3b2d379c77884e34fc27d167921fc1ab4842f"
+dependencies = [
+ "indoc",
+ "ratatui-core",
+ "ratatui-widgets",
+]
 
 [[package]]
 name = "typenum"

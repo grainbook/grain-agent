@@ -17,6 +17,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Clear, Paragraph, Wrap},
 };
+use ratatui_widgets::scrollbar::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{AppState, Focus, Overlay, SLASH_CATALOG, TranscriptKind, TranscriptLine};
@@ -282,10 +283,16 @@ fn build_header_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
 }
 
 fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, palette: &Palette) {
-    // Stash the pane bounds so mouse handlers can translate event
+    // Split off 1 column on the right for the vertical scrollbar.
+    let [content_area, scrollbar_area] = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ]).areas(area);
+
+    // Stash the content pane bounds so mouse handlers can translate event
     // coordinates back into rendered-row indices.
-    state.transcript_area.set(area);
-    let width = area.width as usize;
+    state.transcript_area.set(content_area);
+    let width = content_area.width as usize;
 
     // Pre-wrap with `textwrap::wrap` instead of relying on
     // `Paragraph::wrap`: we need the wrapped output as plain text so
@@ -388,11 +395,19 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, pale
     // them on the next event (translate / extract-on-mouse-up).
     state.rendered_rows.replace(rendered);
 
-    // No `.wrap()` here — we already wrapped to `area.width` so
+    // No `.wrap()` here — we already wrapped to `content_area.width` so
     // ratatui's word-wrap is unnecessary (and would re-wrap our
     // already-sized rows).
     let paragraph = Paragraph::new(Text::from(lines));
-    frame.render_widget(paragraph, area);
+    frame.render_widget(paragraph, content_area);
+
+    // Vertical scrollbar on the right edge of the transcript area.
+    let mut sb_state = ScrollbarState::new(total_rows)
+        .position(skip)
+        .viewport_content_length(visible.min(total_rows));
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .style(palette.muted);
+    frame.render_stateful_widget(scrollbar, scrollbar_area, &mut sb_state);
 }
 
 /// Decide whether `line` should get markdown rendering and return
@@ -1556,10 +1571,26 @@ fn draw_doctor(
         })
         .collect();
 
+    // Split body for scrollbar.
+    let [doc_body_area, doc_sb_area] = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ]).areas(body_area);
+
     frame.render_widget(
         Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
-        body_area,
+        doc_body_area,
     );
+
+    // Scrollbar for doctor overlay.
+    if total > 0 {
+        let mut sb_state = ScrollbarState::new(total)
+            .position(start)
+            .viewport_content_length(visible.min(total));
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .style(palette.muted);
+        frame.render_stateful_widget(scrollbar, doc_sb_area, &mut sb_state);
+    }
 
     let hint = if total == 0 {
         format!("(no lines match \"{query}\") · Esc to close")
@@ -1632,13 +1663,32 @@ fn draw_log(
         body.push_str("(no entries; start the TUI with --debug-log)");
     }
 
+    // Count lines before body is consumed.
+    let log_lines = body.lines().count();
+
+    // Split body area for scrollbar.
+    let [log_body_area, log_sb_area] = Layout::horizontal([
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ]).areas(chunks[2]);
+
     frame.render_widget(
         Paragraph::new(body)
             .style(Style::default().fg(palette.fg))
             .wrap(Wrap { trim: false })
             .scroll((scroll as u16, 0)),
-        chunks[2],
+        log_body_area,
     );
+
+    // Scrollbar for log overlay.
+    if log_lines > 0 {
+        let mut sb_state = ScrollbarState::new(log_lines)
+            .position(scroll)
+            .viewport_content_length(chunks[2].height as usize);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .style(palette.muted);
+        frame.render_stateful_widget(scrollbar, log_sb_area, &mut sb_state);
+    }
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -1685,10 +1735,13 @@ fn draw_session_resume(
     ]);
     frame.render_widget(Paragraph::new(title_line), chunks[0]);
 
-    let body = if sessions.is_empty() {
-        Paragraph::new("(no past sessions found in sessions dir)")
-            .style(Style::default().fg(palette.muted))
-            .wrap(Wrap { trim: false })
+    if sessions.is_empty() {
+        frame.render_widget(
+            Paragraph::new("(no past sessions found in sessions dir)")
+                .style(Style::default().fg(palette.muted))
+                .wrap(Wrap { trim: false }),
+            chunks[2],
+        );
     } else {
         let lines: Vec<Line> = sessions
             .iter()
@@ -1702,15 +1755,15 @@ fn draw_session_resume(
                 // opens the session-lock-conflict dialog instead of
                 // emitting `Command::ResumeSession` directly.
                 let row = if sess.locked {
-                    format!("{title}   [locked]")
+                    format!("{title} [locked]")
                 } else {
                     title.to_string()
                 };
-                let meta = format!("    {model} · {mtime_str} · {} msgs", sess.message_count);
+                let meta = format!(" {model} · {mtime_str} · {} msgs", sess.message_count);
                 let (row_style, meta_style) = if i == focused {
                     // Armed-delete state: flip the highlight to the
                     // error palette so the row visually screams
-                    // "destructive action pending" rather than the
+                    // "destructive action pending" than the
                     // friendly accent color the resume picker uses.
                     let bg = if confirm_delete {
                         palette.error
@@ -1745,13 +1798,32 @@ fn draw_session_resume(
         } else {
             0
         };
-        Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false })
-            .scroll((scroll as u16, 0))
-    };
-    frame.render_widget(body, chunks[2]);
+        // Split body for scrollbar.
+        let [resume_body_area, resume_sb_area] = Layout::horizontal([
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ]).areas(chunks[2]);
 
-    let (hint, hint_style) = if sessions.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Text::from(lines))
+                .wrap(Wrap { trim: false })
+                .scroll((scroll as u16, 0)),
+            resume_body_area,
+        );
+
+        // Scrollbar for resume picker.
+        let resume_total_lines = sessions.len().saturating_mul(2);
+        if resume_total_lines > 0 {
+            let mut sb_state = ScrollbarState::new(resume_total_lines)
+                .position(scroll)
+                .viewport_content_length(visible.min(resume_total_lines));
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .style(palette.muted);
+            frame.render_stateful_widget(scrollbar, resume_sb_area, &mut sb_state);
+        }
+    }
+
+let (hint, hint_style) = if sessions.is_empty() {
         ("Esc close", Style::default().fg(palette.muted))
     } else if confirm_delete {
         (
