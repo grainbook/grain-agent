@@ -774,6 +774,12 @@ pub struct Capabilities {
     pub allow_semantic_search: bool,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct GitPromptState {
+    pub branch: Option<String>,
+    pub dirty_count: usize,
+}
+
 /// Everything the renderer needs to draw a frame. Pure data — no
 /// `Arc<Mutex<...>>`, no `tokio` types — so it can be cloned cheaply for
 /// snapshot testing.
@@ -863,6 +869,7 @@ pub struct AppState {
     pub compaction_count: u32,
     // ── Capabilities & Config ─────────────────────────────────
     pub workspace_display: String,
+    pub git_prompt: GitPromptState,
     pub capabilities: Capabilities,
     pub show_thinking: bool,
     pub last_error: Option<String>,
@@ -1053,6 +1060,41 @@ fn truncate_request_log_entry(body: String) -> String {
     out
 }
 
+fn read_git_prompt_state(workspace_display: &str) -> GitPromptState {
+    let branch = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace_display)
+        .arg("branch")
+        .arg("--show-current")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.is_empty() { None } else { Some(s) }
+        });
+
+    if branch.is_none() {
+        return GitPromptState::default();
+    }
+
+    let dirty_count = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace_display)
+        .arg("status")
+        .arg("--porcelain")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
+        .unwrap_or(0);
+
+    GitPromptState {
+        branch,
+        dirty_count,
+    }
+}
+
 /// Default USD → CNY rate when `--cny-rate` is unset but a `zh_*`
 /// locale is detected. Picked as a stable round number; users in
 /// rate-sensitive workflows should pass `--cny-rate` explicitly.
@@ -1161,6 +1203,7 @@ impl AppState {
     ) -> Self {
         assert!(!themes.is_empty(), "AppState needs at least one theme");
         let current_theme_idx = initial_theme_idx.min(themes.len() - 1);
+        let git_prompt = read_git_prompt_state(&workspace_display);
         let mut s = AppState {
             transcript: Vec::new(),
             input: String::new(),
@@ -1187,6 +1230,7 @@ impl AppState {
             system_prompt_chars,
             compaction_count: 0,
             workspace_display,
+            git_prompt,
             capabilities,
             show_thinking,
             last_error: None,
@@ -1232,6 +1276,10 @@ impl AppState {
     /// reference if the user switches mid-stream.
     pub fn theme(&self) -> &Theme {
         &self.themes[self.current_theme_idx]
+    }
+
+    pub(crate) fn refresh_git_prompt(&mut self) {
+        self.git_prompt = read_git_prompt_state(&self.workspace_display);
     }
 
     /// Transition the overlay, pushing open / close effects when the
@@ -3457,6 +3505,9 @@ impl AppState {
                     Some(&self.workspace_display),
                 );
                 self.push(kind, line);
+                if matches!(name, "edit" | "write" | "bash") {
+                    self.refresh_git_prompt();
+                }
             }
             AgentEvent::TurnEnd { message, .. } => {
                 if let Some(err) = &message.error_message {
