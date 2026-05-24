@@ -241,6 +241,13 @@ pub struct TranscriptLine {
     pub text: String,
 }
 
+#[derive(Debug, Clone)]
+struct ActiveToolDisplay {
+    name: String,
+    args: serde_json::Value,
+    start_line: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranscriptKind {
     UserPrompt,
@@ -437,19 +444,12 @@ impl AppState {
                     .get(block.first_line)
                     .map(|l| l.text.as_str())
                     .unwrap_or("");
-                let label = if head.starts_with("❯ ") {
-                    let cmd = &head[3..]; // strip "❯ "
-                    let trimmed = truncate_oneline(cmd, 50);
-                    format!("bash: {}", trimmed)
-                } else if head.starts_with("📖 ") {
-                    let path = &head[4..]; // strip "📖 "
-                    let trimmed = truncate_oneline(path, 55);
-                    format!("read({})", trimmed)
-                } else {
-                    let cleaned = head.trim_start_matches("● ").trim();
-                    let trimmed = truncate_oneline(cleaned, 60);
-                    format!("tool: {trimmed}")
-                };
+                let cleaned = head
+                    .strip_prefix("●! ")
+                    .or_else(|| head.strip_prefix("● "))
+                    .unwrap_or(head)
+                    .trim();
+                let label = format!("tool: {}", truncate_oneline(cleaned, 60));
                 if count > 1 {
                     format!("{label} ({count} lines)")
                 } else {
@@ -840,6 +840,7 @@ pub struct AppState {
     pub cny_rate: Option<f64>,
     // ── Model Info ────────────────────────────────────────────
     pub pending_tool_calls: usize,
+    active_tools: HashMap<String, ActiveToolDisplay>,
     pub model_id: String,
     /// Per-million-token pricing for the active model. Driven from the
     /// embedded `models.dev` snapshot at startup, refreshed on
@@ -1138,6 +1139,7 @@ impl AppState {
             session_usage: grain_agent_core::Usage::default(),
             cny_rate,
             pending_tool_calls: 0,
+            active_tools: HashMap::new(),
             model_id,
             model_cost,
             context_window,
@@ -1538,6 +1540,7 @@ impl AppState {
         self.streaming = false;
         self.streaming_started_at = None;
         self.pending_tool_calls = 0;
+        self.active_tools.clear();
         self.tokens_in = 0;
         self.tokens_out = 0;
         self.tokens_cache_read = 0;
@@ -1591,7 +1594,6 @@ impl AppState {
                             }
                         }
                         AssistantContent::ToolCall(tc) => {
-                            let args_preview = preview_json(&tc.arguments, 120);
                             // Claude-Code-style header. The matching
                             // ToolCallEnd / ToolCallError line is
                             // emitted later when the corresponding
@@ -1600,7 +1602,7 @@ impl AppState {
                             // exactly like a live tool call.
                             self.push(
                                 TranscriptKind::ToolCallStart,
-                                format!("● {}({args_preview})", tc.name),
+                                format_tool_start_line(&tc.name, &tc.arguments),
                             );
                         }
                         _ => {}
@@ -1617,14 +1619,14 @@ impl AppState {
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
-                let preview = truncate(&text, 500);
+                let preview = truncate_oneline(&text, 500);
                 let (kind, line) = if tr.is_error {
                     (
                         TranscriptKind::ToolCallError,
-                        format!("  ⎿  [error] {preview}"),
+                        format!("  └ Error\n{}", indent_preview_lines(&preview, 500, 4)),
                     )
                 } else {
-                    (TranscriptKind::ToolCallEnd, format!("  ⎿  {preview}"))
+                    (TranscriptKind::ToolCallEnd, format!("  └ {preview}"))
                 };
                 self.push(kind, line);
             }
@@ -3347,59 +3349,48 @@ impl AppState {
                 }
             }
             AgentEvent::ToolExecutionStart {
-                tool_name, args, ..
+                tool_call_id,
+                tool_name,
+                args,
             } => {
                 self.pending_tool_calls = self.pending_tool_calls.saturating_add(1);
-                let line = match tool_name.as_str() {
-                    "bash" => {
-                        let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                        format!("❯ {cmd}")
-                    }
-                    "read" => {
-                        let path = args
-                            .get("path")
-                            .or_else(|| args.get("file_path"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        format!("📖 {path}")
-                    }
-                    _ => {
-                        let preview = preview_json(&args, 120);
-                        format!("● {tool_name}({preview})")
-                    }
-                };
+                let line = format_tool_start_line(&tool_name, &args);
+                self.active_tools.insert(
+                    tool_call_id,
+                    ActiveToolDisplay {
+                        name: tool_name,
+                        args,
+                        start_line: self.transcript.len(),
+                    },
+                );
                 self.push(TranscriptKind::ToolCallStart, line);
             }
             AgentEvent::ToolExecutionUpdate { .. } => {}
             AgentEvent::ToolExecutionEnd {
-                is_error, result, ..
+                tool_call_id,
+                tool_name,
+                is_error,
+                result,
             } => {
                 if self.pending_tool_calls > 0 {
                     self.pending_tool_calls -= 1;
                 }
-                let preview = result
-                    .content
-                    .iter()
-                    .filter_map(|c| match c {
-                        UserContent::Text(t) => Some(t.text.as_str()),
-                        _ => None,
-                    })
-                    .next()
-                    .map(|t| t.to_string())
-                    .unwrap_or_default();
-                // Claude-Code-style continuation: `  ⎿  result` (or
-                // `  ⎿  [error] result` for failures). The matching
-                // ToolCallStart already named the tool, so we don't
-                // repeat it here. Error tag promotes the row to
-                // `ToolCallError` so the renderer can color it red.
-                let (kind, line) = if is_error {
-                    (
-                        TranscriptKind::ToolCallError,
-                        format!("  ⎿  [error] {preview}"),
-                    )
-                } else {
-                    (TranscriptKind::ToolCallEnd, format!("  ⎿  {preview}"))
-                };
+                let active = self.active_tools.remove(&tool_call_id);
+                if is_error
+                    && let Some(active) = &active
+                    && let Some(start) = self.transcript.get_mut(active.start_line)
+                {
+                    start.text = mark_tool_start_error(&start.text);
+                }
+                let args = active
+                    .as_ref()
+                    .map(|a| &a.args)
+                    .unwrap_or(&serde_json::Value::Null);
+                let name = active
+                    .as_ref()
+                    .map(|a| a.name.as_str())
+                    .unwrap_or(&tool_name);
+                let (kind, line) = format_tool_result_line(name, args, &result, is_error);
                 self.push(kind, line);
             }
             AgentEvent::TurnEnd { message, .. } => {
@@ -3506,6 +3497,336 @@ fn concat_assistant_thinking(partial: &grain_agent_core::AssistantMessage) -> St
         }
     }
     out
+}
+
+fn format_tool_start_line(tool_name: &str, args: &serde_json::Value) -> String {
+    let label = tool_display_label(tool_name);
+    let subject = tool_primary_arg(tool_name, args).unwrap_or_else(|| preview_json(args, 96));
+    if subject.is_empty() || subject == "{}" {
+        format!("● {label}")
+    } else {
+        format!("● {label}({subject})")
+    }
+}
+
+fn mark_tool_start_error(line: &str) -> String {
+    if let Some(rest) = line.strip_prefix("●! ") {
+        format!("●! {rest}")
+    } else if let Some(rest) = line.strip_prefix("● ") {
+        format!("●! {rest}")
+    } else {
+        format!("●! {line}")
+    }
+}
+
+fn tool_display_label(name: &str) -> &'static str {
+    match name {
+        "bash" => "Bash",
+        "read" => "Read",
+        "write" => "Write",
+        "edit" => "Update",
+        "grep" => "Search",
+        "glob" => "Glob",
+        "list" => "List",
+        "web_fetch" => "Fetch",
+        "source_info" => "SourceInfo",
+        _ => "Tool",
+    }
+}
+
+fn tool_primary_arg(tool_name: &str, args: &serde_json::Value) -> Option<String> {
+    let get = |key: &str| args.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    match tool_name {
+        "bash" => get("command"),
+        "read" | "write" | "edit" | "list" => get("path").or_else(|| get("file_path")),
+        "grep" | "glob" => get("pattern"),
+        "web_fetch" => get("url"),
+        _ => None,
+    }
+    .map(|s| truncate_oneline(&s, 120))
+}
+
+fn format_tool_result_line(
+    tool_name: &str,
+    args: &serde_json::Value,
+    result: &grain_agent_core::AgentToolResult,
+    is_error: bool,
+) -> (TranscriptKind, String) {
+    let text = tool_result_text(result);
+    if is_error {
+        let mut lines = vec![format!("  └ {}", tool_error_summary(tool_name))];
+        lines.extend(preview_child_lines(&text, 6, 220));
+        return (TranscriptKind::ToolCallError, lines.join("\n"));
+    }
+
+    let mut lines = vec![format!(
+        "  └ {}",
+        tool_success_summary(tool_name, args, result)
+    )];
+    match tool_name {
+        "edit" => {
+            lines.extend(edit_diff_preview(args, 18));
+        }
+        "bash" => {
+            lines.extend(preview_child_lines(&text, 10, 220));
+        }
+        "read" | "grep" | "glob" | "list" | "web_fetch" => {
+            lines.extend(preview_child_lines(&text, 8, 220));
+        }
+        _ => {
+            lines.extend(preview_child_lines(&text, 4, 220));
+        }
+    }
+    (TranscriptKind::ToolCallEnd, lines.join("\n"))
+}
+
+fn tool_error_summary(tool_name: &str) -> &'static str {
+    match tool_name {
+        "edit" => "Error editing file",
+        "write" => "Error writing file",
+        "read" => "Error reading file",
+        "bash" => "Command failed",
+        "grep" => "Search failed",
+        "glob" => "Glob failed",
+        "list" => "List failed",
+        "web_fetch" => "Fetch failed",
+        _ => "Tool failed",
+    }
+}
+
+fn tool_success_summary(
+    tool_name: &str,
+    args: &serde_json::Value,
+    result: &grain_agent_core::AgentToolResult,
+) -> String {
+    let d = &result.details;
+    match tool_name {
+        "edit" => {
+            let path = detail_str(d, "path").or_else(|| tool_primary_arg(tool_name, args));
+            let replacements = detail_u64(d, "replacements").unwrap_or(1);
+            let bytes_delta = detail_i64(d, "bytesDelta").unwrap_or(0);
+            let line_delta = edit_line_delta(args);
+            let mut pieces = Vec::new();
+            if line_delta.added > 0 || line_delta.removed > 0 {
+                pieces.push(format!(
+                    "added {} {}, removed {} {}",
+                    line_delta.added,
+                    plural(line_delta.added, "line", "lines"),
+                    line_delta.removed,
+                    plural(line_delta.removed, "line", "lines")
+                ));
+            }
+            pieces.push(format!(
+                "{replacements} {}",
+                plural(replacements, "replacement", "replacements")
+            ));
+            pieces.push(format!("{bytes_delta:+} bytes"));
+            format!(
+                "{}{}",
+                path.map(|p| format!("Updated {p}: "))
+                    .unwrap_or_else(|| "Updated: ".into()),
+                pieces.join(", ")
+            )
+        }
+        "write" => {
+            let path = detail_str(d, "path").or_else(|| tool_primary_arg(tool_name, args));
+            let lines = detail_u64(d, "lines").unwrap_or(0);
+            let bytes = detail_u64(d, "bytes").unwrap_or(0);
+            let action = if detail_bool(d, "created").unwrap_or(false) {
+                "Created"
+            } else {
+                "Wrote"
+            };
+            format!(
+                "{action} {} ({lines} {}, {bytes} bytes)",
+                path.unwrap_or_else(|| "file".into()),
+                plural(lines, "line", "lines")
+            )
+        }
+        "read" => {
+            let path = detail_str(d, "path").or_else(|| tool_primary_arg(tool_name, args));
+            let lines = detail_u64(d, "lines").unwrap_or(0);
+            let total = detail_u64(d, "totalLines").unwrap_or(lines);
+            if lines == total {
+                format!(
+                    "Read {lines} {} from {}",
+                    plural(lines, "line", "lines"),
+                    path.unwrap_or_else(|| "file".into())
+                )
+            } else {
+                format!(
+                    "Read {lines}/{total} lines from {}",
+                    path.unwrap_or_else(|| "file".into())
+                )
+            }
+        }
+        "grep" => {
+            let matches = detail_u64(d, "matches").unwrap_or(0);
+            let files = detail_u64(d, "files").unwrap_or(0);
+            if matches == 0 {
+                "No matches".into()
+            } else {
+                format!(
+                    "Found {matches} {} in {files} {}",
+                    plural(matches, "match", "matches"),
+                    plural(files, "file", "files")
+                )
+            }
+        }
+        "glob" => {
+            let matches = detail_u64(d, "matches").unwrap_or(0);
+            format!("Found {matches} {}", plural(matches, "file", "files"))
+        }
+        "list" => {
+            let path = detail_str(d, "path").or_else(|| tool_primary_arg(tool_name, args));
+            let dirs = detail_u64(d, "directories").unwrap_or(0);
+            let files = detail_u64(d, "files").unwrap_or(0);
+            format!(
+                "Listed {} ({dirs} {}, {files} {})",
+                path.unwrap_or_else(|| ".".into()),
+                plural(dirs, "dir", "dirs"),
+                plural(files, "file", "files")
+            )
+        }
+        "bash" => {
+            let code = detail_i64(d, "exitCode")
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "unknown".into());
+            let dur = detail_u64(d, "durationMs")
+                .map(format_duration_ms)
+                .unwrap_or_else(|| "-".into());
+            format!("Exited {code} in {dur}")
+        }
+        "web_fetch" => {
+            let url = tool_primary_arg(tool_name, args).unwrap_or_else(|| "url".into());
+            format!("Fetched {url}")
+        }
+        _ => {
+            let text = truncate_oneline(&tool_result_text(result), 180);
+            if text.is_empty() {
+                "Completed".into()
+            } else {
+                text
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LineDelta {
+    added: u64,
+    removed: u64,
+}
+
+fn edit_line_delta(args: &serde_json::Value) -> LineDelta {
+    let old = args.get("old").and_then(|v| v.as_str()).unwrap_or("");
+    let new = args.get("new").and_then(|v| v.as_str()).unwrap_or("");
+    if old == new {
+        return LineDelta {
+            added: 0,
+            removed: 0,
+        };
+    }
+    LineDelta {
+        added: line_count(new),
+        removed: line_count(old),
+    }
+}
+
+fn edit_diff_preview(args: &serde_json::Value, max_lines: usize) -> Vec<String> {
+    let old = args.get("old").and_then(|v| v.as_str()).unwrap_or("");
+    let new = args.get("new").and_then(|v| v.as_str()).unwrap_or("");
+    if old.is_empty() && new.is_empty() {
+        return Vec::new();
+    }
+
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    let mut out = Vec::new();
+    for line in old_lines.iter().take(max_lines / 2).copied() {
+        out.push(format!("    - {}", truncate_oneline(line, 220)));
+    }
+    let remaining = max_lines.saturating_sub(out.len());
+    for line in new_lines.iter().take(remaining).copied() {
+        out.push(format!("    + {}", truncate_oneline(line, 220)));
+    }
+    let omitted = old_lines
+        .len()
+        .saturating_sub(max_lines / 2)
+        .saturating_add(new_lines.len().saturating_sub(remaining));
+    if omitted > 0 {
+        out.push(format!("    … {omitted} diff line(s) hidden"));
+    }
+    out
+}
+
+fn preview_child_lines(text: &str, max_lines: usize, max_chars: usize) -> Vec<String> {
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let total = trimmed.lines().count();
+    let mut out: Vec<String> = trimmed
+        .lines()
+        .take(max_lines)
+        .map(|line| format!("    {}", truncate_oneline(line, max_chars)))
+        .collect();
+    if total > max_lines {
+        out.push(format!("    … {} more line(s)", total - max_lines));
+    }
+    out
+}
+
+fn indent_preview_lines(text: &str, max_chars: usize, max_lines: usize) -> String {
+    preview_child_lines(text, max_lines, max_chars).join("\n")
+}
+
+fn tool_result_text(result: &grain_agent_core::AgentToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|c| match c {
+            UserContent::Text(t) => Some(t.text.as_str()),
+            UserContent::Image(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn detail_str(details: &serde_json::Value, key: &str) -> Option<String> {
+    details.get(key)?.as_str().map(str::to_string)
+}
+
+fn detail_u64(details: &serde_json::Value, key: &str) -> Option<u64> {
+    details.get(key)?.as_u64()
+}
+
+fn detail_i64(details: &serde_json::Value, key: &str) -> Option<i64> {
+    details.get(key)?.as_i64()
+}
+
+fn detail_bool(details: &serde_json::Value, key: &str) -> Option<bool> {
+    details.get(key)?.as_bool()
+}
+
+fn line_count(s: &str) -> u64 {
+    if s.is_empty() {
+        0
+    } else {
+        s.lines().count() as u64
+    }
+}
+
+fn plural<'a>(n: u64, singular: &'a str, plural: &'a str) -> &'a str {
+    if n == 1 { singular } else { plural }
+}
+
+fn format_duration_ms(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    }
 }
 
 fn preview_json(v: &serde_json::Value, max_chars: usize) -> String {

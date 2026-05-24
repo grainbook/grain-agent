@@ -636,6 +636,15 @@ fn build_line(
 ) -> Line<'static> {
     let style = style_for_kind(row.kind, palette);
 
+    if let Some(mut sub_spans) = tool_line_spans(row, style, palette) {
+        if let Some(s) = selection
+            && let Some((lo, hi)) = s.col_range_for_row(idx, row.text.len())
+        {
+            sub_spans = apply_highlight_to_spans(sub_spans, lo, hi, palette);
+        }
+        return Line::from(sub_spans);
+    }
+
     // If we have markdown spans, build styled sub-spans.
     if let Some((ref spans, frag_start, frag_end)) = row.md_spans {
         let mut sub_spans =
@@ -667,6 +676,109 @@ fn build_line(
         Span::styled(row.text[lo..hi].to_string(), highlight_style),
         Span::styled(row.text[hi..].to_string(), style),
     ])
+}
+
+fn tool_line_spans(
+    row: &crate::app::RenderedRow,
+    base_style: Style,
+    palette: &Palette,
+) -> Option<Vec<Span<'static>>> {
+    match row.kind {
+        TranscriptKind::ToolCallStart => tool_start_spans(&row.text, base_style, palette),
+        TranscriptKind::ToolCallEnd | TranscriptKind::ToolCallError => {
+            Some(tool_output_spans(&row.text, row.kind, base_style, palette))
+        }
+        _ => None,
+    }
+}
+
+fn tool_start_spans(
+    text: &str,
+    base_style: Style,
+    palette: &Palette,
+) -> Option<Vec<Span<'static>>> {
+    let (failed, body) = if let Some(rest) = text.strip_prefix("●! ") {
+        (true, rest)
+    } else if let Some(rest) = text.strip_prefix("● ") {
+        (false, rest)
+    } else {
+        return None;
+    };
+
+    let bullet_style = Style::default()
+        .fg(if failed {
+            palette.error
+        } else {
+            palette.success
+        })
+        .add_modifier(Modifier::BOLD);
+    let title_style = Style::default().fg(palette.fg).add_modifier(Modifier::BOLD);
+    let meta_style = Style::default().fg(palette.subdued);
+
+    let (title, meta) = match body.find('(') {
+        Some(idx) => (&body[..idx], &body[idx..]),
+        None => (body, ""),
+    };
+
+    let mut spans = vec![
+        Span::styled("●", bullet_style),
+        Span::raw(" "),
+        Span::styled(title.to_string(), title_style),
+    ];
+    if !meta.is_empty() {
+        spans.push(Span::styled(meta.to_string(), meta_style));
+    } else if title.is_empty() {
+        spans.push(Span::styled(text.to_string(), base_style));
+    }
+    Some(spans)
+}
+
+fn tool_output_spans(
+    text: &str,
+    kind: TranscriptKind,
+    base_style: Style,
+    palette: &Palette,
+) -> Vec<Span<'static>> {
+    let trimmed = text.trim_start();
+    if trimmed.starts_with("+ ") {
+        return vec![Span::styled(
+            text.to_string(),
+            Style::default().fg(palette.success),
+        )];
+    }
+    if trimmed.starts_with("- ") {
+        return vec![Span::styled(
+            text.to_string(),
+            Style::default().fg(palette.error),
+        )];
+    }
+    if trimmed.starts_with("… ") {
+        return vec![Span::styled(
+            text.to_string(),
+            Style::default().fg(palette.muted),
+        )];
+    }
+
+    let content_style = if kind == TranscriptKind::ToolCallError {
+        Style::default()
+            .fg(palette.error)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(palette.subdued)
+    };
+    if let Some(pos) = text.find('└') {
+        let (prefix, rest) = text.split_at(pos);
+        let mut chars = rest.chars();
+        let branch = chars.next().unwrap_or('└');
+        let after = chars.as_str();
+        return vec![
+            Span::styled(prefix.to_string(), Style::default().fg(palette.muted)),
+            Span::styled(branch.to_string(), Style::default().fg(palette.muted)),
+            Span::styled(after.to_string(), content_style),
+        ];
+    }
+
+    vec![Span::styled(text.to_string(), base_style)]
 }
 
 /// Apply selection-background highlight to a list of styled spans.
