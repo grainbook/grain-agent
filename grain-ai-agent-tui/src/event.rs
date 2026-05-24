@@ -92,6 +92,10 @@ pub enum TuiEvent {
     /// full set of prior messages so the UI can clear the current
     /// transcript and repopulate with the loaded history.
     SessionResumed { path: String, messages: Vec<grain_agent_core::AgentMessage> },
+/// Worker completed a `/compact` summarization pass. Carries the
+/// full set of post-compaction messages (compaction summary + kept
+/// tail) so the UI can clear the current transcript and repopulate.
+SessionCompacted { messages: Vec<grain_agent_core::AgentMessage> },
     /// Worker returned the list of models for the current provider
     /// (id + display name pairs). Fills the `/model` picker.
     ModelsListed(Vec<(String, String)>),

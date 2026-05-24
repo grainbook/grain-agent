@@ -1736,7 +1736,18 @@ fn draw_session_resume(
                 ]
             })
             .collect();
-        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false })
+        // Auto-scroll so the focused row stays visible.
+        // Each session entry is 2 lines (title + meta).
+        let visible = chunks[2].height as usize;
+        let focused_line = focused.saturating_mul(2);
+        let scroll = if focused_line >= visible {
+            focused_line.saturating_sub(visible.saturating_sub(2))
+        } else {
+            0
+        };
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll as u16, 0))
     };
     frame.render_widget(body, chunks[2]);
 

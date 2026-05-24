@@ -836,7 +836,7 @@ pub pending_tool_calls: usize,
     /// occupancy without waiting for an API response.
     pub system_prompt_chars: usize,
     /// Number of compaction events in this session. Bumped when a
-    /// `TuiEvent::Info` contains "compacted". Rendered as
+    /// `TuiEvent::SessionCompacted` is received. Rendered as
     /// `[compact N]` in the footer when > 0.
     pub compaction_count: u32,
         // ── Capabilities & Config ─────────────────────────────────
@@ -1673,6 +1673,22 @@ impl AppState {
                 Vec::new()
             }
             TuiEvent::SessionsListed(list) => {
+                // If no overlay is open and we're at boot (transcript has
+                // only the welcome line + maybe a provider-applied info),
+                // auto-open the resume picker so the user can choose which
+                // session to continue.  The auto-resumed row is focused;
+                // Enter confirms it, ↑↓ picks a different one.
+                if self.overlay.is_none()
+                    && self.transcript.len() <= 3
+                    && !list.is_empty()
+                {
+                    self.set_overlay(Some(Overlay::SessionResume {
+                        sessions: list,
+                        focused: 0,
+                        confirm_delete: false,
+                    }));
+                    return Vec::new();
+                }
                 // Only swap when the overlay is still open (user may
                 // have hit Esc while the scan was in flight).
                 if let Some(Overlay::SessionResume {
@@ -1747,12 +1763,20 @@ impl AppState {
                 }
                 Vec::new()
             }
-            TuiEvent::Info(text) => {
-                if text.contains("compacted") || text.contains("compact") {
-                    self.compaction_count = self.compaction_count.saturating_add(1);
+            TuiEvent::SessionCompacted { messages } => {
+self.transcript.clear();
+self.reset_streaming_state();
+self.compaction_count = self.compaction_count.saturating_add(1);
+for msg in &messages {
+self.push_agent_message(msg);
                 }
-                self.push(TranscriptKind::Info, text);
+// Keep input history — the user's past prompts are
+// still relevant after compacting the transcript.
                 Vec::new()
+            }
+TuiEvent::Info(text) => {
+ self.push(TranscriptKind::Info, text);
+ Vec::new()
             }
             TuiEvent::Status(text) => {
                 // Replace, don't append — the slot exists exactly so the
@@ -4927,11 +4951,29 @@ mod tests {
     }
 
     #[test]
-    fn sessions_listed_event_no_op_when_overlay_closed() {
+    fn sessions_listed_at_boot_opens_resume_picker() {
         let mut s = fresh();
         assert!(s.overlay.is_none());
         s.on_event(TuiEvent::SessionsListed(vec![fake_session_meta("a", 0)]));
-        // Still none — user closed before scan completed.
+        // Boot-list auto-opens the picker.
+        assert!(matches!(
+            s.overlay,
+            Some(Overlay::SessionResume { .. })
+        ));
+    }
+
+    #[test]
+    fn sessions_listed_when_overlay_closed_but_not_boot_is_noop() {
+        let mut s = fresh();
+        // Simulate post-boot state — transcript has grown.
+        s.push(TranscriptKind::UserPrompt, "hi".into());
+        s.push(TranscriptKind::AssistantText, "hello".into());
+        s.push(TranscriptKind::UserPrompt, "more".into());
+        s.push(TranscriptKind::AssistantText, "stuff".into());
+        assert!(s.transcript.len() > 3);
+        assert!(s.overlay.is_none());
+        s.on_event(TuiEvent::SessionsListed(vec![fake_session_meta("a", 0)]));
+        // Still none — not boot anymore.
         assert!(s.overlay.is_none());
     }
 

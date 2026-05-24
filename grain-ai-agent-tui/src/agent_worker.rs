@@ -1241,6 +1241,14 @@ match runtime.load(&wasm_path, &plugin_id, caps, &plugin_name, env_map).await {
             let _ = evt_tx_for_task.send(TuiEvent::SessionLockedAtBoot { locked_path });
         }
 
+        // Send the session list at boot so the UI can open the
+        // resume picker before the first user interaction.  The
+        // auto-resumed (or freshly-minted) session row is
+        // focused; Enter confirms it, ↑↓ picks a different one.
+        let boot_session_list =
+            grain_ai_agent_headless::list_sessions(&sessions_dir_for_task);
+        let _ = evt_tx_for_task.send(TuiEvent::SessionsListed(boot_session_list));
+
         run_command_loop(
             harness,
             builder,
@@ -1955,14 +1963,16 @@ async fn run_command_loop(
                 )));
                 let _ = evt_tx.send(TuiEvent::Info(format!("({overhead_banner})")));
             }
-            Command::Compact { keep_recent } => match harness.compact(keep_recent).await {
-                Ok(entry_id) => {
-                    let _ = evt_tx
-                        .send(TuiEvent::Info(format!("(compacted — entry {entry_id})")));
+Command::Compact { keep_recent } => match harness.compact(keep_recent).await {
+Ok(entry_id) => {
+let messages = harness.agent().state().await.messages;
+let _ = evt_tx.send(TuiEvent::SessionCompacted { messages });
+let _ = evt_tx
+.send(TuiEvent::Info(format!("(compacted — entry {entry_id})")));
                 }
                 Err(e) => {
-                    let _ = evt_tx
-                        .send(TuiEvent::AgentWorkerError(format!("compact: {e}")));
+let _ = evt_tx
+.send(TuiEvent::AgentWorkerError(format!("compact: {e}")));
                 }
             },
             Command::ApplyProvider(idx) => {
