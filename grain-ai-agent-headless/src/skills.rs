@@ -214,6 +214,39 @@ fn extract_body(content: &str) -> String {
     body_start.trim_start().to_string()
 }
 
+/// Synthesize a skill entry for `<workspace>/AGENTS.md` when the file
+/// exists, implementing support for the [AGENTS.md](https://agents.md/)
+/// standard. The model sees a lightweight `<skill>` tag in the system
+/// prompt (~100 bytes) and can read the full file on demand via the
+/// `read` tool — no bloat injected into every request.
+pub fn maybe_load_agents_md(workspace_root: &Path) -> Option<Skill> {
+    let path = workspace_root.join("AGENTS.md");
+    if path.is_file() {
+        // Refuse symlinks for the same reason we refuse symlinked skill
+        // directories: a malicious workspace shouldn't be able to inject
+        // arbitrary paths into the model's system prompt.
+        if std::fs::symlink_metadata(&path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(true)
+        {
+            eprintln!(
+                "[warn] grain-headless: skipping symlinked AGENTS.md {}",
+                path.display()
+            );
+            return None;
+        }
+        Some(Skill {
+            name: "AGENTS.md".into(),
+            description: "Project-level guidance for coding agents (AGENTS.md standard)".into(),
+            file_path: path.to_string_lossy().into_owned(),
+            disable_model_invocation: false,
+            body: String::new(),
+        })
+    } else {
+        None
+    }
+}
+
 /// Resolve the skills directory: if `override_path` is set, use it as-is
 /// (relative to cwd); otherwise look under `<workspace>/.claude/skills`.
 pub fn resolve_skills_dir(workspace_root: &Path, override_path: Option<&Path>) -> PathBuf {
@@ -348,4 +381,47 @@ mod tests {
         let p = resolve_skills_dir(Path::new("/work"), Some(Path::new("/custom")));
         assert_eq!(p, Path::new("/custom"));
     }
+
+    #[test]
+    fn agents_md_present_in_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        std::fs::write(&path, "# Project
+
+- Rule A
+- Rule B
+").unwrap();
+        let skill = maybe_load_agents_md(dir.path()).expect("should detect AGENTS.md");
+        assert_eq!(skill.name, "AGENTS.md");
+        assert!(skill.description.contains("AGENTS.md"));
+        assert_eq!(skill.file_path, path.to_string_lossy());
+        assert!(!skill.disable_model_invocation);
+        assert!(skill.body.is_empty());
+    }
+
+    #[test]
+    fn agents_md_missing_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(maybe_load_agents_md(dir.path()).is_none());
+    }
+
+    #[test]
+    fn agents_md_symlink_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.md");
+        std::fs::write(&real, "# rules
+").unwrap();
+        let link = dir.path().join("AGENTS.md");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            let got = maybe_load_agents_md(dir.path());
+            assert!(got.is_none(), "symlink AGENTS.md must be rejected");
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (&real, &link); // avoid unused warnings
+        }
+    }
+
 }

@@ -476,9 +476,13 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     let skills_dir = resolve_skills_dir(workspace.root(), cfg.skills_dir.as_deref());
     // Phase A/B: `find_skills_with_plugins` walks the primary skills
     // dir, then folds in each plugin's `<plugin>/skills/`.
-    let skills =
+    let mut skills =
         grain_ai_agent_headless::find_skills_with_plugins(&skills_dir, &discovered_plugins)
             .unwrap_or_default();
+    // AGENTS.md standard — auto-discovered skill when present in workspace root.
+    if let Some(s) = grain_ai_agent_headless::maybe_load_agents_md(workspace.root()) {
+        skills.push(s);
+    }
     // Clone for the UI's slash-palette skill injection — the original
     // moves into `PinnedSystemPrompt::build` below.
     let skills_for_ui = skills.clone();

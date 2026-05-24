@@ -642,13 +642,18 @@ fn resolve_system_prompt(args: &Args) -> Result<String, CliError> {
 /// missing or malformed skill files shouldn't break the agent.
 fn resolve_skills_block(args: &Args, workspace_root: &std::path::Path) -> String {
     let dir = resolve_skills_dir(workspace_root, args.skills_dir.as_deref());
-    let skills = match find_skills(&dir) {
+    let mut skills = match find_skills(&dir) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("[warn] skills discovery in {}: {e}", dir.display());
             return String::new();
         }
     };
+    // AGENTS.md standard (<https://agents.md/>) — treat it as an auto-
+    // discovered skill when present in the workspace root.
+    if let Some(s) = crate::skills::maybe_load_agents_md(workspace_root) {
+        skills.push(s);
+    }
     grain_agent_harness::format_skills_for_system_prompt(&skills)
 }
 
