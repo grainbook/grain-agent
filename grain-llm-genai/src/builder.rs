@@ -16,6 +16,9 @@ use grain_llm_models::Registry;
 
 use crate::config::{EnvKeyResolver, OpenAiCompatEndpoint, OpenAiCompatPreset, ProviderRouter};
 use crate::mapping::outbound::baseline_chat_options;
+use crate::oauth::get_valid_access_token_with_config_sync;
+use crate::oauth::config_for_provider;
+use crate::oauth::OauthConfig;
 use crate::provider::{ProviderAuth, ProviderKind, ProviderProfile};
 use crate::stream::GenaiStream;
 
@@ -40,6 +43,11 @@ pub struct GenaiStreamBuilder {
     /// - `Some(true)` → always bypass, regardless of endpoints.
     /// - `Some(false)` → never bypass; let `reqwest` honor the env vars.
     bypass_proxy: Option<bool>,
+/// OAuth profile map: adapter_kind (e.g. `"anthropic"`) → (profile_name, OauthConfig).
+/// Populated by `with_provider_profiles` for auth entries of kind
+/// `anthropic_oauth` / `openai_oauth`. Used by the auth resolver closure
+/// to fetch fresh access tokens at request time.
+oauth_map: HashMap<String, (String, OauthConfig)>,
 }
 
 impl Default for GenaiStreamBuilder {
@@ -57,6 +65,7 @@ impl GenaiStreamBuilder {
             openai_compat: Vec::new(),
             registry: None,
             bypass_proxy: None,
+            oauth_map: HashMap::new(),
         }
     }
 
@@ -136,28 +145,39 @@ impl GenaiStreamBuilder {
     /// UIs today; trying to actually use one returns a clear error.
     pub fn with_provider_profiles(mut self, profiles: &[ProviderProfile]) -> Self {
         for p in profiles {
-            let env = match &p.auth {
-                ProviderAuth::ApiKey { env } => env.clone(),
-                ProviderAuth::AnthropicOauth | ProviderAuth::OpenAiOauth => continue,
-            };
-            match p.kind {
-                ProviderKind::OpenAiCompat => {
-                    if let Some(base_url) = p.base_url.clone() {
-                        self.openai_compat.push(OpenAiCompatEndpoint::new(
-                            p.name.clone(),
-                            base_url,
-                            env,
-                        ));
+            match &p.auth {
+                ProviderAuth::ApiKey { env } => {
+                    let env = env.clone();
+                    match p.kind {
+                        ProviderKind::OpenAiCompat => {
+                            if let Some(base_url) = p.base_url.clone() {
+                                self.openai_compat.push(OpenAiCompatEndpoint::new(
+                                    p.name.clone(),
+                                    base_url,
+                                    env,
+                                ));
+                            }
+                        }
+                        ProviderKind::Anthropic => {
+                            self.env_resolver = self.env_resolver.with_override("anthropic", env);
+                        }
+                        ProviderKind::OpenAi => {
+                            self.env_resolver = self.env_resolver.with_override("openai", env);
+                        }
+                        ProviderKind::Gemini => {
+                            self.env_resolver = self.env_resolver.with_override("gemini", env);
+                        }
                     }
                 }
-                ProviderKind::Anthropic => {
-                    self.env_resolver = self.env_resolver.with_override("anthropic", env);
+                ProviderAuth::AnthropicOauth => {
+                    if let Some(config) = config_for_provider("anthropic") {
+                                    self.oauth_map.insert("anthropic".to_string(), (p.name.clone(), config));
+                                }
                 }
-                ProviderKind::OpenAi => {
-                    self.env_resolver = self.env_resolver.with_override("openai", env);
-                }
-                ProviderKind::Gemini => {
-                    self.env_resolver = self.env_resolver.with_override("gemini", env);
+                ProviderAuth::OpenAiOauth => {
+                    if let Some(config) = config_for_provider("openai") {
+                                    self.oauth_map.insert("openai".to_string(), (p.name.clone(), config));
+                                }
                 }
             }
         }
@@ -172,6 +192,7 @@ impl GenaiStreamBuilder {
             openai_compat,
             registry,
             bypass_proxy,
+            oauth_map,
         } = self;
 
         let chat_options = chat_options.unwrap_or_else(baseline_chat_options);
@@ -193,6 +214,7 @@ impl GenaiStreamBuilder {
         // in our compat table.
         let auth_compat = compat_map.clone();
         let auth_env = env_resolver.clone();
+let auth_oauth = oauth_map.clone();
         let auth_resolver =
             move |model_iden: ModelIden| -> genai::resolver::Result<Option<AuthData>> {
                 // 1. OpenAI-compat namespace? Use its env var.
@@ -212,7 +234,16 @@ impl GenaiStreamBuilder {
                 {
                     return Ok(Some(AuthData::from_single(v)));
                 }
-                // 3. Fall through to genai's default lookup by returning None.
+                // 3. OAuth profile for this adapter kind?
+                if let Some((profile_name, config)) = auth_oauth.get(adapter_name) {
+                    if let Some(token) = get_valid_access_token_with_config_sync(config, profile_name)
+                        .ok()
+                        .flatten()
+                    {
+                        return Ok(Some(AuthData::from_single(token)));
+                    }
+                }
+                // 4. Fall through to genai's default lookup by returning None.
                 Ok(None)
             };
 

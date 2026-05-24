@@ -1062,64 +1062,43 @@ struct InputPromptChrome {
 }
 
 fn input_prompt_chrome(state: &AppState, palette: &Palette, area_width: u16) -> InputPromptChrome {
-    let max_workspace = area_width.saturating_sub(24).clamp(8, 48) as usize;
-    let workspace = compact_workspace_label(&state.workspace_display, max_workspace);
-    let git = git_prompt_label(state, area_width);
+let max_workspace = area_width.saturating_sub(24).clamp(8, 48) as usize;
+let workspace = compact_workspace_label(&state.workspace_display, max_workspace);
+let git = git_prompt_label(state, area_width);
 
-    let icon_bg = palette.accent;
-    let path_bg = palette.secondary;
-    let mode_bg = palette.success;
-    let git_bg = palette.success;
-    let plain_bg = palette.bg;
-    let fg_on_chip = palette.bg;
+let path_bg = palette.secondary;
+let git_bg = palette.success;
+let fg_chip = palette.bg;
 
     let mut spans = vec![
         Span::styled(
-            "   ",
+format!(" {workspace} "),
             Style::default()
-                .fg(fg_on_chip)
-                .bg(icon_bg)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("", Style::default().fg(icon_bg).bg(path_bg)),
-        Span::styled(
-            format!("  {workspace} "),
-            Style::default()
-                .fg(fg_on_chip)
+.fg(fg_chip)
                 .bg(path_bg)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("", Style::default().fg(path_bg).bg(mode_bg)),
-        Span::styled(
-            " on ",
-            Style::default()
-                .fg(fg_on_chip)
-                .bg(mode_bg)
-                .add_modifier(Modifier::BOLD),
+.add_modifier(Modifier::BOLD),
         ),
     ];
 
     if let Some(git) = git {
-        spans.push(Span::styled("", Style::default().fg(mode_bg).bg(git_bg)));
-        spans.push(Span::styled(
-            format!(" {git} "),
+spans.push(Span::styled(
+format!(" {git} "),
             Style::default()
-                .fg(fg_on_chip)
+.fg(fg_chip)
                 .bg(git_bg)
-                .add_modifier(Modifier::BOLD),
+.add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled("", Style::default().fg(git_bg).bg(plain_bg)));
+spans.push(Span::raw(" "));
     } else {
-        spans.push(Span::styled("", Style::default().fg(mode_bg).bg(plain_bg)));
+spans.push(Span::raw("  "));
     }
-    spans.push(Span::raw(" "));
 
     let width = spans
         .iter()
-        .map(|s| s.content.width() as u16)
+.map(|s| s.content.width() as u16)
         .sum::<u16>()
-        .min(area_width.saturating_sub(1).max(1));
-    InputPromptChrome { spans, width }
+.min(area_width.saturating_sub(1).max(1));
+InputPromptChrome { spans, width }
 }
 
 fn compact_workspace_label(path: &str, max_width: usize) -> String {
@@ -1136,11 +1115,11 @@ fn git_prompt_label(state: &AppState, area_width: u16) -> Option<String> {
     let max_branch = area_width.saturating_sub(34).clamp(6, 32) as usize;
     let branch = truncate_visual_start(branch, max_branch);
     let dirty = if state.git_prompt.dirty_count > 0 {
-        format!(" *{}", state.git_prompt.dirty_count)
+        format!("({}*)", state.git_prompt.dirty_count)
     } else {
         String::new()
     };
-    Some(format!("⎇ {branch}{dirty}"))
+    Some(format!("{branch}{dirty}"))
 }
 
 fn truncate_visual_start(s: &str, max_width: usize) -> String {

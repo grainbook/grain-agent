@@ -106,6 +106,18 @@ pub fn config_for_provider(provider: &str) -> Option<OauthConfig> {
         .find(|c| c.provider == provider)
 }
 
+/// Resolve a genai adapter kind (e.g. `"anthropic"`, `"openai"`) to
+/// its OAuth config. Used by the auth resolver at request time so it
+/// doesn't need to know which profile name the user logged in under.
+pub fn config_for_kind(kind: &str) -> Option<OauthConfig> {
+    let provider = match kind {
+        "anthropic" => "anthropic",
+        "openai" => "openai",
+        _ => return None,
+    };
+    config_for_provider(provider)
+}
+
 // ---------------------------------------------------------------------------
 // Token representation
 // ---------------------------------------------------------------------------
@@ -429,6 +441,40 @@ pub async fn get_valid_access_token(profile_name: &str) -> Result<Option<String>
     }
 
     Ok(Some(tokens.access_token))
+}
+
+/// Like [`get_valid_access_token`] but takes the OAuth config explicitly
+/// instead of looking it up by provider name. The `profile_name` is used
+/// only to locate the persisted token file.
+pub async fn get_valid_access_token_with_config(
+config: &OauthConfig,
+profile_name: &str,
+) -> Result<Option<String>, OauthError> {
+let Some(mut tokens) = load_tokens(profile_name)? else {
+        return Ok(None);
+    };
+
+let now = SystemTime::now()
+.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+// Refresh if expired or about to expire (within 60s).
+if now >= tokens.expires_at {
+tokens = refresh_tokens(config, &tokens.refresh_token).await?;
+save_tokens(profile_name, &tokens)?;
+    }
+
+Ok(Some(tokens.access_token))
+}
+
+/// Synchronous version of [`get_valid_access_token_with_config`].
+pub fn get_valid_access_token_with_config_sync(
+config: &OauthConfig,
+profile_name: &str,
+) -> Result<Option<String>, OauthError> {
+let handle = tokio::runtime::Handle::current();
+handle.block_on(get_valid_access_token_with_config(config, profile_name))
 }
 
 /// Synchronous version for use in genai auth resolvers.
