@@ -18,6 +18,7 @@ use ratatui::{
     widgets::{Block, Clear, Paragraph, Wrap},
 };
 use ratatui_widgets::scrollbar::{Scrollbar, ScrollbarOrientation, ScrollbarState};
+use std::sync::Arc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{AppState, Focus, Overlay, SLASH_CATALOG, TranscriptKind, TranscriptLine};
@@ -307,7 +308,8 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, pale
     // summary line or as an expanded header + child lines, driven
     // by `AppState::is_block_expanded`.
     let blocks = state.cached_blocks();
-    let mut rendered: Vec<crate::app::RenderedRow> = Vec::new();
+    let mut rendered = state.rendered_rows.take();
+    rendered.clear();
     for block in blocks {
         // Hard-hide thinking blocks when the legacy `show_thinking`
         // toggle is off — that key (F5) historically removed them
@@ -358,7 +360,7 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, pale
             let line = state.transcript.get(idx).cloned();
             if let Some(line) = line {
                 let md = md_spans_for_line(&line, idx, &block, state);
-                wrap_one_line(&line, width, None, &mut rendered, md.as_deref());
+                wrap_one_line(&line, width, None, &mut rendered, md);
             }
         }
     }
@@ -388,6 +390,9 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, pale
 
     // Hand the wrapped rows over to AppState — mouse handlers consume
     // them on the next event (translate / extract-on-mouse-up).
+    if rendered.capacity() > total_rows.saturating_mul(2).max(1024) {
+        rendered.shrink_to(total_rows);
+    }
     state.rendered_rows.replace(rendered);
 
     // No `.wrap()` here — we already wrapped to `content_area.width` so
@@ -412,7 +417,7 @@ fn md_spans_for_line(
     idx: usize,
     block: &crate::app::TranscriptBlock,
     state: &mut AppState,
-) -> Option<Vec<crate::md_render::MdStyledSpan>> {
+) -> Option<Arc<[crate::md_render::MdStyledSpan]>> {
     use crate::md_render::{looks_like_markdown, render_md_to_spans};
     // Only render AssistText / ThinkingText through the md pipeline.
     if !matches!(
@@ -450,13 +455,14 @@ fn md_spans_for_line(
         state.markdown_cache.resize(state.transcript.len());
         // Check cache.
         if let Some(Some(cached)) = state.markdown_cache.entries.get(idx) {
-            return Some(cached.clone());
+            return Some(Arc::clone(cached));
         }
         // Parse and cache.
         let spans = render_md_to_spans(&line.text);
+        let spans: Arc<[crate::md_render::MdStyledSpan]> = Arc::from(spans.into_boxed_slice());
         state.markdown_cache.resize(state.transcript.len());
         if idx < state.markdown_cache.entries.len() {
-            state.markdown_cache.entries[idx] = Some(spans.clone());
+            state.markdown_cache.entries[idx] = Some(Arc::clone(&spans));
         }
         Some(spans)
     }
@@ -481,7 +487,7 @@ fn wrap_one_line(
     width: usize,
     chrome_for_block: Option<usize>,
     rendered: &mut Vec<crate::app::RenderedRow>,
-    md_spans: Option<&[crate::md_render::MdStyledSpan]>,
+    md_spans: Option<Arc<[crate::md_render::MdStyledSpan]>>,
 ) {
     let prefix = prefix_for_kind(line.kind);
     let continuation = "  ";
@@ -539,13 +545,13 @@ fn wrap_markdown_line(
     width: usize,
     chrome_for_block: Option<usize>,
     rendered: &mut Vec<crate::app::RenderedRow>,
-    md_spans: &[crate::md_render::MdStyledSpan],
+    md_spans: Arc<[crate::md_render::MdStyledSpan]>,
     prefix: &str,
     continuation: &str,
     prefix_width: usize,
     cont_width: usize,
 ) {
-    let display_text = markdown_plain_text(md_spans);
+    let display_text = markdown_plain_text(&md_spans);
 
     let mut segment_start = 0usize;
     for (seg_i, segment) in display_text.split('\n').enumerate() {
@@ -574,7 +580,7 @@ fn wrap_markdown_line(
                 kind,
                 chrome_for_block,
                 md_spans: Some((
-                    md_spans.to_vec(),
+                    Arc::clone(&md_spans),
                     segment_start + frag_start,
                     segment_start + frag_end,
                 )),
@@ -740,13 +746,30 @@ fn tool_output_spans(
     palette: &Palette,
 ) -> Vec<Span<'static>> {
     let trimmed = text.trim_start();
-    if trimmed.starts_with("+ ") {
+    if trimmed.starts_with("@@") {
+        return vec![Span::styled(
+            text.to_string(),
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        )];
+    }
+    if trimmed.starts_with("diff --")
+        || trimmed.starts_with("new file mode")
+        || trimmed.starts_with("deleted file mode")
+    {
+        return vec![Span::styled(
+            text.to_string(),
+            Style::default().fg(palette.muted),
+        )];
+    }
+    if trimmed.starts_with("+++") || (trimmed.starts_with('+') && !trimmed.starts_with("+++")) {
         return vec![Span::styled(
             text.to_string(),
             Style::default().fg(palette.success),
         )];
     }
-    if trimmed.starts_with("- ") {
+    if trimmed.starts_with("---") || (trimmed.starts_with('-') && !trimmed.starts_with("---")) {
         return vec![Span::styled(
             text.to_string(),
             Style::default().fg(palette.error),
@@ -3315,6 +3338,34 @@ mod ui_format_tests {
     }
 
     #[test]
+    fn tool_output_spans_color_unified_diff_lines() {
+        let p = &crate::theme::builtin_themes()[0].palette;
+
+        let added = tool_output_spans(
+            "    +let answer = 42;",
+            TranscriptKind::ToolCallEnd,
+            Style::default(),
+            p,
+        );
+        let removed = tool_output_spans(
+            "    -let answer = 41;",
+            TranscriptKind::ToolCallEnd,
+            Style::default(),
+            p,
+        );
+        let hunk = tool_output_spans(
+            "    @@ -1 +1 @@",
+            TranscriptKind::ToolCallEnd,
+            Style::default(),
+            p,
+        );
+
+        assert_eq!(added[0].style.fg, Some(p.success));
+        assert_eq!(removed[0].style.fg, Some(p.error));
+        assert_eq!(hunk[0].style.fg, Some(p.accent));
+    }
+
+    #[test]
     fn wrap_input_returns_one_line_for_empty_input() {
         let lines = wrap_input_to_lines("", 80);
         assert_eq!(lines.len(), 1);
@@ -3408,14 +3459,15 @@ mod ui_format_tests {
     #[test]
     fn markdown_wrapping_uses_rendered_offsets_after_hard_breaks() {
         let source = "有的。我有两个网络相关工具：\n\n- `web_search` — 通过 Exa 搜索引擎搜索网页\n- `web_fetch` — 获取网页内容\n";
-        let md_spans = crate::md_render::render_md_to_spans(source);
+        let md_spans: Arc<[crate::md_render::MdStyledSpan]> =
+            Arc::from(crate::md_render::render_md_to_spans(source).into_boxed_slice());
         let line = TranscriptLine {
             kind: TranscriptKind::AssistantText,
             text: source.into(),
         };
         let mut rendered = Vec::new();
 
-        wrap_one_line(&line, 160, None, &mut rendered, Some(&md_spans));
+        wrap_one_line(&line, 160, None, &mut rendered, Some(md_spans));
 
         let palette = crate::theme::builtin_themes()[0].palette;
         let rendered_text: Vec<String> = rendered
@@ -3443,14 +3495,15 @@ mod ui_format_tests {
     #[test]
     fn markdown_line_preserves_non_empty_prefix() {
         let source = "**thinking**\n";
-        let md_spans = crate::md_render::render_md_to_spans(source);
+        let md_spans: Arc<[crate::md_render::MdStyledSpan]> =
+            Arc::from(crate::md_render::render_md_to_spans(source).into_boxed_slice());
         let line = TranscriptLine {
             kind: TranscriptKind::ThinkingText,
             text: source.into(),
         };
         let mut rendered = Vec::new();
 
-        wrap_one_line(&line, 80, None, &mut rendered, Some(&md_spans));
+        wrap_one_line(&line, 80, None, &mut rendered, Some(md_spans));
 
         let palette = crate::theme::builtin_themes()[0].palette;
         let first = build_line(&rendered[0], 0, None, &palette)

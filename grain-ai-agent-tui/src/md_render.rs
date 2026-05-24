@@ -26,6 +26,8 @@
 //!   styled spans, producing ratatui `Span`s with correct style for
 //!   each sub-segment.
 
+use std::sync::Arc;
+
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
@@ -83,7 +85,7 @@ pub struct MarkdownCache {
     /// `cache[i]` holds the parsed spans for `transcript[i]`, or
     /// `None` when the entry hasn't been computed yet or is the
     /// currently-streaming line (which changes each frame).
-    pub entries: Vec<Option<Vec<MdStyledSpan>>>,
+    pub entries: Vec<Option<Arc<[MdStyledSpan]>>>,
 }
 
 impl MarkdownCache {
@@ -115,7 +117,7 @@ impl MarkdownCache {
             spans.iter().map(|s| s.to_ratatui_span(palette)).collect();
         if !is_streaming {
             if idx < self.entries.len() {
-                self.entries[idx] = Some(spans);
+                self.entries[idx] = Some(Arc::from(spans.into_boxed_slice()));
             }
         }
         rat_spans

@@ -2285,7 +2285,7 @@ async fn fetch_openai_compat_models(
 
     let env_var = match &profile.auth {
         ProviderAuth::ApiKey { env } => Some(env.as_str()),
-        ProviderAuth::AnthropicOauth => None,
+        ProviderAuth::AnthropicOauth | ProviderAuth::OpenAiOauth => None,
     };
     let token = env_var
         .and_then(|name| std::env::var(name).ok())

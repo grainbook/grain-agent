@@ -19,9 +19,13 @@ genai = { workspace = true }
 grain-agent-core = { workspace = true }
 grain-llm-models = { workspace = true }
 reqwest13 = { workspace = true }
+url = { workspace = true }
+sha2 = "0.10"
+rand = "0.8"
+open = "5"
 
 [dev-dependencies]
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
 futures = { workspace = true }
 tempfile = "3"

@@ -68,10 +68,13 @@ pub enum ProviderAuth {
     /// Read an API key from the named env var at use time.
     ApiKey { env: String },
     /// Anthropic Claude.ai Pro/Max subscription via OAuth — parsed
-    /// today but not yet usable. Selecting one of these in `/provider`
-    /// surfaces a clear "login flow not yet wired" message; the real
-    /// implementation lands in a follow-up patch.
+    /// today. The user must complete a browser login via
+    /// `grain-headless login <profile>` or `/login`; tokens are
+    /// stored and auto-refreshed by [`crate::oauth`].
     AnthropicOauth,
+    /// OpenAI ChatGPT Plus/Pro/Team subscription via OAuth — same
+    /// browser-based login flow as Anthropic.
+    OpenAiOauth,
 }
 
 impl ProviderAuth {
@@ -92,7 +95,12 @@ impl ProviderAuth {
                     format!("env {env} (missing)")
                 }
             }
-            ProviderAuth::AnthropicOauth => "oauth (login pending)".to_string(),
+            ProviderAuth::AnthropicOauth => {
+                "oauth — login via /login or grain-headless login".to_string()
+            }
+            ProviderAuth::OpenAiOauth => {
+                "oauth — login via /login or grain-headless login".to_string()
+            }
         }
     }
 }
@@ -246,9 +254,10 @@ pub fn profile_from_entry(entry: ProfileEntry) -> Result<ProviderProfile, String
             ProviderAuth::ApiKey { env }
         }
         "anthropic_oauth" => ProviderAuth::AnthropicOauth,
+        "openai_oauth" => ProviderAuth::OpenAiOauth,
         other => {
             return Err(format!(
-                "profile '{}': unknown auth.kind '{}' (expected api_key or anthropic_oauth)",
+                "profile '{}': unknown auth.kind '{}' (expected api_key, anthropic_oauth, or openai_oauth)",
                 entry.name, other
             ));
         }

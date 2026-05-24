@@ -7,6 +7,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::Instant;
 
 use ratatui::layout::Rect;
@@ -607,7 +608,7 @@ pub struct RenderedRow {
     /// When `Some`, [`crate::ui::build_line`] renders styled spans
     /// instead of a single plain-text span. Byte offsets into the
     /// concatenated plain text of `md_source_spans`.
-    pub md_spans: Option<(Vec<crate::md_render::MdStyledSpan>, usize, usize)>,
+    pub md_spans: Option<(Arc<[crate::md_render::MdStyledSpan]>, usize, usize)>,
 }
 
 /// Active text selection inside the transcript. Coordinates are
@@ -1011,6 +1012,46 @@ pub(crate) const MAX_HISTORY: usize = 200;
 /// JSON Message[] array — typically 2–20 KB. 20 entries keeps the
 /// ring well under 500 KB even on heavy turns.
 pub(crate) const MAX_REQUEST_LOG: usize = 20;
+pub(crate) const MAX_REQUEST_LOG_ENTRY_BYTES: usize = 64 * 1024;
+
+fn clamp_char_boundary_back(s: &str, mut idx: usize) -> usize {
+    idx = idx.min(s.len());
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+fn clamp_char_boundary_forward(s: &str, mut idx: usize) -> usize {
+    idx = idx.min(s.len());
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx
+}
+
+fn truncate_request_log_entry(body: String) -> String {
+    if body.len() <= MAX_REQUEST_LOG_ENTRY_BYTES {
+        return body;
+    }
+
+    let marker = format!("\n\n[Request log truncated from {} bytes]\n\n", body.len());
+    let budget = MAX_REQUEST_LOG_ENTRY_BYTES.saturating_sub(marker.len());
+    let head_budget = budget / 2;
+    let tail_budget = budget.saturating_sub(head_budget);
+    let head_end = clamp_char_boundary_back(&body, head_budget);
+    let tail_start = clamp_char_boundary_forward(&body, body.len().saturating_sub(tail_budget));
+
+    let mut out = String::with_capacity(
+        head_end
+            .saturating_add(marker.len())
+            .saturating_add(body.len().saturating_sub(tail_start)),
+    );
+    out.push_str(&body[..head_end]);
+    out.push_str(&marker);
+    out.push_str(&body[tail_start..]);
+    out
+}
 
 /// Default USD → CNY rate when `--cny-rate` is unset but a `zh_*`
 /// locale is detected. Picked as a stable round number; users in
@@ -1548,6 +1589,24 @@ impl AppState {
         self.cache_dropped = false;
     }
 
+    fn clear_transcript_storage(&mut self) {
+        self.transcript.clear();
+        self.transcript.shrink_to(0);
+        self.markdown_cache = MarkdownCache::new();
+        self.cached_blocks.clear();
+        self.cached_blocks.shrink_to(0);
+        self.transcript_len_cached = 0;
+        self.block_summary_cache.clear();
+        self.block_summary_cache.shrink_to_fit();
+        self.fold_overrides.clear();
+        self.fold_overrides.shrink_to_fit();
+        self.selection = None;
+
+        let mut rendered_rows = self.rendered_rows.borrow_mut();
+        rendered_rows.clear();
+        rendered_rows.shrink_to(0);
+    }
+
     /// Push a single historical [`AgentMessage`] into the transcript
     /// as one or more lines. Used by [`Self::on_event`] for
     /// `TuiEvent::SessionResumed` so the user sees the loaded
@@ -1677,7 +1736,7 @@ impl AppState {
                 Vec::new()
             }
             TuiEvent::RequestLogged { body } => {
-                self.request_log.push_back(body);
+                self.request_log.push_back(truncate_request_log_entry(body));
                 while self.request_log.len() > MAX_REQUEST_LOG {
                     self.request_log.pop_front();
                 }
@@ -1745,7 +1804,7 @@ impl AppState {
                 Vec::new()
             }
             TuiEvent::SessionResumed { path: _, messages } => {
-                self.transcript.clear();
+                self.clear_transcript_storage();
                 self.reset_streaming_state();
                 // Replace the input-history ring buffer with the
                 // resumed session's user prompts so Up/Down in the
@@ -1773,7 +1832,7 @@ impl AppState {
                 Vec::new()
             }
             TuiEvent::SessionCompacted { messages } => {
-                self.transcript.clear();
+                self.clear_transcript_storage();
                 self.reset_streaming_state();
                 self.compaction_count = self.compaction_count.saturating_add(1);
                 for msg in &messages {
@@ -3390,7 +3449,13 @@ impl AppState {
                     .as_ref()
                     .map(|a| a.name.as_str())
                     .unwrap_or(&tool_name);
-                let (kind, line) = format_tool_result_line(name, args, &result, is_error);
+                let (kind, line) = format_tool_result_line(
+                    name,
+                    args,
+                    &result,
+                    is_error,
+                    Some(&self.workspace_display),
+                );
                 self.push(kind, line);
             }
             AgentEvent::TurnEnd { message, .. } => {
@@ -3551,6 +3616,7 @@ fn format_tool_result_line(
     args: &serde_json::Value,
     result: &grain_agent_core::AgentToolResult,
     is_error: bool,
+    workspace_root: Option<&str>,
 ) -> (TranscriptKind, String) {
     let text = tool_result_text(result);
     if is_error {
@@ -3564,8 +3630,14 @@ fn format_tool_result_line(
         tool_success_summary(tool_name, args, result)
     )];
     match tool_name {
-        "edit" => {
-            lines.extend(edit_diff_preview(args, 18));
+        "edit" | "write" => {
+            lines.extend(tool_diff_preview(
+                tool_name,
+                args,
+                result,
+                workspace_root,
+                24,
+            ));
         }
         "bash" => {
             lines.extend(preview_child_lines(&text, 10, 220));
@@ -3733,6 +3805,137 @@ fn edit_line_delta(args: &serde_json::Value) -> LineDelta {
     }
 }
 
+fn tool_diff_preview(
+    tool_name: &str,
+    args: &serde_json::Value,
+    result: &grain_agent_core::AgentToolResult,
+    workspace_root: Option<&str>,
+    max_lines: usize,
+) -> Vec<String> {
+    if let Some(diff) = workspace_root.and_then(|root| git_diff_for_tool(root, args, result))
+        && !diff.trim().is_empty()
+    {
+        return diff_text_preview(&diff, max_lines);
+    }
+
+    if let Some(diff) = detail_str(&result.details, "uiDiff")
+        && !diff.trim().is_empty()
+    {
+        return diff_text_preview(&diff, max_lines);
+    }
+
+    match tool_name {
+        "edit" => edit_diff_preview(args, max_lines),
+        "write" => new_file_diff_preview(args, result, max_lines),
+        _ => Vec::new(),
+    }
+}
+
+fn git_diff_for_tool(
+    workspace_root: &str,
+    args: &serde_json::Value,
+    result: &grain_agent_core::AgentToolResult,
+) -> Option<String> {
+    let path = detail_str(&result.details, "path")
+        .or_else(|| {
+            args.get("path")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            args.get("file_path")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .arg("diff")
+        .arg("--no-ext-diff")
+        .arg("--no-color")
+        .arg("--unified=3")
+        .arg("--")
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let diff = String::from_utf8_lossy(&output.stdout).into_owned();
+    let diff = diff.trim_end();
+    if diff.is_empty() {
+        None
+    } else {
+        Some(limit_diff_text(diff, 32 * 1024))
+    }
+}
+
+fn limit_diff_text(diff: &str, max_bytes: usize) -> String {
+    if diff.len() <= max_bytes {
+        return diff.to_string();
+    }
+    let mut cut = max_bytes.min(diff.len());
+    while cut > 0 && !diff.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!(
+        "{}\n… diff truncated at {} bytes",
+        diff[..cut].trim_end(),
+        max_bytes
+    )
+}
+
+fn diff_text_preview(diff: &str, max_lines: usize) -> Vec<String> {
+    let mut kept = Vec::new();
+    let mut total = 0usize;
+    for line in diff.lines() {
+        total += 1;
+        if line.starts_with("diff --git ") || line.starts_with("index ") {
+            continue;
+        }
+        if kept.len() < max_lines {
+            kept.push(format!("    {}", truncate_oneline(line, 260)));
+        }
+    }
+    if total > kept.len() {
+        kept.push(format!(
+            "    … {} diff line(s) hidden",
+            total.saturating_sub(kept.len())
+        ));
+    }
+    kept
+}
+
+fn new_file_diff_preview(
+    args: &serde_json::Value,
+    result: &grain_agent_core::AgentToolResult,
+    max_lines: usize,
+) -> Vec<String> {
+    if !detail_bool(&result.details, "created").unwrap_or(false) {
+        return Vec::new();
+    }
+    let Some(content) = args.get("content").and_then(|v| v.as_str()) else {
+        return Vec::new();
+    };
+    let path = detail_str(&result.details, "path").or_else(|| tool_primary_arg("write", args));
+    let mut out = Vec::new();
+    out.push(format!(
+        "    @@ new file{} @@",
+        path.map(|p| format!(": {p}")).unwrap_or_default()
+    ));
+    let mut shown = 0usize;
+    for line in content.lines().take(max_lines.saturating_sub(1)) {
+        out.push(format!("    +{}", truncate_oneline(line, 260)));
+        shown += 1;
+    }
+    let total = content.lines().count();
+    if total > shown {
+        out.push(format!("    … {} diff line(s) hidden", total - shown));
+    }
+    out
+}
+
 fn edit_diff_preview(args: &serde_json::Value, max_lines: usize) -> Vec<String> {
     let old = args.get("old").and_then(|v| v.as_str()).unwrap_or("");
     let new = args.get("new").and_then(|v| v.as_str()).unwrap_or("");
@@ -3740,22 +3943,89 @@ fn edit_diff_preview(args: &serde_json::Value, max_lines: usize) -> Vec<String> 
         return Vec::new();
     }
 
+    let ops = diff_line_ops(old, new);
+    let mut out = vec!["    @@ edit @@".to_string()];
+    let mut hidden = 0usize;
+    for op in ops {
+        if out.len() >= max_lines {
+            hidden += 1;
+            continue;
+        }
+        let (prefix, line) = match op {
+            DiffOp::Same(line) => (" ", line),
+            DiffOp::Delete(line) => ("-", line),
+            DiffOp::Insert(line) => ("+", line),
+        };
+        out.push(format!("    {prefix}{}", truncate_oneline(&line, 260)));
+    }
+    if hidden > 0 {
+        out.push(format!("    … {hidden} diff line(s) hidden"));
+    }
+    out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DiffOp {
+    Same(String),
+    Delete(String),
+    Insert(String),
+}
+
+fn diff_line_ops(old: &str, new: &str) -> Vec<DiffOp> {
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
+    if old_lines.len().saturating_mul(new_lines.len()) > 20_000 {
+        let mut out = Vec::new();
+        out.extend(
+            old_lines
+                .into_iter()
+                .map(|line| DiffOp::Delete(line.to_string())),
+        );
+        out.extend(
+            new_lines
+                .into_iter()
+                .map(|line| DiffOp::Insert(line.to_string())),
+        );
+        return out;
+    }
+
+    let rows = old_lines.len() + 1;
+    let cols = new_lines.len() + 1;
+    let mut lcs = vec![0usize; rows * cols];
+    let at = |i: usize, j: usize| i * cols + j;
+    for i in (0..old_lines.len()).rev() {
+        for j in (0..new_lines.len()).rev() {
+            lcs[at(i, j)] = if old_lines[i] == new_lines[j] {
+                lcs[at(i + 1, j + 1)] + 1
+            } else {
+                lcs[at(i + 1, j)].max(lcs[at(i, j + 1)])
+            };
+        }
+    }
+
     let mut out = Vec::new();
-    for line in old_lines.iter().take(max_lines / 2).copied() {
-        out.push(format!("    - {}", truncate_oneline(line, 220)));
+    let mut i = 0usize;
+    let mut j = 0usize;
+    while i < old_lines.len() && j < new_lines.len() {
+        if old_lines[i] == new_lines[j] {
+            out.push(DiffOp::Same(old_lines[i].to_string()));
+            i += 1;
+            j += 1;
+        } else if lcs[at(i + 1, j)] >= lcs[at(i, j + 1)] {
+            out.push(DiffOp::Delete(old_lines[i].to_string()));
+            i += 1;
+        } else {
+            out.push(DiffOp::Insert(new_lines[j].to_string()));
+            j += 1;
+        }
     }
-    let remaining = max_lines.saturating_sub(out.len());
-    for line in new_lines.iter().take(remaining).copied() {
-        out.push(format!("    + {}", truncate_oneline(line, 220)));
+    while i < old_lines.len() {
+        out.push(DiffOp::Delete(old_lines[i].to_string()));
+        i += 1;
     }
-    let omitted = old_lines
-        .len()
-        .saturating_sub(max_lines / 2)
-        .saturating_add(new_lines.len().saturating_sub(remaining));
-    if omitted > 0 {
-        out.push(format!("    … {omitted} diff line(s) hidden"));
+    while j < new_lines.len() {
+        out.push(DiffOp::Insert(new_lines[j].to_string()));
+        j += 1;
     }
     out
 }
@@ -4577,6 +4847,107 @@ mod tests {
     }
 
     #[test]
+    fn edit_diff_preview_uses_unified_context() {
+        let args = serde_json::json!({
+            "old": "fn run() {\n    old_call();\n}\n",
+            "new": "fn run() {\n    new_call();\n}\n",
+        });
+
+        let text = edit_diff_preview(&args, 20).join("\n");
+
+        assert!(text.contains("@@ edit @@"));
+        assert!(text.contains(" fn run()"));
+        assert!(text.contains("-    old_call();"));
+        assert!(text.contains("+    new_call();"));
+    }
+
+    #[test]
+    fn tool_diff_preview_prefers_git_diff_details() {
+        let result = grain_agent_core::AgentToolResult {
+            content: vec![],
+            details: serde_json::json!({
+                "uiDiff": "diff --git a/src/lib.rs b/src/lib.rs\nindex abc..def 100644\n@@ -1 +1 @@\n-old\n+new\n"
+            }),
+            terminate: None,
+        };
+
+        let lines = tool_diff_preview("edit", &serde_json::json!({}), &result, None, 8);
+        let joined = lines.join("\n");
+
+        assert!(!joined.contains("diff --git"));
+        assert!(!joined.contains("index abc"));
+        assert!(joined.contains("@@ -1 +1 @@"));
+        assert!(joined.contains("-old"));
+        assert!(joined.contains("+new"));
+    }
+
+    #[test]
+    fn tool_diff_preview_uses_git_diff_for_tracked_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        if std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .arg("init")
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
+            return;
+        }
+        std::fs::write(
+            tmp.path().join("file.rs"),
+            "fn value() -> i32 {\n    1\n}\n",
+        )
+        .unwrap();
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .arg("add")
+            .arg("file.rs")
+            .output();
+        std::fs::write(
+            tmp.path().join("file.rs"),
+            "fn value() -> i32 {\n    2\n}\n",
+        )
+        .unwrap();
+
+        let result = grain_agent_core::AgentToolResult {
+            content: vec![],
+            details: serde_json::json!({ "path": "file.rs" }),
+            terminate: None,
+        };
+        let args = serde_json::json!({ "path": "file.rs" });
+
+        let joined = tool_diff_preview("write", &args, &result, tmp.path().to_str(), 20).join("\n");
+
+        assert!(joined.contains("@@"));
+        assert!(joined.contains("-    1"));
+        assert!(joined.contains("+    2"));
+    }
+
+    #[test]
+    fn write_created_file_gets_addition_preview_without_git() {
+        let result = grain_agent_core::AgentToolResult {
+            content: vec![],
+            details: serde_json::json!({
+                "path": "src/main.rs",
+                "created": true,
+            }),
+            terminate: None,
+        };
+        let args = serde_json::json!({
+            "path": "src/main.rs",
+            "content": "fn main() {\n    println!(\"hi\");\n}\n",
+        });
+
+        let joined = tool_diff_preview("write", &args, &result, None, 10).join("\n");
+
+        assert!(joined.contains("@@ new file: src/main.rs @@"));
+        assert!(joined.contains("+fn main()"));
+        assert!(joined.contains("+    println!"));
+    }
+
+    #[test]
     fn fold_defaults_collapse_tool_calls_and_thinking() {
         let s = fresh();
         let tool_block = TranscriptBlock {
@@ -5210,6 +5581,20 @@ mod tests {
     }
 
     #[test]
+    fn request_logged_event_truncates_large_entries() {
+        let mut s = fresh();
+        let body = "记".repeat((MAX_REQUEST_LOG_ENTRY_BYTES / "记".len()) + 1000);
+        let original_len = body.len();
+
+        s.on_event(TuiEvent::RequestLogged { body });
+
+        let stored = s.request_log.back().unwrap();
+        assert!(stored.contains("Request log truncated"));
+        assert!(stored.len() <= MAX_REQUEST_LOG_ENTRY_BYTES);
+        assert!(stored.len() < original_len);
+    }
+
+    #[test]
     fn slash_log_with_empty_buffer_logs_hint_not_overlay() {
         let mut s = fresh();
         s.input = "/log".into();
@@ -5757,6 +6142,35 @@ mod tests {
         assert_eq!(s.input, "second prompt");
         s.history_up();
         assert_eq!(s.input, "first prompt from prior session");
+    }
+
+    #[test]
+    fn compaction_clears_render_and_markdown_caches() {
+        let mut s = fresh();
+        s.push(TranscriptKind::AssistantText, "**old** transcript".into());
+        let _ = s.cached_blocks();
+        let old_spans: Arc<[crate::md_render::MdStyledSpan]> =
+            Arc::from(crate::md_render::render_md_to_spans("**old**").into_boxed_slice());
+        s.markdown_cache.entries.push(Some(old_spans));
+        s.block_summary_cache.insert(42, "stale".into());
+        s.fold_overrides.insert(42, true);
+        s.rendered_rows.replace(vec![RenderedRow {
+            text: "stale rendered row".into(),
+            kind: TranscriptKind::AssistantText,
+            chrome_for_block: None,
+            md_spans: None,
+        }]);
+
+        s.on_event(TuiEvent::SessionCompacted {
+            messages: Vec::new(),
+        });
+
+        assert!(s.transcript.is_empty());
+        assert!(s.markdown_cache.entries.is_empty());
+        assert!(s.cached_blocks.is_empty());
+        assert!(s.block_summary_cache.is_empty());
+        assert!(s.fold_overrides.is_empty());
+        assert!(s.rendered_rows.borrow().is_empty());
     }
 
     #[test]

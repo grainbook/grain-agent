@@ -138,7 +138,7 @@ impl GenaiStreamBuilder {
         for p in profiles {
             let env = match &p.auth {
                 ProviderAuth::ApiKey { env } => env.clone(),
-                ProviderAuth::AnthropicOauth => continue,
+                ProviderAuth::AnthropicOauth | ProviderAuth::OpenAiOauth => continue,
             };
             match p.kind {
                 ProviderKind::OpenAiCompat => {

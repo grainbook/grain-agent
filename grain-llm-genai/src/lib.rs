@@ -16,6 +16,7 @@
 pub mod builder;
 pub mod config;
 pub mod mapping;
+pub mod oauth;
 pub mod provider;
 pub mod stream;
 
