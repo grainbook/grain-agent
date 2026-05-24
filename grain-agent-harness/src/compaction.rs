@@ -110,6 +110,49 @@ impl CompactionPolicy for MessageCountPolicy {
     }
 }
 
+/// Adjust `prefix_len` forward past any tool-call / tool-result pairs
+/// that would be split by the cut, so the summarizer never receives
+/// an assistant message with `tool_calls` whose corresponding tool
+/// results are in the kept tail.
+///
+/// Returns an adjusted `prefix_len` that is safe to use as a split
+/// point. May return `messages.len()` (the entire transcript is the
+/// prefix — caller should check for degenerate cases).
+pub fn snap_to_safe_boundary(
+    messages: &[AgentMessage],
+    mut prefix_len: usize,
+) -> usize {
+    while prefix_len < messages.len() {
+        // Never cut at a ToolResult boundary — the preceding
+        // assistant+toolcall is in the prefix, so the result
+        // must be too.
+        if matches!(
+            &messages[prefix_len],
+            AgentMessage::Standard(Message::ToolResult(_))
+        ) {
+            prefix_len += 1;
+            continue;
+        }
+        // Check the message just before the cut: if it's an
+        // assistant message with tool calls, those tool calls
+        // would be orphaned without their results.
+        if prefix_len > 0
+            && let AgentMessage::Standard(Message::Assistant(a)) = &messages[prefix_len - 1]
+        {
+            let has_tool_call = a
+                .content
+                .iter()
+                .any(|c| matches!(c, AssistantContent::ToolCall(_)));
+            if has_tool_call {
+                prefix_len += 1;
+                continue;
+            }
+        }
+        break;
+    }
+    prefix_len
+}
+
 // ---------------------------------------------------------------------------
 // Token-budget compaction (ports compaction.ts shouldCompact + cut logic)
 // ---------------------------------------------------------------------------
@@ -262,31 +305,7 @@ impl CompactionPolicy for TokenBudgetPolicy {
         //      an Assistant message with a ToolCall (the ToolResult for
         //      that call would be in the kept tail but the call itself
         //      would be in the summarized prefix, orphaning the pair).
-        while keep_start < messages.len() {
-            // Never cut at a ToolResult boundary.
-            if matches!(
-                &messages[keep_start],
-                AgentMessage::Standard(Message::ToolResult(_))
-            ) {
-                keep_start += 1;
-                continue;
-            }
-            // Check the message just before keep_start: if it's an
-            // assistant message with tool calls, we'd orphan them.
-            if keep_start > 0
-                && let AgentMessage::Standard(Message::Assistant(a)) = &messages[keep_start - 1]
-            {
-                let has_tool_call = a
-                    .content
-                    .iter()
-                    .any(|c| matches!(c, AssistantContent::ToolCall(_)));
-                if has_tool_call {
-                    keep_start += 1;
-                    continue;
-                }
-            }
-            break;
-        }
+        keep_start = snap_to_safe_boundary(messages, keep_start);
 
         let prefix_len = keep_start;
 
@@ -540,6 +559,9 @@ pub async fn compact_transcript(
 ) -> Result<Vec<AgentMessage>, CompactionError> {
     debug_assert!(prefix_len <= messages.len());
 
+    // Ensure we never split a tool-call / tool-result pair.
+    let prefix_len = snap_to_safe_boundary(messages, prefix_len);
+
     let prefix = &messages[..prefix_len];
     let tail: Vec<AgentMessage> = messages[prefix_len..].to_vec();
 
@@ -701,6 +723,20 @@ async fn produce_summary(
             AgentMessage::Custom(_) => None,
         })
         .collect();
+
+    // Safety net: strip any trailing assistant messages that have
+    // tool_calls but whose tool results are missing (shouldn't happen
+    // after snap_to_safe_boundary, but guards against edge cases
+    // like Custom messages being filtered out in between).
+    while let Some(Message::Assistant(a)) = llm_messages.last() {
+        let has_tool_call = a
+            .content
+            .iter()
+            .any(|c| matches!(c, AssistantContent::ToolCall(_)));
+        if !has_tool_call { break; }
+        llm_messages.pop();
+    }
+
     llm_messages.push(Message::User(UserMessage {
         content: vec![UserContent::Text(TextContent {
             text: compaction_prompt.to_string(),

@@ -44,7 +44,8 @@ pub use compaction::{
     DEFAULT_COMPACTION_SETTINGS, DEFAULT_KEEP_RECENT, DEFAULT_MESSAGE_THRESHOLD,
     DEFAULT_TOOL_RESULT_TRUNCATION_CAP_CHARS, MessageCountPolicy, TokenBudgetPolicy,
     compact_transcript, compaction_prepare_next_turn, resolve_threshold_tokens,
-    semantic_compress, should_compact, tool_result_truncation_hook, truncate_tool_results,
+    semantic_compress, should_compact, snap_to_safe_boundary,
+ tool_result_truncation_hook, truncate_tool_results,
 };
 pub use context_guard::{ActiveModelHandle, ContextGuard, ContextGuardPolicy, TokenEstimator};
 pub use messages::{

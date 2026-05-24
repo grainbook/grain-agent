@@ -801,7 +801,10 @@ impl AgentHarness {
         }
         let keep = keep_recent.max(1).min(total);
         let prefix_len = total - keep;
-        if prefix_len == 0 {
+        // Snap forward past any tool-call / tool-result pairs
+        // so the summarizer never sees an orphaned tool_call.
+        let prefix_len = crate::compaction::snap_to_safe_boundary(&messages, prefix_len);
+        if prefix_len < 2 {
             return Err(HarnessError::EmptyTranscript);
         }
 
