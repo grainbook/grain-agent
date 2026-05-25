@@ -355,6 +355,7 @@ pub fn resolve_skill_dirs_with_scope(
     }
     dirs.push(workspace_root.join(".pi/skills"));
     dirs.push(workspace_root.join(".agents/skills"));
+    dirs.push(workspace_root.join(".grain/skills"));
     // Backward-compatible with this repo's earlier Claude-style default.
     dirs.push(workspace_root.join(".claude/skills"));
 
@@ -527,6 +528,7 @@ mod tests {
             vec![
                 PathBuf::from("/repo/sub/.pi/skills"),
                 PathBuf::from("/repo/sub/.agents/skills"),
+                    PathBuf::from("/repo/sub/.grain/skills"),
                 PathBuf::from("/repo/sub/.claude/skills"),
             ]
         );

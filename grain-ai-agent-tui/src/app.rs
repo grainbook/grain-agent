@@ -1744,7 +1744,9 @@ impl AppState {
             if skill.disable_model_invocation {
                 continue;
             }
+            let trigger = format!("/skill:{}", skill.name);
             let show = skill_filter.is_empty()
+                || trigger.to_ascii_lowercase().starts_with(&needle)
                 || skill.name.to_ascii_lowercase().contains(skill_filter)
                 || skill
                     .description
@@ -1752,7 +1754,7 @@ impl AppState {
                     .contains(skill_filter);
             if show {
                 items.push(PaletteItem {
-                    trigger: format!("/skill:{}", skill.name),
+                    trigger,
                     description: skill.description.clone(),
                     action: PaletteAction::InjectBody(skill.body.clone()),
                 });
@@ -7200,6 +7202,43 @@ mod tests {
             .expect("skill must appear in palette");
         assert!(
             matches!(skill_item.action, PaletteAction::InjectBody(ref b) if b == "you are a test skill")
+        );
+    }
+
+    #[test]
+    fn palette_sk_prefix_matches_skill_trigger_prefix() {
+        let mut s = fresh();
+        s.skills = vec![
+            grain_agent_harness::Skill {
+                name: "building-native-ui".into(),
+                description: "Expo app guidance".into(),
+                file_path: String::new(),
+                disable_model_invocation: false,
+                body: "body".into(),
+            },
+            grain_agent_harness::Skill {
+                name: "web-design-guidelines".into(),
+                description: "Review UI".into(),
+                file_path: String::new(),
+                disable_model_invocation: false,
+                body: "body".into(),
+            },
+        ];
+
+        for c in "/sk".chars() {
+            s.on_event(TuiEvent::Key(press(KeyCode::Char(c))));
+        }
+        let matches = s.palette_matches();
+
+        assert!(
+            matches
+                .iter()
+                .any(|item| item.trigger == "/skill:building-native-ui")
+        );
+        assert!(
+            matches
+                .iter()
+                .any(|item| item.trigger == "/skill:web-design-guidelines")
         );
     }
 

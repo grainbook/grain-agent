@@ -1138,9 +1138,26 @@ struct InputPromptChrome {
 }
 
 fn input_prompt_chrome(state: &AppState, palette: &Palette, area_width: u16) -> InputPromptChrome {
-    let max_workspace = area_width.saturating_sub(24).clamp(8, 48) as usize;
-    let workspace = compact_workspace_label(&state.workspace_display, max_workspace);
-    let git = git_prompt_label(state, area_width);
+    const INPUT_TEXT_RESERVE: u16 = 8;
+    let max_prompt_width = area_width.saturating_sub(INPUT_TEXT_RESERVE).max(1) as usize;
+    let raw_git = git_prompt_label(state);
+    let git_budget = if raw_git.is_some() && max_prompt_width >= 18 {
+        Some((max_prompt_width / 2).clamp(6, 32))
+    } else {
+        None
+    };
+    let git = raw_git
+        .zip(git_budget)
+        .map(|(label, budget)| truncate_visual_start(&label, budget));
+    let git_width = git
+        .as_ref()
+        .map(|label| label.width().saturating_add(3))
+        .unwrap_or(2);
+    let workspace_budget = max_prompt_width
+        .saturating_sub(git_width)
+        .saturating_sub(2)
+        .max(1);
+    let workspace = compact_workspace_label(&state.workspace_display, workspace_budget);
 
     let path_bg = palette.secondary;
     let git_bg = palette.success;
@@ -1167,11 +1184,12 @@ fn input_prompt_chrome(state: &AppState, palette: &Palette, area_width: u16) -> 
         spans.push(Span::raw("  "));
     }
 
-    let width = spans
-        .iter()
-        .map(|s| s.content.width() as u16)
-        .sum::<u16>()
-        .min(area_width.saturating_sub(1).max(1));
+    let mut width = spans.iter().map(|s| s.content.width() as u16).sum::<u16>();
+    while width as usize > max_prompt_width && !spans.is_empty() {
+        spans.remove(0);
+        width = spans.iter().map(|s| s.content.width() as u16).sum();
+    }
+    let width = width.min(area_width.saturating_sub(1).max(1));
     InputPromptChrome { spans, width }
 }
 
@@ -1184,10 +1202,8 @@ fn compact_workspace_label(path: &str, max_width: usize) -> String {
     truncate_visual_start(&label, max_width)
 }
 
-fn git_prompt_label(state: &AppState, area_width: u16) -> Option<String> {
+fn git_prompt_label(state: &AppState) -> Option<String> {
     let branch = state.git_prompt.branch.as_deref()?;
-    let max_branch = area_width.saturating_sub(34).clamp(6, 32) as usize;
-    let branch = truncate_visual_start(branch, max_branch);
     let dirty = if state.git_prompt.dirty_count > 0 {
         format!("({}*)", state.git_prompt.dirty_count)
     } else {
@@ -3896,6 +3912,43 @@ mod ui_format_tests {
         // All characters preserved across the wrapped rows.
         let joined: String = lines.concat();
         assert_eq!(joined, "abcd");
+    }
+
+    #[test]
+    fn input_prompt_chrome_never_consumes_full_width() {
+        let themes = crate::theme::builtin_themes();
+        let mut state = AppState::new(
+            "deepseek/deepseek-chat".into(),
+            Default::default(),
+            0,
+            0,
+            "/Users/example/projects/very-long-workspace-name".into(),
+            crate::app::Capabilities::default(),
+            false,
+            themes,
+            0,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+        );
+        state.git_prompt.branch = Some("very-long-branch-name-that-used-to-overflow".into());
+        state.git_prompt.dirty_count = 12;
+
+        for width in [12, 20, 40, 80] {
+            let prompt = input_prompt_chrome(&state, &state.theme().palette, width);
+            let actual = prompt
+                .spans
+                .iter()
+                .map(|span| span.content.width() as u16)
+                .sum::<u16>();
+
+            assert_eq!(actual, prompt.width);
+            assert!(
+                prompt.width < width,
+                "prompt chrome must leave room for input at width {width}"
+            );
+        }
     }
 
     #[test]
