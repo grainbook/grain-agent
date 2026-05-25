@@ -1,6 +1,6 @@
 [package]
 name = "grain-script-boa"
-version = "0.0.1-beta1"
+version = "0.0.1-beta2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

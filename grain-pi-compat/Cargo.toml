@@ -1,6 +1,6 @@
 [package]
 name = "grain-pi-compat"
-version = "0.0.1-beta1"
+version = "0.0.1-beta2"
 edition.workspace = true
 license.workspace = true
 description = "Compatibility shim that lets pi-style extensions (https://pi.dev/docs/latest/extensions) run on top of grain-script-boa. Translates pi's `pi.registerTool` / `export default (pi) => {...}` factory shape into the underlying grain JS runtime. Phase 1: tools only (no events / TS / UI hooks)."

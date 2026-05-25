@@ -51,6 +51,7 @@ const HEADER_MAX_ROWS: u16 = 3;
 /// for very narrow widths or when many chips (spinner + tokens +
 /// cost + tool count + Σ + ctx + msg + compact) are active at once.
 const FOOTER_MAX_ROWS: u16 = 2;
+const MAX_MARKDOWN_CACHE_LINES: usize = 512;
 
 pub fn draw(frame: &mut Frame<'_>, state: &mut AppState, elapsed: crate::anim::FxDuration) {
     let area = frame.area();
@@ -346,66 +347,9 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, pale
     // blocks (tool calls, thinking) render either as one collapsed
     // summary line or as an expanded header + child lines, driven
     // by `AppState::is_block_expanded`.
-    let blocks = state.cached_blocks();
-    let mut rendered = state.rendered_rows.take();
-    rendered.clear();
-    for block in blocks {
-        // Hard-hide thinking blocks when the legacy `show_thinking`
-        // toggle is off — that key (F5) historically removed them
-        // from the buffer entirely; fold semantics still apply to
-        // them when they're visible.
-        if block.kind == crate::app::BlockKind::Thinking && !state.show_thinking {
-            continue;
-        }
-        let foldable = block.is_foldable();
-        let expanded = state.is_block_expanded(&block);
-        let focused = state.transcript_cursor == Some(block.id());
-        // Cursor mark renders as "▶" before the fold glyph so the
-        // user can see at a glance which block the next Space
-        // press will toggle.
-        let cursor_mark = if focused { "▶" } else { " " };
-        if foldable && !expanded {
-            // Single summary line replaces the whole block.
-            let summary = format!("{cursor_mark}▸ {}", state.block_summary(&block));
-            wrap_one_line(
-                &TranscriptLine {
-                    kind: block_chrome_kind(block.kind),
-                    text: summary,
-                },
-                width,
-                Some(block.id()),
-                &mut rendered,
-                None,
-            );
-            continue;
-        }
-        if foldable && expanded {
-            // Header row tells the user the block is open + how
-            // many child lines fall under it. Child lines follow,
-            // each indented.
-            let header = format!("{cursor_mark}▾ {}", state.block_summary(&block));
-            wrap_one_line(
-                &TranscriptLine {
-                    kind: block_chrome_kind(block.kind),
-                    text: header,
-                },
-                width,
-                Some(block.id()),
-                &mut rendered,
-                None,
-            );
-        }
-        for idx in block.first_line..=block.last_line {
-            let line = state.transcript.get(idx).cloned();
-            if let Some(line) = line {
-                let md = md_spans_for_line(&line, idx, &block, state);
-                wrap_one_line(&line, width, None, &mut rendered, md);
-            }
-        }
-    }
-
-    let total_rows = rendered.len();
     let visible = area.height as usize;
+    let blocks = state.cached_blocks();
+    let total_rows = collect_rendered_rows(state, &blocks, width, 0, 0, false).total_rows();
     state.render_metrics.set(crate::app::RenderMetrics {
         total_rows,
         visible_rows: visible,
@@ -416,21 +360,23 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, pale
     } else {
         state.scroll_offset.min(total_rows.saturating_sub(visible))
     };
+    let mut rendered =
+        collect_rendered_rows(state, &blocks, width, skip, visible, true).into_rows();
 
     // Build the visible ratatui `Line`s with selection-aware
     // highlighting. Only the slice [skip, skip+visible) renders.
     let lines: Vec<Line> = rendered
         .iter()
         .enumerate()
-        .skip(skip)
-        .take(visible)
         .map(|(idx, row)| build_line(row, idx, state.selection, palette))
         .collect();
 
-    // Hand the wrapped rows over to AppState — mouse handlers consume
-    // them on the next event (translate / extract-on-mouse-up).
-    if rendered.capacity() > total_rows.saturating_mul(2).max(1024) {
-        rendered.shrink_to(total_rows);
+    // Hand only visible wrapped rows over to AppState — mouse handlers
+    // consume them on the next event. Keeping the viewport instead of
+    // the entire wrapped scrollback avoids retaining a second full copy
+    // of long transcripts.
+    if rendered.capacity() > visible.saturating_mul(2).max(128) {
+        rendered.shrink_to(visible);
     }
     state.rendered_rows.replace(rendered);
 
@@ -448,6 +394,105 @@ fn draw_transcript(frame: &mut Frame<'_>, area: Rect, state: &mut AppState, pale
     frame.render_stateful_widget(scrollbar, scrollbar_area, &mut sb_state);
 }
 
+struct RenderWindow {
+    skip: usize,
+    take: usize,
+    seen: usize,
+    rows: Vec<crate::app::RenderedRow>,
+}
+
+impl RenderWindow {
+    fn new(skip: usize, take: usize) -> Self {
+        Self {
+            skip,
+            take,
+            seen: 0,
+            rows: Vec::with_capacity(take.min(256)),
+        }
+    }
+
+    fn push(&mut self, row: crate::app::RenderedRow) {
+        if self.seen >= self.skip && self.rows.len() < self.take {
+            self.rows.push(row);
+        }
+        self.seen = self.seen.saturating_add(1);
+    }
+
+    fn total_rows(&self) -> usize {
+        self.seen
+    }
+
+    fn into_rows(self) -> Vec<crate::app::RenderedRow> {
+        self.rows
+    }
+}
+
+fn collect_rendered_rows(
+    state: &mut AppState,
+    blocks: &[crate::app::TranscriptBlock],
+    width: usize,
+    skip: usize,
+    take: usize,
+    cache_markdown: bool,
+) -> RenderWindow {
+    let mut rendered = RenderWindow::new(skip, take);
+    for block in blocks {
+        // Hard-hide thinking blocks when the legacy `show_thinking`
+        // toggle is off — that key (F5) historically removed them
+        // from the buffer entirely; fold semantics still apply to
+        // them when they're visible.
+        if block.kind == crate::app::BlockKind::Thinking && !state.show_thinking {
+            continue;
+        }
+        let foldable = block.is_foldable();
+        let expanded = state.is_block_expanded(block);
+        let focused = state.transcript_cursor == Some(block.id());
+        // Cursor mark renders as "▶" before the fold glyph so the
+        // user can see at a glance which block the next Space
+        // press will toggle.
+        let cursor_mark = if focused { "▶" } else { " " };
+        if foldable && !expanded {
+            // Single summary line replaces the whole block.
+            let summary = format!("{cursor_mark}▸ {}", state.block_summary(block));
+            wrap_one_line(
+                &TranscriptLine {
+                    kind: block_chrome_kind(block.kind),
+                    text: summary,
+                },
+                width,
+                Some(block.id()),
+                &mut rendered,
+                None,
+            );
+            continue;
+        }
+        if foldable && expanded {
+            // Header row tells the user the block is open + how
+            // many child lines fall under it. Child lines follow,
+            // each indented.
+            let header = format!("{cursor_mark}▾ {}", state.block_summary(block));
+            wrap_one_line(
+                &TranscriptLine {
+                    kind: block_chrome_kind(block.kind),
+                    text: header,
+                },
+                width,
+                Some(block.id()),
+                &mut rendered,
+                None,
+            );
+        }
+        for idx in block.first_line..=block.last_line {
+            let line = state.transcript.get(idx).cloned();
+            if let Some(line) = line {
+                let md = md_spans_for_line(&line, idx, block, state, cache_markdown);
+                wrap_one_line(&line, width, None, &mut rendered, md);
+            }
+        }
+    }
+    rendered
+}
+
 /// Decide whether `line` should get markdown rendering and return
 /// the parsed spans if so. Uses [`MarkdownCache`] so completed lines
 /// aren't re-parsed every frame.
@@ -456,6 +501,7 @@ fn md_spans_for_line(
     idx: usize,
     block: &crate::app::TranscriptBlock,
     state: &mut AppState,
+    cache_spans: bool,
 ) -> Option<Arc<[crate::md_render::MdStyledSpan]>> {
     use crate::md_render::{looks_like_markdown, render_md_to_spans};
     // Only render AssistText / ThinkingText through the md pipeline.
@@ -489,21 +535,32 @@ fn md_spans_for_line(
         // `AgentEvent::MessageEnd`). On the first post-stream
         // frame the cache branch below parses + memoizes it.
         None
-    } else {
-        // Ensure cache capacity.
+    } else if cache_spans {
         state.markdown_cache.resize(state.transcript.len());
-        // Check cache.
-        if let Some(Some(cached)) = state.markdown_cache.entries.get(idx) {
+        state.markdown_cache.retain_recent(MAX_MARKDOWN_CACHE_LINES);
+        let should_cache = state
+            .markdown_cache
+            .should_cache(idx, MAX_MARKDOWN_CACHE_LINES);
+        if should_cache && let Some(Some(cached)) = state.markdown_cache.entries.get(idx) {
             return Some(Arc::clone(cached));
         }
-        // Parse and cache.
         let spans = render_md_to_spans(&line.text);
         let spans: Arc<[crate::md_render::MdStyledSpan]> = Arc::from(spans.into_boxed_slice());
-        state.markdown_cache.resize(state.transcript.len());
-        if idx < state.markdown_cache.entries.len() {
+        if should_cache && idx < state.markdown_cache.entries.len() {
             state.markdown_cache.entries[idx] = Some(Arc::clone(&spans));
         }
         Some(spans)
+    } else {
+        state
+            .markdown_cache
+            .entries
+            .get(idx)
+            .and_then(|entry| entry.as_ref())
+            .map(Arc::clone)
+            .or_else(|| {
+                let spans = render_md_to_spans(&line.text);
+                Some(Arc::from(spans.into_boxed_slice()))
+            })
     }
 }
 
@@ -525,7 +582,7 @@ fn wrap_one_line(
     line: &TranscriptLine,
     width: usize,
     chrome_for_block: Option<usize>,
-    rendered: &mut Vec<crate::app::RenderedRow>,
+    rendered: &mut RenderWindow,
     md_spans: Option<Arc<[crate::md_render::MdStyledSpan]>>,
 ) {
     let prefix = prefix_for_kind(line.kind);
@@ -583,7 +640,7 @@ fn wrap_markdown_line(
     kind: TranscriptKind,
     width: usize,
     chrome_for_block: Option<usize>,
-    rendered: &mut Vec<crate::app::RenderedRow>,
+    rendered: &mut RenderWindow,
     md_spans: Arc<[crate::md_render::MdStyledSpan]>,
     prefix: &str,
     continuation: &str,
@@ -3952,6 +4009,59 @@ mod ui_format_tests {
     }
 
     #[test]
+    fn render_window_counts_all_rows_but_keeps_only_requested_window() {
+        let mut window = RenderWindow::new(2, 3);
+        for idx in 0..10 {
+            window.push(crate::app::RenderedRow {
+                text: format!("row {idx}"),
+                kind: TranscriptKind::AssistantText,
+                chrome_for_block: None,
+                md_spans: None,
+            });
+        }
+
+        assert_eq!(window.total_rows(), 10);
+        let rows = window.into_rows();
+        let texts: Vec<_> = rows.iter().map(|row| row.text.as_str()).collect();
+        assert_eq!(texts, vec!["row 2", "row 3", "row 4"]);
+    }
+
+    #[test]
+    fn markdown_count_pass_does_not_populate_cache() {
+        let themes = crate::theme::builtin_themes();
+        let mut state = AppState::new(
+            "deepseek/deepseek-chat".into(),
+            Default::default(),
+            0,
+            0,
+            "/tmp/workspace".into(),
+            crate::app::Capabilities::default(),
+            false,
+            themes,
+            0,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+        );
+        let line = TranscriptLine {
+            kind: TranscriptKind::AssistantText,
+            text: "**bold**".into(),
+        };
+        state.transcript.push(line.clone());
+        let block = crate::app::TranscriptBlock {
+            first_line: 0,
+            last_line: 0,
+            kind: crate::app::BlockKind::Plain,
+        };
+
+        let spans = md_spans_for_line(&line, 0, &block, &mut state, false);
+
+        assert!(spans.is_some());
+        assert!(state.markdown_cache.entries.is_empty());
+    }
+
+    #[test]
     fn markdown_wrapping_uses_rendered_offsets_after_hard_breaks() {
         let source = "有的。我有两个网络相关工具：\n\n- `web_search` — 通过 Exa 搜索引擎搜索网页\n- `web_fetch` — 获取网页内容\n";
         let md_spans: Arc<[crate::md_render::MdStyledSpan]> =
@@ -3960,9 +4070,10 @@ mod ui_format_tests {
             kind: TranscriptKind::AssistantText,
             text: source.into(),
         };
-        let mut rendered = Vec::new();
+        let mut rendered = RenderWindow::new(0, usize::MAX);
 
         wrap_one_line(&line, 160, None, &mut rendered, Some(md_spans));
+        let rendered = rendered.into_rows();
 
         let palette = crate::theme::builtin_themes()[0].palette;
         let rendered_text: Vec<String> = rendered
@@ -3996,9 +4107,10 @@ mod ui_format_tests {
             kind: TranscriptKind::ThinkingText,
             text: source.into(),
         };
-        let mut rendered = Vec::new();
+        let mut rendered = RenderWindow::new(0, usize::MAX);
 
         wrap_one_line(&line, 80, None, &mut rendered, Some(md_spans));
+        let rendered = rendered.into_rows();
 
         let palette = crate::theme::builtin_themes()[0].palette;
         let first = build_line(&rendered[0], 0, None, &palette)

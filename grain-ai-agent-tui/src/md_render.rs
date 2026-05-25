@@ -86,6 +86,10 @@ pub struct MarkdownCache {
     /// `None` when the entry hasn't been computed yet or is the
     /// currently-streaming line (which changes each frame).
     pub entries: Vec<Option<Arc<[MdStyledSpan]>>>,
+    /// Lowest line index that may still contain a cached span. Entries
+    /// before this point have already been cleared, which lets pruning
+    /// advance incrementally instead of rescanning the whole cache.
+    pruned_before: usize,
 }
 
 impl MarkdownCache {
@@ -96,6 +100,24 @@ impl MarkdownCache {
     /// Ensure the cache has capacity for `total_transcript_len` lines.
     pub fn resize(&mut self, len: usize) {
         self.entries.resize(len, None);
+        self.pruned_before = self.pruned_before.min(len);
+    }
+
+    pub fn should_cache(&self, idx: usize, max_recent_lines: usize) -> bool {
+        max_recent_lines > 0 && idx >= self.entries.len().saturating_sub(max_recent_lines)
+    }
+
+    /// Drop parsed span payloads outside the recent tail window while
+    /// preserving index alignment with `transcript`.
+    pub fn retain_recent(&mut self, max_recent_lines: usize) {
+        let cutoff = self.entries.len().saturating_sub(max_recent_lines);
+        if cutoff <= self.pruned_before {
+            return;
+        }
+        for entry in &mut self.entries[self.pruned_before..cutoff] {
+            *entry = None;
+        }
+        self.pruned_before = cutoff;
     }
 
     /// Parse + cache `transcript[idx]`. Returns the parsed spans.
@@ -107,17 +129,15 @@ impl MarkdownCache {
         palette: &Palette,
     ) -> Vec<Span<'static>> {
         // Never cache the streaming tail — it changes each frame.
-        if !is_streaming
-            && let Some(Some(cached)) = self.entries.get(idx) {
-                return cached.iter().map(|s| s.to_ratatui_span(palette)).collect();
-            }
+        if !is_streaming && let Some(Some(cached)) = self.entries.get(idx) {
+            return cached.iter().map(|s| s.to_ratatui_span(palette)).collect();
+        }
         let spans = render_md_to_spans(line);
         let rat_spans: Vec<Span<'static>> =
             spans.iter().map(|s| s.to_ratatui_span(palette)).collect();
-        if !is_streaming
-            && idx < self.entries.len() {
-                self.entries[idx] = Some(Arc::from(spans.into_boxed_slice()));
-            }
+        if !is_streaming && idx < self.entries.len() {
+            self.entries[idx] = Some(Arc::from(spans.into_boxed_slice()));
+        }
         rat_spans
     }
 
@@ -127,6 +147,7 @@ impl MarkdownCache {
         if idx < self.entries.len() {
             self.entries.truncate(idx);
         }
+        self.pruned_before = self.pruned_before.min(idx);
     }
 }
 
@@ -723,5 +744,20 @@ mod tests {
         assert!(cache.entries[0].is_some());
         assert!(cache.entries[1].is_none());
         assert!(cache.entries[2].is_none());
+    }
+
+    #[test]
+    fn markdown_cache_retain_recent_clears_old_payloads() {
+        let mut cache = MarkdownCache::new();
+        cache.resize(5);
+        let p = test_palette();
+        for idx in 0..5 {
+            let _ = cache.get_or_parse(idx, "**bold**", false, &p);
+        }
+
+        cache.retain_recent(2);
+
+        assert!(cache.entries[..3].iter().all(Option::is_none));
+        assert!(cache.entries[3..].iter().all(Option::is_some));
     }
 }

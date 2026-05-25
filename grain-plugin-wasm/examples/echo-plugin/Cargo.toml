@@ -1,6 +1,6 @@
 [package]
 name = "echo-plugin"
-version = "0.0.1-beta1"
+version = "0.0.1-beta2"
 edition = "2024"
 
 [lib]

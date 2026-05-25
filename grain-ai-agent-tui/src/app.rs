@@ -619,7 +619,7 @@ pub struct RenderMetrics {
     pub full_area: Rect,
 }
 
-/// One terminal row's worth of rendered transcript content, after our
+/// One visible terminal row's worth of rendered transcript content, after our
 /// own soft-wrap pass. Captured by `ui::draw_transcript` and stashed in
 /// [`AppState::rendered_rows`] so mouse handlers can:
 /// 1. Translate `(terminal_row, terminal_col)` into a `(row_idx, col)`
@@ -645,7 +645,7 @@ pub struct RenderedRow {
 
 /// Active text selection inside the transcript. Coordinates are
 /// `(row_idx, col)` pairs, where `row_idx` indexes into
-/// [`AppState::rendered_rows`] (the current frame's wrapped rows).
+/// [`AppState::rendered_rows`] (the current frame's visible wrapped rows).
 ///
 /// `dragging = true` while the left mouse button is held down. Once
 /// the button is released, we keep the selection visible briefly (so
@@ -995,10 +995,13 @@ pub struct AppState {
     /// `DisableMouseCapture` on the terminal.
     // ── Render state (interior-mutable / frame-local) ─────────
     pub mouse_capture_on: bool,
-    /// Wrapped transcript rows from the most recent frame. Built by
-    /// `ui::draw_transcript`, consumed by mouse handlers to translate
-    /// `(terminal_row, terminal_col)` into a position inside the
-    /// transcript and to extract text under a drag selection.
+    /// Visible wrapped transcript rows from the most recent frame.
+    /// Built by `ui::draw_transcript`, consumed by mouse handlers to
+    /// translate `(terminal_row, terminal_col)` into a position inside
+    /// the visible transcript and to extract text under a drag selection.
+    /// This intentionally stores only the viewport, not the whole
+    /// scrollback, so long sessions do not retain a second full copy of
+    /// the transcript.
     pub rendered_rows: RefCell<Vec<RenderedRow>>,
     /// Bounding `Rect` of the transcript pane on the current frame.
     /// Same write-side / read-side pattern as [`Self::render_metrics`]:
@@ -1463,13 +1466,10 @@ impl AppState {
     }
 
     /// Translate an absolute terminal `(row, col)` from a mouse event
-    /// into a `(rendered_row_idx, col)` position inside the
-    /// transcript's wrapped-row buffer. Returns `None` when the click
-    /// falls outside the transcript pane, or when no rendered_rows
-    /// are tracked yet (e.g. before the first frame).
-    ///
-    /// The mapping respects the active scroll offset (`scroll_offset`
-    /// when frozen, end-of-buffer when `follow_bottom`).
+    /// into a `(visible_rendered_row_idx, col)` position inside the
+    /// transcript viewport. Returns `None` when the click falls outside
+    /// the transcript pane, or when no visible rendered row exists at
+    /// that location.
     pub fn translate_mouse_to_rendered(&self, row: u16, col: u16) -> Option<(usize, usize)> {
         let area = self.transcript_area.get();
         if area.width == 0 || area.height == 0 {
@@ -1484,14 +1484,7 @@ impl AppState {
         let visible_row = (row - area.y) as usize;
         let visible_col = (col - area.x) as usize;
         let rendered = self.rendered_rows.borrow();
-        let total = rendered.len();
-        let visible_rows = area.height as usize;
-        let skip = if self.follow_bottom {
-            total.saturating_sub(visible_rows)
-        } else {
-            self.scroll_offset.min(total.saturating_sub(visible_rows))
-        };
-        let row_idx = skip + visible_row;
+        let row = rendered.get(visible_row)?;
         // `visible_col` is in **terminal display columns**, but
         // selection coords are byte offsets into the row text.
         // Walk the row by char, accumulating display widths, until we
@@ -1499,11 +1492,8 @@ impl AppState {
         // Without this, multi-byte (CJK / emoji) chars made the
         // highlight rectangle slip half a glyph past where the user
         // dragged.
-        let col_idx = rendered
-            .get(row_idx)
-            .map(|r| visual_col_to_byte_idx(&r.text, visible_col))
-            .unwrap_or(0);
-        Some((row_idx, col_idx))
+        let col_idx = visual_col_to_byte_idx(&row.text, visible_col);
+        Some((visible_row, col_idx))
     }
 
     /// The slash palette is visible while the input has focus, no

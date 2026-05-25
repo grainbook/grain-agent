@@ -528,7 +528,7 @@ mod tests {
             vec![
                 PathBuf::from("/repo/sub/.pi/skills"),
                 PathBuf::from("/repo/sub/.agents/skills"),
-                    PathBuf::from("/repo/sub/.grain/skills"),
+                PathBuf::from("/repo/sub/.grain/skills"),
                 PathBuf::from("/repo/sub/.claude/skills"),
             ]
         );
