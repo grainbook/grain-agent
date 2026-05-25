@@ -1,0 +1,129 @@
+name: release
+
+# Build prebuilt binaries and create a GitHub Release on every `v*` tag.
+# The asset naming must match what `install.sh` expects:
+#   <bin>-<tag>-<target>.tar.gz
+
+on:
+  push:
+    tags: ["v*"]
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+
+  # ── Build matrix ──────────────────────────────────────────────────────
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest      # arm64
+            target: aarch64-apple-darwin
+          - os: macos-13          # x86_64
+            target: x86_64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Build both binaries in release mode
+      - name: Build grain-tui
+        run: |
+          cargo build --release --locked \
+            -p grain-ai-agent-tui \
+            --target ${{ matrix.target }}
+
+      - name: Build grain-headless
+        run: |
+          cargo build --release --locked \
+            -p grain-ai-agent-headless \
+            --target ${{ matrix.target }}
+
+      # Strip (Linux) / no-op on macOS
+      - name: Strip binaries
+        run: |
+          if [[ "${{ matrix.target }}" == *linux* ]]; then
+            strip "target/${{ matrix.target }}/release/grain-tui" || true
+            strip "target/${{ matrix.target }}/release/grain-headless" || true
+          fi
+
+      # Package each binary separately to match install.sh asset naming
+      - name: Package grain-tui
+        id: pkg_tui
+        run: |
+          cd "target/${{ matrix.target }}/release"
+          tarball="grain-tui-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          tar -czf "$tarball" grain-tui
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+
+      - name: Package grain-headless
+        id: pkg_headless
+        run: |
+          cd "target/${{ matrix.target }}/release"
+          tarball="grain-headless-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          tar -czf "$tarball" grain-headless
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact (tui)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg_tui.outputs.tarball }}
+          path: target/${{ matrix.target }}/release/${{ steps.pkg_tui.outputs.tarball }}
+          if-no-files-found: error
+
+      - name: Upload artifact (headless)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg_headless.outputs.tarball }}
+          path: target/${{ matrix.target }}/release/${{ steps.pkg_headless.outputs.tarball }}
+          if-no-files-found: error
+
+  # ── GitHub Release ────────────────────────────────────────────────────
+  release:
+    name: create release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum *.tar.gz > sha256sums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body: |
+            ## ${{ github.ref_name }}
+
+            Prebuilt binaries for Linux (x86_64, aarch64) and macOS (x86_64, aarch64).
+
+            ### Quick install
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/grain-ai/grain-agent/main/install.sh | bash
+            ```
+
+            ### Manual download
+            Choose the archive matching your platform from the assets below.
+          files: artifacts/*
+          fail_on_unmatched_files: true

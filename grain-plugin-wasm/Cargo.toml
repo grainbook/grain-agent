@@ -27,4 +27,8 @@ grain-agent-core = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
 toml = { workspace = true }
-grain-ai-agent-headless = { workspace = true }
+# Path-only on purpose: grain-ai-agent-headless optionally depends back on
+# grain-plugin-wasm, so going through the workspace `version` field would form
+# a publish-time cycle. cargo strips path-only dev-deps from the uploaded
+# manifest, breaking the cycle while keeping local `cargo test` working.
+grain-ai-agent-headless = { path = "../grain-ai-agent-headless" }
