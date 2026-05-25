@@ -334,12 +334,22 @@ pub fn resolve_skills_dir(workspace_root: &Path, override_path: Option<&Path>) -
 /// Resolve pi-compatible skill locations. An explicit override disables
 /// default discovery and is treated as a single additive path.
 pub fn resolve_skill_dirs(workspace_root: &Path, override_path: Option<&Path>) -> Vec<PathBuf> {
+    resolve_skill_dirs_with_scope(workspace_root, override_path, false)
+}
+
+/// Resolve skill locations, optionally limiting discovery to the current
+/// workspace. Workspace-only mode skips user-global and ancestor locations.
+pub fn resolve_skill_dirs_with_scope(
+    workspace_root: &Path,
+    override_path: Option<&Path>,
+    workspace_only: bool,
+) -> Vec<PathBuf> {
     if let Some(p) = override_path {
         return vec![p.to_path_buf()];
     }
 
     let mut dirs = Vec::new();
-    if let Some(home) = dirs::home_dir() {
+    if !workspace_only && let Some(home) = dirs::home_dir() {
         dirs.push(home.join(".pi/agent/skills"));
         dirs.push(home.join(".agents/skills"));
     }
@@ -347,6 +357,10 @@ pub fn resolve_skill_dirs(workspace_root: &Path, override_path: Option<&Path>) -
     dirs.push(workspace_root.join(".agents/skills"));
     // Backward-compatible with this repo's earlier Claude-style default.
     dirs.push(workspace_root.join(".claude/skills"));
+
+    if workspace_only {
+        return dirs;
+    }
 
     let mut current = Some(workspace_root);
     while let Some(dir) = current {
@@ -502,6 +516,28 @@ mod tests {
     fn resolve_skills_dir_honors_override() {
         let p = resolve_skills_dir(Path::new("/work"), Some(Path::new("/custom")));
         assert_eq!(p, Path::new("/custom"));
+    }
+
+    #[test]
+    fn resolve_skill_dirs_workspace_only_skips_global_and_ancestors() {
+        let dirs = resolve_skill_dirs_with_scope(Path::new("/repo/sub"), None, true);
+
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/repo/sub/.pi/skills"),
+                PathBuf::from("/repo/sub/.agents/skills"),
+                PathBuf::from("/repo/sub/.claude/skills"),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_skill_dirs_workspace_only_still_honors_override() {
+        let dirs =
+            resolve_skill_dirs_with_scope(Path::new("/repo/sub"), Some(Path::new("/custom")), true);
+
+        assert_eq!(dirs, vec![PathBuf::from("/custom")]);
     }
 
     #[test]

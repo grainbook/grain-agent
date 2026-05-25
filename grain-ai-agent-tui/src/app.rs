@@ -17,6 +17,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use grain_agent_core::{
     AgentEvent, AgentMessage, AssistantMessageEvent, Cost, Message, UserContent,
 };
+use nucleo_matcher::{
+    Config, Matcher,
+    pattern::{CaseMatching, Normalization, Pattern},
+};
 
 use crate::anim::EffectManager;
 use crate::event::TuiEvent;
@@ -721,6 +725,15 @@ pub enum PaletteAction {
     /// Inject the skill body content into the input so the user can
     /// review / edit before submitting to the LLM.
     InjectBody(String),
+    /// Replace the active `@...` token with this workspace-relative
+    /// file path.
+    InsertFile(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileToken {
+    start: usize,
+    end: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -830,6 +843,7 @@ pub struct AppState {
     pub input: String,
     pub cursor: usize,
     pub skill_tokens: Vec<InputSkillToken>,
+    pub file_candidates: Vec<String>,
     pub focus: Focus,
     // ── Overlay & Focus ───────────────────────────────────────
     pub overlay: Option<Overlay>,
@@ -1300,6 +1314,7 @@ impl AppState {
             input: String::new(),
             cursor: 0,
             skill_tokens: Vec::new(),
+            file_candidates: Vec::new(),
             focus: Focus::Input,
             overlay: None,
             scroll_offset: 0,
@@ -1495,10 +1510,32 @@ impl AppState {
     /// overlay is open, and the input starts with `/`. Hidden once the
     /// user submits — re-appears when they type `/` again.
     pub fn palette_visible(&self) -> bool {
-        self.focus == Focus::Input
-            && self.overlay.is_none()
-            && self.skill_tokens.is_empty()
-            && self.input.starts_with('/')
+        if self.focus != Focus::Input || self.overlay.is_some() || !self.skill_tokens.is_empty() {
+            return false;
+        }
+        self.input.starts_with('/') || self.active_file_token().is_some()
+    }
+
+    fn active_file_token(&self) -> Option<FileToken> {
+        if self.cursor > self.input.len() || !self.input.is_char_boundary(self.cursor) {
+            return None;
+        }
+        let before = &self.input[..self.cursor];
+        let start = before
+            .char_indices()
+            .rev()
+            .find(|(_, ch)| ch.is_whitespace())
+            .map(|(idx, ch)| idx + ch.len_utf8())
+            .unwrap_or(0);
+        if !self.input[start..self.cursor].starts_with('@') {
+            return None;
+        }
+        let end = self.input[self.cursor..]
+            .char_indices()
+            .find(|(_, ch)| ch.is_whitespace())
+            .map(|(idx, _)| self.cursor + idx)
+            .unwrap_or_else(|| self.input.len());
+        Some(FileToken { start, end })
     }
 
     /// Append a submitted prompt to history (dedup immediate repeats,
@@ -1679,6 +1716,9 @@ impl AppState {
     /// row matches. Includes both built-in slash commands and loaded
     /// skills so the user can inject skill prompts via `/`.
     pub fn palette_matches(&self) -> Vec<PaletteItem> {
+        if let Some(token) = self.active_file_token() {
+            return self.file_palette_matches(token);
+        }
         if !self.input.starts_with('/') {
             return Vec::new();
         }
@@ -1719,6 +1759,58 @@ impl AppState {
             }
         }
         items
+    }
+
+    fn file_palette_matches(&self, token: FileToken) -> Vec<PaletteItem> {
+        const MAX_FILE_MATCHES: usize = 80;
+        let query = self.input[token.start + 1..self.cursor].trim();
+        if self.file_candidates.is_empty() {
+            return Vec::new();
+        }
+        if query.is_empty() {
+            return self
+                .file_candidates
+                .iter()
+                .take(MAX_FILE_MATCHES)
+                .map(|path| PaletteItem {
+                    trigger: format!("@{path}"),
+                    description: "file".to_string(),
+                    action: PaletteAction::InsertFile(path.clone()),
+                })
+                .collect();
+        }
+
+        let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+        let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+        let mut scored = pattern.match_list(
+            self.file_candidates.iter().map(String::as_str),
+            &mut matcher,
+        );
+        scored.sort_by(|(a_path, a_score), (b_path, b_score)| {
+            b_score.cmp(a_score).then_with(|| a_path.cmp(b_path))
+        });
+        scored
+            .into_iter()
+            .take(MAX_FILE_MATCHES)
+            .map(|(path, _)| PaletteItem {
+                trigger: format!("@{path}"),
+                description: "file".to_string(),
+                action: PaletteAction::InsertFile(path.to_string()),
+            })
+            .collect()
+    }
+
+    fn insert_file_palette_item(&mut self, path: &str) {
+        let Some(token) = self.active_file_token() else {
+            return;
+        };
+        let replacement = format!("@{path}");
+        self.input
+            .replace_range(token.start..token.end, &replacement);
+        self.cursor = token.start + replacement.len();
+        self.clear_input_skill_tokens();
+        self.palette_focused = 0;
+        self.detach_history();
     }
 
     fn push(&mut self, kind: TranscriptKind, text: String) {
@@ -1994,6 +2086,10 @@ impl AppState {
             }
             TuiEvent::SkillsLoaded(skills) => {
                 self.skills = skills;
+                Vec::new()
+            }
+            TuiEvent::FileCandidatesLoaded(files) => {
+                self.file_candidates = files;
                 Vec::new()
             }
             TuiEvent::AgentWorkerError(msg) => {
@@ -2674,12 +2770,17 @@ impl AppState {
                 if self.palette_visible() {
                     let matches = self.palette_matches();
                     if let Some(item) = matches.get(self.palette_focused) {
-                        // Tab only completes slash-command triggers,
-                        // not skill names.
-                        if matches!(item.action, PaletteAction::DispatchSlash) {
-                            self.input = item.trigger.to_string();
-                            self.cursor = self.input.len();
-                            self.clear_input_skill_tokens();
+                        match &item.action {
+                            PaletteAction::DispatchSlash => {
+                                self.input = item.trigger.to_string();
+                                self.cursor = self.input.len();
+                                self.clear_input_skill_tokens();
+                            }
+                            PaletteAction::InsertFile(path) => {
+                                let path = path.clone();
+                                self.insert_file_palette_item(&path);
+                            }
+                            PaletteAction::InjectBody(_) => {}
                         }
                     }
                 }
@@ -2773,6 +2874,11 @@ impl AppState {
                                 self.input = item.trigger.to_string();
                                 self.cursor = self.input.len();
                                 self.clear_input_skill_tokens();
+                            }
+                            PaletteAction::InsertFile(path) => {
+                                let path = path.clone();
+                                self.insert_file_palette_item(&path);
+                                return Vec::new();
                             }
                         }
                     }
@@ -5883,6 +5989,44 @@ mod tests {
         s.focus = Focus::Input;
         s.overlay = Some(Overlay::Help);
         assert!(!s.palette_visible(), "hidden when an overlay covers UI");
+    }
+
+    #[test]
+    fn at_file_token_opens_file_palette() {
+        let mut s = fresh();
+        s.on_event(TuiEvent::FileCandidatesLoaded(vec![
+            "grain-ai-agent-tui/src/app.rs".into(),
+            "grain-ai-agent-tui/src/ui.rs".into(),
+            "README.md".into(),
+        ]));
+        for c in "read @app".chars() {
+            s.on_event(TuiEvent::Key(press(KeyCode::Char(c))));
+        }
+
+        assert!(s.palette_visible());
+        let matches = s.palette_matches();
+        assert!(
+            matches
+                .iter()
+                .any(|item| item.trigger == "@grain-ai-agent-tui/src/app.rs")
+        );
+    }
+
+    #[test]
+    fn at_file_enter_replaces_active_token() {
+        let mut s = fresh();
+        s.on_event(TuiEvent::FileCandidatesLoaded(vec![
+            "grain-ai-agent-tui/src/app.rs".into(),
+            "grain-ai-agent-tui/src/ui.rs".into(),
+        ]));
+        for c in "read @app".chars() {
+            s.on_event(TuiEvent::Key(press(KeyCode::Char(c))));
+        }
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+
+        assert!(cmds.is_empty());
+        assert_eq!(s.input, "read @grain-ai-agent-tui/src/app.rs");
+        assert_eq!(s.cursor, s.input.len());
     }
 
     #[test]

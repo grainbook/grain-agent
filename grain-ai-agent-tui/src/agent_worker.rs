@@ -30,7 +30,7 @@ use grain_agent_harness::{
 use grain_ai_agent_headless::{
     SessionWriter, TelemetrySink, Workspace, coding_agent_system_prompt, coding_bash_tools,
     coding_read_tools, coding_web_tools, coding_write_tools, find_skills_in_dirs, load_messages,
-    render_doctor_report, resolve_skill_dirs,
+    render_doctor_report, resolve_skill_dirs_with_scope,
 };
 use grain_llm_genai::GenaiStream;
 use grain_llm_models::Registry;
@@ -133,6 +133,56 @@ fn normalize_tool_names_for_provider(tools: Vec<Arc<dyn AgentTool>>) -> Vec<Arc<
         .collect()
 }
 
+fn paths_match(a: &std::path::Path, b: &std::path::Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn list_sessions_excluding_active(
+    sessions_dir: &std::path::Path,
+    active_session_path: Option<&std::path::Path>,
+) -> Vec<grain_ai_agent_headless::SessionMeta> {
+    let mut list = grain_ai_agent_headless::list_sessions(sessions_dir);
+    if let Some(active) = active_session_path {
+        list.retain(|meta| !paths_match(&meta.path, active));
+    }
+    list
+}
+
+fn workspace_file_candidates(root: &std::path::Path) -> Vec<String> {
+    const MAX_FILE_CANDIDATES: usize = 20_000;
+    let mut out = Vec::new();
+    let walker = ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .ignore(true)
+        .parents(true)
+        .build();
+    for entry in walker.flatten() {
+        if out.len() >= MAX_FILE_CANDIDATES {
+            break;
+        }
+        let path = entry.path();
+        if path == root || !entry.file_type().map(|ty| ty.is_file()).unwrap_or(false) {
+            continue;
+        }
+        if let Ok(rel) = path.strip_prefix(root) {
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if !rel.is_empty() {
+                out.push(rel);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// Configuration crystallized out of [`Args`]. Pulled into its own
 /// struct so the spawn function isn't argument-soup.
 #[derive(Debug, Clone)]
@@ -147,6 +197,7 @@ pub struct WorkerConfig {
     pub allow_web: bool,
     pub allow_semantic_search: bool,
     pub skills_dir: Option<PathBuf>,
+    pub workspace_skills_only: bool,
     pub session: Option<PathBuf>,
     pub telemetry_file: Option<PathBuf>,
     /// Profiles loaded from `providers.toml`. Used both to register
@@ -202,6 +253,7 @@ impl From<&Args> for WorkerConfig {
             allow_web: a.allow_web,
             allow_semantic_search: a.allow_semantic_search,
             skills_dir: a.skills_dir.clone(),
+            workspace_skills_only: a.workspace_skills_only,
             session: a.session.clone(),
             telemetry_file: a.telemetry_file.clone(),
             // Profiles/initial_profile_idx are loaded in `run::run_tui`
@@ -582,7 +634,11 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     };
     let base_prompt =
         grain_ai_agent_headless::compose_system_prompt_with_plugins(&raw_base, &discovered_plugins);
-    let skill_dirs = resolve_skill_dirs(workspace.root(), cfg.skills_dir.as_deref());
+    let skill_dirs = resolve_skill_dirs_with_scope(
+        workspace.root(),
+        cfg.skills_dir.as_deref(),
+        cfg.workspace_skills_only,
+    );
     // Phase A/B: `find_skills_with_plugins` walks the primary skills
     // dir, then folds in each plugin's `<plugin>/skills/`.
     let mut skills =
@@ -619,6 +675,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         let resumed = if !cfg.new_session {
             grain_ai_agent_headless::list_sessions(&sessions_dir)
                 .into_iter()
+                .filter(|meta| meta.message_count > 0)
                 .next()
                 .map(|m| m.path)
         } else {
@@ -1381,6 +1438,9 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         // Send loaded skills to the UI so the slash-palette can offer
         // skill prompt injection alongside built-in commands.
         let _ = evt_tx_for_task.send(TuiEvent::SkillsLoaded(skills_for_ui));
+        let _ = evt_tx_for_task.send(TuiEvent::FileCandidatesLoaded(workspace_file_candidates(
+            workspace_for_task.root(),
+        )));
         // Ship plugin-contributed slash command overrides so the
         // TUI's dispatch_slash consults them before the built-in
         // table — that's how lazy-gagent claims `/plugins`.
@@ -1409,7 +1469,10 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         // resume picker before the first user interaction.  The
         // auto-resumed (or freshly-minted) session row is
         // focused; Enter confirms it, ↑↓ picks a different one.
-        let boot_session_list = grain_ai_agent_headless::list_sessions(&sessions_dir_for_task);
+        let boot_session_list = list_sessions_excluding_active(
+            &sessions_dir_for_task,
+            active_session_path_for_task.as_deref(),
+        );
         let _ = evt_tx_for_task.send(TuiEvent::SessionsListed(boot_session_list));
 
         run_command_loop(
@@ -1667,7 +1730,8 @@ async fn run_command_loop(
                 }
             },
             Command::ReturnSessions => {
-                let list = grain_ai_agent_headless::list_sessions(&sessions_dir);
+                let list =
+                    list_sessions_excluding_active(&sessions_dir, active_session_path.as_deref());
                 let _ = evt_tx.send(TuiEvent::SessionsListed(list));
             }
             Command::DeleteSession(path) => {
@@ -1728,7 +1792,10 @@ async fn run_command_loop(
                     )));
                     // Refresh the picker so the deleted row vanishes
                     // and the new session row appears.
-                    let list = grain_ai_agent_headless::list_sessions(&sessions_dir);
+                    let list = list_sessions_excluding_active(
+                        &sessions_dir,
+                        active_session_path.as_deref(),
+                    );
                     let _ = evt_tx.send(TuiEvent::SessionsListed(list));
                     let _ = evt_tx.send(TuiEvent::SessionResumed {
                         path: new_path.display().to_string(),
@@ -1772,7 +1839,10 @@ async fn run_command_loop(
                             path.display()
                         )));
                         // Refresh the open picker so the row vanishes.
-                        let list = grain_ai_agent_headless::list_sessions(&sessions_dir);
+                        let list = list_sessions_excluding_active(
+                            &sessions_dir,
+                            active_session_path.as_deref(),
+                        );
                         let _ = evt_tx.send(TuiEvent::SessionsListed(list));
                     }
                     Err(e) => {
@@ -2621,6 +2691,43 @@ fn synthetic_model_from_profile(profile: &ProviderProfile) -> grain_agent_core::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_sessions_excluding_active_hides_current_empty_locked_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let active = grain_ai_agent_headless::new_session_path(dir.path());
+        let _writer = SessionWriter::open(&active).unwrap();
+
+        let list = list_sessions_excluding_active(dir.path(), Some(active.as_path()));
+
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn list_sessions_excluding_active_keeps_other_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let active = grain_ai_agent_headless::new_session_path(dir.path());
+        let other = grain_ai_agent_headless::new_session_path(dir.path());
+        let _writer = SessionWriter::open(&active).unwrap();
+        let other_writer = SessionWriter::open(&other).unwrap();
+        other_writer
+            .append(&AgentMessage::user(grain_agent_core::UserMessage {
+                content: vec![grain_agent_core::UserContent::Text(
+                    grain_agent_core::TextContent {
+                        text: "older prompt".into(),
+                    },
+                )],
+                timestamp: 0,
+            }))
+            .unwrap();
+        drop(other_writer);
+
+        let list = list_sessions_excluding_active(dir.path(), Some(active.as_path()));
+
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].path, other);
+        assert_eq!(list[0].message_count, 1);
+    }
 
     #[test]
     fn provider_safe_tool_name_replaces_provider_hostile_chars() {

@@ -100,7 +100,7 @@ pub use session_discovery::{
 };
 pub use skills::{
     DEFAULT_SKILLS_DIR, SkillsError, find_skills, find_skills_in_dirs, maybe_load_agents_md,
-    resolve_skill_dirs, resolve_skills_dir,
+    resolve_skill_dirs, resolve_skill_dirs_with_scope, resolve_skills_dir,
 };
 pub use slash::{HELP_TEXT, SlashCommand, parse as parse_slash_command};
 pub use telemetry::{TelemetryError, TelemetrySink};

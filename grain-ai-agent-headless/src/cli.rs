@@ -27,7 +27,7 @@ use crate::diagnostics::{render_doctor_report, render_source_info_block};
 use crate::prompt::coding_agent_system_prompt;
 use crate::runtime::{coding_bash_tools, coding_read_tools, coding_write_tools};
 use crate::session::{SessionWriter, load_messages};
-use crate::skills::{find_skills_in_dirs, resolve_skill_dirs};
+use crate::skills::{find_skills_in_dirs, resolve_skill_dirs_with_scope};
 use crate::slash::{HELP_TEXT, SlashCommand, parse as parse_slash};
 use crate::workspace::Workspace;
 
@@ -98,6 +98,11 @@ pub struct Args {
     /// `<workspace>/.claude/skills`). Passing this flag uses only that path.
     #[arg(long)]
     pub skills_dir: Option<PathBuf>,
+
+    /// Ignore user-global and ancestor skill directories; scan only
+    /// workspace-local skill directories unless `--skills-dir` is set.
+    #[arg(long, default_value_t = false)]
+    pub workspace_skills_only: bool,
 
     /// Print a workspace + provider diagnostic and exit. Doesn't call any
     /// LLM endpoints; safe to run before configuring keys.
@@ -528,7 +533,11 @@ pub async fn run(args: Args) -> Result<(), CliError> {
         let ctx = InteractiveContext {
             workspace: workspace.clone(),
             registry: registry.clone(),
-            skill_dirs: resolve_skill_dirs(workspace.root(), args.skills_dir.as_deref()),
+            skill_dirs: resolve_skill_dirs_with_scope(
+                workspace.root(),
+                args.skills_dir.as_deref(),
+                args.workspace_skills_only,
+            ),
             session_path: args.session.clone(),
         };
         run_interactive_loop(&agent, &ctx).await?;
@@ -690,7 +699,11 @@ fn resolve_system_prompt(args: &Args) -> Result<String, CliError> {
 /// the system prompt. Errors during discovery degrade to an empty block —
 /// missing or malformed skill files shouldn't break the agent.
 fn resolve_skills_block(args: &Args, workspace_root: &std::path::Path) -> String {
-    let dirs = resolve_skill_dirs(workspace_root, args.skills_dir.as_deref());
+    let dirs = resolve_skill_dirs_with_scope(
+        workspace_root,
+        args.skills_dir.as_deref(),
+        args.workspace_skills_only,
+    );
     let mut skills = match find_skills_in_dirs(&dirs) {
         Ok(s) => s,
         Err(e) => {

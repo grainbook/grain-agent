@@ -120,7 +120,7 @@ jobs:
 
             ### Quick install
             ```bash
-            curl -fsSL https://raw.githubusercontent.com/grain-ai/grain-agent/main/install.sh | bash
+            curl -fsSL https://raw.githubusercontent.com/grainbook/grain-agent/main/install.sh | bash
             ```
 
             ### Manual download

@@ -25,6 +25,8 @@ tachyonfx = { workspace = true }
 unicode-width = { workspace = true }
 arboard = { workspace = true }
 textwrap = { workspace = true }
+ignore = { workspace = true }
+nucleo-matcher = { workspace = true }
 pulldown-cmark = "0.13"
 reqwest = { workspace = true }
 grain-agent-core = { workspace = true }

@@ -97,6 +97,11 @@ pub fn apply_config_to_args(cfg: &ConfigFile, args: &mut Args, explicit: &HashSe
     {
         args.skills_dir = Some(d.clone());
     }
+    if !explicit.contains("workspace_skills_only")
+        && let Some(b) = cfg.workspace_skills_only
+    {
+        args.workspace_skills_only = b;
+    }
 }
 
 fn parse_openai_compat(s: &str) -> Option<OpenAiCompatChoice> {
@@ -251,5 +256,34 @@ mod tests {
             args.skills_dir.as_deref().unwrap().to_str(),
             Some("/from/cli")
         );
+    }
+
+    #[test]
+    fn workspace_skills_only_config_applies_when_cli_silent() {
+        let mut args = parse(&[]);
+        let explicit = HashSet::new();
+        let cfg = ConfigFile {
+            workspace_skills_only: Some(true),
+            ..ConfigFile::default()
+        };
+
+        apply_config_to_args(&cfg, &mut args, &explicit);
+
+        assert!(args.workspace_skills_only);
+    }
+
+    #[test]
+    fn workspace_skills_only_cli_beats_config() {
+        let mut args = parse(&["--workspace-skills-only"]);
+        let mut explicit = HashSet::new();
+        explicit.insert("workspace_skills_only".to_string());
+        let cfg = ConfigFile {
+            workspace_skills_only: Some(false),
+            ..ConfigFile::default()
+        };
+
+        apply_config_to_args(&cfg, &mut args, &explicit);
+
+        assert!(args.workspace_skills_only);
     }
 }

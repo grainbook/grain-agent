@@ -18,9 +18,9 @@ members = [
 [workspace.package]
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/grain-ai/grain-agent"
-homepage = "https://github.com/grain-ai/grain-agent#readme"
-documentation = "https://github.com/grain-ai/grain-agent"
+repository = "https://github.com/grainbook/grain-agent"
+homepage = "https://github.com/grainbook/grain-agent#readme"
+documentation = "https://github.com/grainbook/grain-agent"
 authors = ["grain-ai"]
 
 [workspace.dependencies]
@@ -70,3 +70,4 @@ notify = "6"
 arboard = { version = "3", default-features = false }
 textwrap = "0.16"
 fs2 = "0.4"
+nucleo-matcher = "0.3"

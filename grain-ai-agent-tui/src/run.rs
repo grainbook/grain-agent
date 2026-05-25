@@ -17,7 +17,12 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{
+    Terminal,
+    backend::CrosstermBackend,
+    layout::Alignment,
+    widgets::{Block, Borders, Paragraph},
+};
 use tokio::sync::mpsc;
 use tokio::time::interval;
 
@@ -73,16 +78,10 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
     //   2. `persisted.last_model` (previous session's choice)
     //   3. Keep the WorkerConfig default (deepseek/deepseek-chat)
     if cfg.model == "deepseek/deepseek-chat"
-        && let Some(ref m) = persisted.last_model {
-            cfg.model = m.clone();
-        }
-
-    let Worker {
-        cmd_tx,
-        mut evt_rx,
-        handles,
-        join: _,
-    } = spawn(cfg).await?;
+        && let Some(ref m) = persisted.last_model
+    {
+        cfg.model = m.clone();
+    }
 
     // Resolve themes before grabbing the terminal so any disk-load
     // warnings get a chance to print to stderr before the alt screen
@@ -121,6 +120,22 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
 
     install_panic_hook();
     let mut terminal = init_terminal()?;
+    draw_startup_screen(&mut terminal, &args.workspace)?;
+
+    let worker = match spawn(cfg).await {
+        Ok(worker) => worker,
+        Err(e) => {
+            restore_terminal(&mut terminal)?;
+            return Err(e.into());
+        }
+    };
+    let Worker {
+        cmd_tx,
+        mut evt_rx,
+        handles,
+        join: _,
+    } = worker;
+
     let mut ctx = EventLoopCtx {
         terminal: &mut terminal,
         tick_ms: args.tick_ms,
@@ -141,6 +156,21 @@ pub async fn run_tui(args: Args) -> Result<(), TuiError> {
     .await;
     restore_terminal(&mut terminal)?;
     result
+}
+
+fn draw_startup_screen(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    workspace: &std::path::Path,
+) -> io::Result<()> {
+    let workspace = workspace.display().to_string();
+    terminal.draw(|f| {
+        let body = format!("Starting grain TUI\n{workspace}");
+        let widget = Paragraph::new(body)
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::NONE));
+        f.render_widget(widget, f.area());
+    })?;
+    Ok(())
 }
 
 /// Load profiles from:

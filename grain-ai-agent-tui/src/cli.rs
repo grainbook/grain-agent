@@ -84,6 +84,11 @@ pub struct Args {
     #[arg(long)]
     pub skills_dir: Option<PathBuf>,
 
+    /// Ignore user-global and ancestor skill directories; scan only
+    /// workspace-local skill directories unless `--skills-dir` is set.
+    #[arg(long, default_value_t = false)]
+    pub workspace_skills_only: bool,
+
     /// Opt-in telemetry log: one JSON-serialized `AgentEvent` per line.
     #[arg(long)]
     pub telemetry_file: Option<PathBuf>,

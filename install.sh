@@ -3,7 +3,7 @@
 # Grain Agent — one-command installer.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/grain-ai/grain-agent/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/grainbook/grain-agent/main/install.sh | bash
 #   # or locally:
 #   ./install.sh
 #
@@ -30,8 +30,8 @@
 set -euo pipefail
 
 # ── config ────────────────────────────────────────────────────────────────
-REPO="${REPO:-https://github.com/grain-ai/grain-agent}"
-REPO_OWNER="grain-ai"
+REPO="${REPO:-https://github.com/grainbook/grain-agent}"
+REPO_OWNER="grainbook"
 REPO_NAME="grain-agent"
 REF="${REF:-main}"
 TAG="${TAG:-latest}"
@@ -390,7 +390,7 @@ main() {
   fi
   info "Get started:  grain-tui --help"
   info "              grain-headless --help"
-  info "Docs:         https://github.com/grain-ai/grain-agent#readme"
+  info "Docs:         https://github.com/grainbook/grain-agent#readme"
   echo ""
   exit "${failed}"
 }

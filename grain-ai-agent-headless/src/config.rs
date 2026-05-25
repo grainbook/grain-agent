@@ -18,6 +18,7 @@
 //! allow_web = false
 //! allow_semantic_search = false
 //! skills_dir = ".claude/skills"
+//! workspace_skills_only = true
 //! session_dir = ".grain/sessions" # base dir for JSONL sessions; --session overrides
 //!
 //! # Declarative plugin set. Equivalent to a hand-edited
@@ -67,6 +68,11 @@ pub struct ConfigFile {
     pub allow_web: Option<bool>,
     pub allow_semantic_search: Option<bool>,
     pub skills_dir: Option<PathBuf>,
+    /// When true, default skill discovery ignores user-global and
+    /// ancestor `.agents/skills` directories and scans only the current
+    /// workspace's skill directories. An explicit `skills_dir` still
+    /// takes precedence and is used as the sole scan path.
+    pub workspace_skills_only: Option<bool>,
     pub session_dir: Option<PathBuf>,
     /// Override for the proxy-bypass behavior of the genai HTTP client.
     /// `None` (unset) keeps the default auto-detect (bypass when a
@@ -201,6 +207,11 @@ impl ConfigFile {
         {
             args.skills_dir = Some(d.clone());
         }
+        if !explicit.contains("workspace_skills_only")
+            && let Some(b) = self.workspace_skills_only
+        {
+            args.workspace_skills_only = b;
+        }
         // session_dir isn't on Args today — `--session` is an explicit
         // file path. Config callers that want auto-naming can set
         // session_dir; the CLI driver consults `config.session_dir` only
@@ -252,6 +263,9 @@ fn merge_into(dst: &mut ConfigFile, src: ConfigFile) {
     }
     if src.skills_dir.is_some() {
         dst.skills_dir = src.skills_dir;
+    }
+    if src.workspace_skills_only.is_some() {
+        dst.workspace_skills_only = src.workspace_skills_only;
     }
     if src.session_dir.is_some() {
         dst.session_dir = src.session_dir;
