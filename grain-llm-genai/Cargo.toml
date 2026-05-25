@@ -3,6 +3,12 @@ name = "grain-llm-genai"
 version = "0.0.1-beta1"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords = ["agent", "ai", "llm", "genai", "chat"]
+categories = ["development-tools"]
+readme = "../docs/README.md"
 description = "genai-backed LlmStream implementation for grain-agent. Bridges grain-agent-core's transport-agnostic agent loop to the genai crate's multi-provider chat API. PR 3a: outbound mapping only — impl LlmStream, inbound mapping, and env/quirk config land in subsequent PRs."
 
 [dependencies]

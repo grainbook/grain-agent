@@ -3,6 +3,12 @@ name = "grain-plugin-wasm"
 version = "0.0.1-beta1"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords = ["agent", "ai", "wasm", "plugin"]
+categories = ["development-tools", "wasm"]
+readme = "../docs/README.md"
 description = "WebAssembly Component Model plugin runtime for grain. Loads `.wasm` plugins at runtime and exposes their tools through the `AgentTool` trait — no recompiling grain to add a plugin."
 
 [dependencies]

@@ -3,6 +3,12 @@ name = "grain-llm-models"
 version = "0.0.1-beta1"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords = ["agent", "ai", "llm", "models", "registry"]
+categories = ["development-tools", "science"]
+readme = "../docs/README.md"
 description = "Standardized LLM model registry for grain-agent. Embeds a vendored snapshot of model metadata (context window, capabilities, pricing, thinking profile); the `fetch` feature pulls live data from models.dev."
 
 [features]

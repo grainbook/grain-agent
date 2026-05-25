@@ -1,9 +1,15 @@
 [package]
 name = "grain-agent-core"
 version = "0.0.1-beta1"
-edition = "2024"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
 description = "Rust port of @earendil-works/pi-agent-core: stateful agent framework with tool execution and event streaming."
-license = "MIT"
+keywords = ["agent", "ai", "llm", "framework"]
+categories = ["development-tools", "development-tools::build-utils"]
+readme = "../docs/README.md"
 
 [dependencies]
 async-trait = "0.1"

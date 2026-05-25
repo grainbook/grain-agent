@@ -3,6 +3,12 @@ name = "grain-ai-agent-tui"
 version = "0.0.1-beta1"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords = ["agent", "ai", "tui", "terminal", "coding-agent"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "../docs/README.md"
 description = "ratatui-based terminal UI on top of grain-ai-agent-headless. Same coding-agent capabilities as `grain-headless` (read / write / bash / web / semantic-search tools, session persistence, skills, slash commands) but with a multi-pane terminal interface."
 
 [dependencies]

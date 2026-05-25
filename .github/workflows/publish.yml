@@ -24,20 +24,19 @@ jobs:
         with:
           toolchain: stable
 
-      # --- resolve the version we're publishing ---
+      # ── resolve version ──
       - name: Resolve version
         id: version
         run: |
           if [ -n "${{ github.event.inputs.version }}" ]; then
             VER="${{ github.event.inputs.version }}"
           else
-            # strip leading 'v' from tag
             VER="${GITHUB_REF_NAME#v}"
           fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "Publishing version: $VER"
 
-      # --- assert every workspace member carries the same version ---
+      # ── check all crate versions match ──
       - name: Check version consistency
         run: |
           EXPECT="${{ steps.version.outputs.version }}"
@@ -51,9 +50,7 @@ jobs:
             grain-ai-agent-tui/Cargo.toml \
             grain-script-boa/Cargo.toml \
             grain-script-rhai/Cargo.toml \
-            grain-pi-compat/Cargo.toml \
             grain-deepseek-pack/Cargo.toml \
-            lazy-gagent/Cargo.toml \
             grain-plugin-wasm/Cargo.toml
           do
             actual=$(grep '^version' "$toml" | sed 's/.*"\(.*\)".*/\1/')
@@ -64,38 +61,18 @@ jobs:
           done
           exit $mismatch
 
-      # --- dry-run every crate first (fast-fail) ---
-      - name: Dry-run publish (all crates)
-        run: |
-          set -e
-          for crate in \
-            grain-agent-core \
-            grain-llm-models \
-            grain-llm-genai \
-            grain-agent-harness \
-            grain-deepseek-pack \
-            grain-script-boa \
-            grain-script-rhai \
-            grain-ai-agent-headless \
-            grain-plugin-wasm \
-            grain-pi-compat \
-            grain-ai-agent-tui \
-            lazy-gagent
-          do
-            echo "--- dry-run: $crate ---"
-            cargo publish -p "$crate" --dry-run
-            echo "--- $crate dry-run OK ---"
-          done
-
-      # --- publish in dependency order ---
-      # Tier 0: no internal deps
+      # ── Tier 0: no internal deps ──
       - name: Publish grain-agent-core
         run: cargo publish -p grain-agent-core
 
-      # Tier 1: depend on agent-core (+ llm-models)
       - name: Publish grain-llm-models
         run: cargo publish -p grain-llm-models
 
+      # Brief pause to let crates.io index propagate
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      # ── Tier 1: depend on core + models ──
       - name: Publish grain-llm-genai
         run: cargo publish -p grain-llm-genai
 
@@ -111,19 +88,21 @@ jobs:
       - name: Publish grain-script-rhai
         run: cargo publish -p grain-script-rhai
 
-      # Tier 2: depends on all tier-0 + tier-1
-      - name: Publish grain-ai-agent-headless
-        run: cargo publish -p grain-ai-agent-headless
-
-      # Tier 3: depends on headless + tier-1 crates
       - name: Publish grain-plugin-wasm
         run: cargo publish -p grain-plugin-wasm
 
-      - name: Publish grain-pi-compat
-        run: cargo publish -p grain-pi-compat
+      # Pause again
+      - name: Wait for crates.io index
+        run: sleep 30
 
+      # ── Tier 2: depends on tier-0 + tier-1 ──
+      - name: Publish grain-ai-agent-headless
+        run: cargo publish -p grain-ai-agent-headless
+
+      # Final pause
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      # ── Tier 3: depends on headless ──
       - name: Publish grain-ai-agent-tui
         run: cargo publish -p grain-ai-agent-tui
-
-      - name: Publish lazy-gagent
-        run: cargo publish -p lazy-gagent

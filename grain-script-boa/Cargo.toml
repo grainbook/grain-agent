@@ -3,6 +3,12 @@ name = "grain-script-boa"
 version = "0.0.1-beta1"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords = ["agent", "ai", "scripting", "javascript", "boa"]
+categories = ["development-tools"]
+readme = "../docs/README.md"
 description = "Boa-based JavaScript scripting layer for grain-agent. Loads user `.js` files from disk, runs them in an isolated boa_engine::Context owned by a dedicated worker thread, and exposes registered tools to the agent through the `grain_ai_agent_headless::Extension` trait."
 
 [dependencies]
