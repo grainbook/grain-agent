@@ -1,6 +1,6 @@
 [package]
 name = "grain-agent-core"
-version = "0.1.0"
+version = "0.0.1-beta1"
 edition = "2024"
 description = "Rust port of @earendil-works/pi-agent-core: stateful agent framework with tool execution and event streaming."
 license = "MIT"

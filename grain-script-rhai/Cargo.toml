@@ -1,6 +1,6 @@
 [package]
 name = "grain-script-rhai"
-version = "0.1.0"
+version = "0.0.1-beta1"
 edition.workspace = true
 license.workspace = true
 description = "Rhai-based scripting layer for grain-agent. Loads user `.rhai` files from disk, executes them in a shared sync-mode `rhai::Engine`, and exposes the tools they register to the agent. Sibling to `grain-script-boa` — both surfaces emit `Vec<Arc<dyn AgentTool>>` and a host crate (e.g. the TUI) can mix them however it likes."

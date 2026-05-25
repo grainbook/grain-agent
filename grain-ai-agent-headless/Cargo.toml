@@ -1,6 +1,6 @@
 [package]
 name = "grain-ai-agent-headless"
-version = "0.1.0"
+version = "0.0.1-beta1"
 edition.workspace = true
 license.workspace = true
 description = "Headless coding-agent toolkit built on grain-agent-core + grain-agent-harness + grain-llm-genai. v1 ships the four read-only filesystem tools and a single-prompt CLI driver (`grain-headless`); write tools / shell / interactive loop / rig-backed semantic search land in follow-up PRs."

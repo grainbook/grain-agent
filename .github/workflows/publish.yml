@@ -1,0 +1,129 @@
+name: publish
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g. 0.0.1-beta1)"
+        required: true
+        type: string
+
+env:
+  CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+jobs:
+  verify-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      # --- resolve the version we're publishing ---
+      - name: Resolve version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VER="${{ github.event.inputs.version }}"
+          else
+            # strip leading 'v' from tag
+            VER="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: $VER"
+
+      # --- assert every workspace member carries the same version ---
+      - name: Check version consistency
+        run: |
+          EXPECT="${{ steps.version.outputs.version }}"
+          mismatch=0
+          for toml in \
+            grain-agent-core/Cargo.toml \
+            grain-agent-harness/Cargo.toml \
+            grain-llm-models/Cargo.toml \
+            grain-llm-genai/Cargo.toml \
+            grain-ai-agent-headless/Cargo.toml \
+            grain-ai-agent-tui/Cargo.toml \
+            grain-script-boa/Cargo.toml \
+            grain-script-rhai/Cargo.toml \
+            grain-pi-compat/Cargo.toml \
+            grain-deepseek-pack/Cargo.toml \
+            lazy-gagent/Cargo.toml \
+            grain-plugin-wasm/Cargo.toml
+          do
+            actual=$(grep '^version' "$toml" | sed 's/.*"\(.*\)".*/\1/')
+            if [ "$actual" != "$EXPECT" ]; then
+              echo "ERROR: $toml has version $actual, expected $EXPECT"
+              mismatch=1
+            fi
+          done
+          exit $mismatch
+
+      # --- dry-run every crate first (fast-fail) ---
+      - name: Dry-run publish (all crates)
+        run: |
+          set -e
+          for crate in \
+            grain-agent-core \
+            grain-llm-models \
+            grain-llm-genai \
+            grain-agent-harness \
+            grain-deepseek-pack \
+            grain-script-boa \
+            grain-script-rhai \
+            grain-ai-agent-headless \
+            grain-plugin-wasm \
+            grain-pi-compat \
+            grain-ai-agent-tui \
+            lazy-gagent
+          do
+            echo "--- dry-run: $crate ---"
+            cargo publish -p "$crate" --dry-run
+            echo "--- $crate dry-run OK ---"
+          done
+
+      # --- publish in dependency order ---
+      # Tier 0: no internal deps
+      - name: Publish grain-agent-core
+        run: cargo publish -p grain-agent-core
+
+      # Tier 1: depend on agent-core (+ llm-models)
+      - name: Publish grain-llm-models
+        run: cargo publish -p grain-llm-models
+
+      - name: Publish grain-llm-genai
+        run: cargo publish -p grain-llm-genai
+
+      - name: Publish grain-agent-harness
+        run: cargo publish -p grain-agent-harness
+
+      - name: Publish grain-deepseek-pack
+        run: cargo publish -p grain-deepseek-pack
+
+      - name: Publish grain-script-boa
+        run: cargo publish -p grain-script-boa
+
+      - name: Publish grain-script-rhai
+        run: cargo publish -p grain-script-rhai
+
+      # Tier 2: depends on all tier-0 + tier-1
+      - name: Publish grain-ai-agent-headless
+        run: cargo publish -p grain-ai-agent-headless
+
+      # Tier 3: depends on headless + tier-1 crates
+      - name: Publish grain-plugin-wasm
+        run: cargo publish -p grain-plugin-wasm
+
+      - name: Publish grain-pi-compat
+        run: cargo publish -p grain-pi-compat
+
+      - name: Publish grain-ai-agent-tui
+        run: cargo publish -p grain-ai-agent-tui
+
+      - name: Publish lazy-gagent
+        run: cargo publish -p lazy-gagent
