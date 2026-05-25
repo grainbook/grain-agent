@@ -1,6 +1,6 @@
 [package]
 name = "design-code-handoff"
-version = "0.1.0"
+version = "0.0.1-beta1"
 edition = "2024"
 description = "WASM v2 orchestration plugin that lets a designer role hand implementation work to a coder role."
 license = "MIT OR Apache-2.0"

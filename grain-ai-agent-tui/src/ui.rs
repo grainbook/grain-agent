@@ -22,7 +22,10 @@ use std::path::Path;
 use std::sync::Arc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{AppState, Focus, Overlay, SLASH_CATALOG, TranscriptKind, TranscriptLine};
+use crate::app::{
+    AppState, Focus, LOGIN_PROVIDERS, LoginStatus, Overlay, SLASH_CATALOG, TranscriptKind,
+    TranscriptLine,
+};
 use crate::theme::{Palette, Theme, ThemeSource};
 use grain_llm_genai::{ProviderKind, ProviderProfile};
 
@@ -678,6 +681,15 @@ fn build_line(
 ) -> Line<'static> {
     let style = style_for_kind(row.kind, palette);
 
+    if let Some(mut sub_spans) = skill_prompt_spans(row, style, palette) {
+        if let Some(s) = selection
+            && let Some((lo, hi)) = s.col_range_for_row(idx, row.text.len())
+        {
+            sub_spans = apply_highlight_to_spans(sub_spans, lo, hi, palette);
+        }
+        return Line::from(sub_spans);
+    }
+
     if let Some(mut sub_spans) = tool_line_spans(row, style, palette) {
         if let Some(s) = selection
             && let Some((lo, hi)) = s.col_range_for_row(idx, row.text.len())
@@ -698,9 +710,10 @@ fn build_line(
         }
         // Apply selection highlight across the sub-spans if needed.
         if let Some(s) = selection
-            && let Some((lo, hi)) = s.col_range_for_row(idx, row.text.len()) {
-                sub_spans = apply_highlight_to_spans(sub_spans, lo, hi, palette);
-            }
+            && let Some((lo, hi)) = s.col_range_for_row(idx, row.text.len())
+        {
+            sub_spans = apply_highlight_to_spans(sub_spans, lo, hi, palette);
+        }
         return Line::from(sub_spans);
     }
 
@@ -717,6 +730,36 @@ fn build_line(
         Span::styled(row.text[lo..hi].to_string(), highlight_style),
         Span::styled(row.text[hi..].to_string(), style),
     ])
+}
+
+fn skill_prompt_spans(
+    row: &crate::app::RenderedRow,
+    base_style: Style,
+    palette: &Palette,
+) -> Option<Vec<Span<'static>>> {
+    if row.kind != TranscriptKind::SkillPrompt {
+        return None;
+    }
+    let Some(start) = row.text.find("/skill:") else {
+        return Some(vec![Span::styled(row.text.clone(), base_style)]);
+    };
+    let rest = &row.text[start..];
+    let label_len = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let end = start + label_len;
+    let mut spans = Vec::new();
+    if start > 0 {
+        spans.push(Span::styled(row.text[..start].to_string(), base_style));
+    }
+    spans.push(Span::styled(
+        row.text[start..end].to_string(),
+        Style::default()
+            .fg(palette.accent)
+            .add_modifier(Modifier::BOLD),
+    ));
+    if end < row.text.len() {
+        spans.push(Span::styled(row.text[end..].to_string(), base_style));
+    }
+    Some(spans)
 }
 
 fn tool_line_spans(
@@ -895,7 +938,7 @@ fn clamp_char_boundary(s: &str, idx: usize) -> usize {
 
 fn style_for_kind(kind: TranscriptKind, palette: &Palette) -> Style {
     match kind {
-        TranscriptKind::UserPrompt => Style::default()
+        TranscriptKind::UserPrompt | TranscriptKind::SkillPrompt => Style::default()
             .fg(palette.success)
             .add_modifier(Modifier::BOLD),
         TranscriptKind::AssistantText => Style::default().fg(palette.fg),
@@ -924,7 +967,7 @@ fn style_for_kind(kind: TranscriptKind, palette: &Palette) -> Style {
 
 fn prefix_for_kind(kind: TranscriptKind) -> &'static str {
     match kind {
-        TranscriptKind::UserPrompt => "› ",
+        TranscriptKind::UserPrompt | TranscriptKind::SkillPrompt => "› ",
         TranscriptKind::AssistantText => "",
         TranscriptKind::ThinkingText => "· ",
         // Tool-call rows already carry their own visual prefix
@@ -1311,6 +1354,7 @@ fn build_footer_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
                 matches!(
                     l.kind,
                     TranscriptKind::UserPrompt
+                        | TranscriptKind::SkillPrompt
                         | TranscriptKind::AssistantText
                         | TranscriptKind::ToolCallEnd
                         | TranscriptKind::ToolCallError
@@ -1467,6 +1511,7 @@ fn draw_overlay(
         Overlay::Skills { .. } => (66, 18),
         Overlay::ThemePicker { .. } => (60, 20),
         Overlay::ProviderPicker { .. } => (72, 18),
+        Overlay::Login { .. } => (78, 22),
         Overlay::ModelPicker { .. } => (72, 22),
         Overlay::Log { .. } => (96, 30),
         Overlay::SessionResume { .. } => (88, 24),
@@ -1544,6 +1589,24 @@ fn draw_overlay(
         }
         Overlay::ProviderPicker { focused } => {
             return draw_provider_picker(frame, inner, *focused, state, palette);
+        }
+        Overlay::Login {
+            focused,
+            selected,
+            status,
+            lines,
+            scroll,
+        } => {
+            return draw_login(
+                frame,
+                inner,
+                *focused,
+                selected.as_deref(),
+                *status,
+                lines,
+                *scroll,
+                palette,
+            );
         }
         Overlay::ModelPicker {
             focused,
@@ -3097,6 +3160,151 @@ fn draw_provider_picker(
             Style::default().fg(palette.muted),
         ))),
         chunks[3],
+    );
+}
+
+fn draw_login(
+    frame: &mut Frame<'_>,
+    popup: Rect,
+    focused: usize,
+    selected: Option<&str>,
+    status: LoginStatus,
+    lines: &[String],
+    scroll: usize,
+    palette: &Palette,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),                            // title
+            Constraint::Length(1),                            // pad
+            Constraint::Length(LOGIN_PROVIDERS.len() as u16), // provider list
+            Constraint::Length(1),                            // pad
+            Constraint::Min(1),                               // progress body
+            Constraint::Length(1),                            // hint
+        ])
+        .split(popup);
+
+    let status_label = match status {
+        LoginStatus::Selecting => "select provider",
+        LoginStatus::Running => "waiting for browser",
+        LoginStatus::Succeeded => "succeeded",
+        LoginStatus::Failed => "failed",
+    };
+    let status_style = match status {
+        LoginStatus::Succeeded => Style::default().fg(palette.success),
+        LoginStatus::Failed => Style::default().fg(palette.error),
+        _ => Style::default().fg(palette.muted),
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "login",
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(status_label, status_style),
+        ])),
+        chunks[0],
+    );
+
+    let provider_lines: Vec<Line> = LOGIN_PROVIDERS
+        .iter()
+        .enumerate()
+        .map(|(i, (kind, label))| {
+            let is_focused = i == focused && status == LoginStatus::Selecting;
+            let is_selected = selected == Some(*kind);
+            let marker = if is_focused {
+                "› "
+            } else if is_selected {
+                "✓ "
+            } else {
+                "  "
+            };
+            let style = if is_focused {
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else if is_selected {
+                Style::default().fg(palette.success)
+            } else {
+                Style::default().fg(palette.fg)
+            };
+            Line::from(vec![
+                Span::styled(marker, style),
+                Span::styled(*kind, style.add_modifier(Modifier::BOLD)),
+                Span::raw("  "),
+                Span::styled(*label, Style::default().fg(palette.muted)),
+            ])
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(Text::from(provider_lines)).wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+
+    let body_area = chunks[4];
+    let [body, sb_area] = if body_area.width > 1 {
+        Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(body_area)
+    } else {
+        [
+            body_area,
+            Rect {
+                width: 0,
+                ..body_area
+            },
+        ]
+    };
+    let rendered_lines: Vec<Line> = if lines.is_empty() {
+        vec![Line::from(Span::styled(
+            "(no login output yet)",
+            Style::default().fg(palette.muted),
+        ))]
+    } else {
+        lines
+            .iter()
+            .map(|line| {
+                let style = if line.contains("failed") || line.contains("Unknown") {
+                    Style::default().fg(palette.error)
+                } else if line.contains("succeeded") {
+                    Style::default().fg(palette.success)
+                } else {
+                    Style::default().fg(palette.fg)
+                };
+                Line::from(Span::styled(line.clone(), style))
+            })
+            .collect()
+    };
+    let paragraph = Paragraph::new(Text::from(rendered_lines)).wrap(Wrap { trim: false });
+    let visible = body.height as usize;
+    let total_rows = paragraph.line_count(body.width).max(1);
+    let max_scroll = total_rows.saturating_sub(visible);
+    let start = scroll.min(max_scroll);
+    frame.render_widget(
+        paragraph.scroll((start.min(u16::MAX as usize) as u16, 0)),
+        body,
+    );
+    if total_rows > visible && sb_area.width > 0 {
+        let mut sb_state = ScrollbarState::new(total_rows)
+            .position(start)
+            .viewport_content_length(visible.min(total_rows));
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight).style(palette.muted);
+        frame.render_stateful_widget(scrollbar, sb_area, &mut sb_state);
+    }
+
+    let hint = match status {
+        LoginStatus::Selecting => "↑↓ choose · Enter open browser · Esc close",
+        LoginStatus::Running => "waiting for browser callback · PgUp/PgDn scroll · Esc close",
+        LoginStatus::Succeeded | LoginStatus::Failed => "Enter close · Esc close",
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            hint,
+            Style::default().fg(palette.muted),
+        ))),
+        chunks[5],
     );
 }
 

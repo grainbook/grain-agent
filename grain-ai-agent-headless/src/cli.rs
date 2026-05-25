@@ -318,9 +318,7 @@ pub async fn run(args: Args) -> Result<(), CliError> {
             ProviderAuth::AnthropicOauth => {
                 "run `grain-headless --login anthropic` first".to_string()
             }
-            ProviderAuth::OpenAiOauth => {
-                "run `grain-headless --login openai` first".to_string()
-            }
+            ProviderAuth::OpenAiOauth => "run `grain-headless --login openai` first".to_string(),
             ProviderAuth::ApiKey { env } => {
                 format!("env var `{env}` is empty or unset")
             }
@@ -654,10 +652,7 @@ async fn run_interactive_loop(agent: &Agent, ctx: &InteractiveContext) -> Result
 ///   lazily at request time inside the auth resolver.
 fn profile_has_credentials(p: &ProviderProfile) -> bool {
     match &p.auth {
-        ProviderAuth::ApiKey { env } => std::env::var(env)
-            .ok()
-            .filter(|v| !v.is_empty())
-            .is_some(),
+        ProviderAuth::ApiKey { env } => std::env::var(env).ok().filter(|v| !v.is_empty()).is_some(),
         ProviderAuth::AnthropicOauth => grain_llm_genai::oauth::load_tokens("anthropic")
             .ok()
             .flatten()

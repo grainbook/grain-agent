@@ -1,4 +1,4 @@
-//! Plugin spec file — `<workspace>/.grain/plugin-spec.toml`.
+//! Plugin spec file — `<workspace>/.grain/plugin.toml`.
 //!
 //! Declarative plugin manifest read at startup. Each entry says
 //! "I want plugin `<name>` available, sourced from `<src>`". The
@@ -13,7 +13,7 @@
 //! else.
 //!
 //! ```toml
-//! # <workspace>/.grain/plugin-spec.toml
+//! # <workspace>/.grain/plugin.toml
 //!
 //! [[plugin]]
 //! name = "rust-helper"
@@ -137,7 +137,7 @@ pub fn detect_source_kind(src: &str) -> SourceKind {
     }
 }
 
-/// Read + parse `plugin-spec.toml`. Missing file → `Ok(empty spec)`
+/// Read + parse `plugin.toml`. Missing file → `Ok(empty spec)`
 /// so callers can use the path as "create on first declared plugin".
 /// Malformed TOML returns the parser error verbatim.
 pub fn load_plugin_spec(path: &Path) -> std::io::Result<PluginSpecFile> {
@@ -152,9 +152,9 @@ pub fn load_plugin_spec(path: &Path) -> std::io::Result<PluginSpecFile> {
         .map_err(|e| std::io::Error::other(format!("spec parse: {e}")))
 }
 
-/// Default location for the spec file: `<workspace>/.grain/plugin-spec.toml`.
+/// Default location for the spec file: `<workspace>/.grain/plugin.toml`.
 pub fn default_spec_path(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(".grain").join("plugin-spec.toml")
+    workspace_root.join(".grain").join("plugin.toml")
 }
 
 /// Outcome of [`sync_plugins`]. Each plugin name lands in exactly
@@ -194,9 +194,9 @@ impl SyncReport {
 /// the engine never auto-removes or overwrites user data.
 ///
 /// `base_dir` anchors **relative** local `src` paths — typically
-/// the directory containing `plugin-spec.toml` (i.e.
+/// the directory containing `plugin.toml` (i.e.
 /// `<workspace>/.grain/`). With that anchor, `src = "../lazy-gagent"`
-/// in a spec stored at `<workspace>/.grain/plugin-spec.toml`
+/// in a spec stored at `<workspace>/.grain/plugin.toml`
 /// resolves to `<workspace>/lazy-gagent` — the intuitive reading.
 /// Absolute paths and `~/...` paths ignore the anchor.
 ///
@@ -459,7 +459,7 @@ rev = "main"
     fn default_spec_path_under_grain() {
         assert_eq!(
             default_spec_path(Path::new("/workspace")),
-            PathBuf::from("/workspace/.grain/plugin-spec.toml")
+            PathBuf::from("/workspace/.grain/plugin.toml")
         );
     }
 
@@ -590,7 +590,7 @@ rev = "main"
     #[test]
     fn sync_resolves_relative_src_against_base_dir_not_cwd() {
         let tmp = tempfile::tempdir().unwrap();
-        // Mirror the production layout: workspace/.grain/plugin-spec.toml,
+        // Mirror the production layout: workspace/.grain/plugin.toml,
         // source plugin at workspace/lazy-gagent/.
         let workspace = tmp.path().join("workspace");
         let grain = workspace.join(".grain");

@@ -21,11 +21,11 @@
 //! session_dir = ".grain/sessions" # base dir for JSONL sessions; --session overrides
 //!
 //! # Declarative plugin set. Equivalent to a hand-edited
-//! # plugin-spec.toml entry. The runtime plugin manager
+//! # plugin.toml entry. The runtime plugin manager
 //! # (lazy_install / lazy_remove) writes to .grain/plugin-lock.toml
 //! # instead so it never has to rewrite this file (no comment-loss /
 //! # ordering churn). Boot-time spec = union(config.plugin,
-//! # plugin-lock.plugin, legacy plugin-spec.toml).
+//! # plugin-lock.plugin, legacy plugin.toml).
 //! [[plugin]]
 //! name = "lazy-gagent"
 //! src  = "../lazy-gagent"
@@ -83,7 +83,7 @@ pub struct ConfigFile {
     /// transcript. Same shape as [`Self::fold_tool_calls`].
     pub fold_thinking: Option<bool>,
     /// Declarative plugin entries — same shape as
-    /// `plugin-spec.toml`'s `[[plugin]]` blocks. Authoritative when
+    /// `plugin.toml`'s `[[plugin]]` blocks. Authoritative when
     /// the same `name` appears in both files; the runtime plugin
     /// manager writes to `plugin-lock.toml` (a separate file) to
     /// keep this one's comments / ordering intact.

@@ -1,5 +1,5 @@
 name = "design-code-handoff"
-version = "0.1.0"
+version = "0.0.1-beta1"
 description = "Designer -> coder role handoff using WASM v2 orchestration."
 
 [wasm]

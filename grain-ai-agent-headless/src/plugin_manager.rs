@@ -259,7 +259,7 @@ mod tests {
         let tmp = make_workspace();
         let grain = tmp.path().join(".grain");
         std::fs::create_dir_all(&grain).unwrap();
-        let spec_path = grain.join("plugin-spec.toml");
+        let spec_path = grain.join("plugin.toml");
         let plugins_dir = grain.join("plugins");
 
         let source = tmp.path().join("source-plugin");
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn install_refuses_duplicate_name() {
         let tmp = make_workspace();
-        let spec_path = tmp.path().join(".grain").join("plugin-spec.toml");
+        let spec_path = tmp.path().join(".grain").join("plugin.toml");
         write_file(
             &spec_path,
             "[[plugin]]\nname = \"x\"\nsrc = \"/whatever\"\n",
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn install_rejects_bad_names() {
         let tmp = make_workspace();
-        let spec_path = tmp.path().join("plugin-spec.toml");
+        let spec_path = tmp.path().join("plugin.toml");
         let plugins_dir = tmp.path().join("plugins");
         for bad in ["", "a/b", "..", "..foo"] {
             let err = install(&spec_path, &plugins_dir, bad, "/whatever", None)
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn remove_drops_spec_entry_and_keeps_files_by_default() {
         let tmp = make_workspace();
-        let spec_path = tmp.path().join(".grain").join("plugin-spec.toml");
+        let spec_path = tmp.path().join(".grain").join("plugin.toml");
         let plugins_dir = tmp.path().join(".grain").join("plugins");
         write_file(
             &spec_path,
@@ -349,7 +349,7 @@ mod tests {
     #[test]
     fn remove_with_delete_files_also_tears_down_dir() {
         let tmp = make_workspace();
-        let spec_path = tmp.path().join(".grain").join("plugin-spec.toml");
+        let spec_path = tmp.path().join(".grain").join("plugin.toml");
         let plugins_dir = tmp.path().join(".grain").join("plugins");
         write_file(
             &spec_path,
@@ -370,7 +370,7 @@ mod tests {
         // `plugins_dir`, so `remove(.., delete_files=true)` only
         // edits the spec. The source tree stays intact.
         let tmp = make_workspace();
-        let spec_path = tmp.path().join(".grain").join("plugin-spec.toml");
+        let spec_path = tmp.path().join(".grain").join("plugin.toml");
         let plugins_dir = tmp.path().join(".grain").join("plugins");
         let source = tmp.path().join("source-x");
         write_file(&source.join("plugin.toml"), "name = \"x\"\n");
@@ -398,7 +398,7 @@ mod tests {
         // from before the spec switched to virtual local installs.
         // `remove(.., true)` should still tear that link down.
         let tmp = make_workspace();
-        let spec_path = tmp.path().join(".grain").join("plugin-spec.toml");
+        let spec_path = tmp.path().join(".grain").join("plugin.toml");
         let plugins_dir = tmp.path().join(".grain").join("plugins");
         let source = tmp.path().join("legacy-source");
         write_file(&source.join("plugin.toml"), "name = \"legacy\"\n");
@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn remove_refuses_unknown_name() {
         let tmp = make_workspace();
-        let spec_path = tmp.path().join(".grain").join("plugin-spec.toml");
+        let spec_path = tmp.path().join(".grain").join("plugin.toml");
         let plugins_dir = tmp.path().join(".grain").join("plugins");
         write_file(&spec_path, "[[plugin]]\nname = \"x\"\nsrc = \"/_\"\n");
         let err = remove(&spec_path, &plugins_dir, "y", false).err().unwrap();
@@ -440,7 +440,7 @@ mod tests {
         // The TUI's `lazy_update` host fn can layer spec-aware
         // semantics on top if it wants a friendlier message.
         let tmp = make_workspace();
-        let spec_path = tmp.path().join(".grain").join("plugin-spec.toml");
+        let spec_path = tmp.path().join(".grain").join("plugin.toml");
         let plugins_dir = tmp.path().join(".grain").join("plugins");
         let source = tmp.path().join("src");
         write_file(&source.join("plugin.toml"), "name = \"linked\"\n");
@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn install_then_remove_round_trips_spec() {
         let tmp = make_workspace();
-        let spec_path = tmp.path().join(".grain").join("plugin-spec.toml");
+        let spec_path = tmp.path().join(".grain").join("plugin.toml");
         let plugins_dir = tmp.path().join(".grain").join("plugins");
         let source = tmp.path().join("src");
         write_file(&source.join("plugin.toml"), "name = \"roundtrip\"\n");

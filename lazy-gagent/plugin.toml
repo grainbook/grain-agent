@@ -1,6 +1,6 @@
 name = "lazy-gagent"
 version = "0.1.0"
-description = "Plugin manager — bootstrap target referenced by plugin-spec.toml. Ships install / update / remove tools and extends the /plugins overlay with interactive management."
+description = "Plugin manager — bootstrap target referenced by plugin.toml. Ships install / update / remove tools and extends the /plugins overlay with interactive management."
 author = "grain-agent"
 
 # Plugin-contributed UI extensions for the `/plugins` overlay.

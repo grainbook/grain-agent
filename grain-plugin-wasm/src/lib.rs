@@ -106,7 +106,7 @@ pub struct PluginState {
     /// Optional sink for `log` host imports. When `None`, the host
     /// falls back to `eprintln!` — see [`LogSink`].
     log_sink: Option<LogSink>,
-    /// Per-plugin env vars (from plugin.toml + plugin-spec.toml).
+    /// Per-plugin env vars (from plugin.toml + plugin.toml).
     env_map: HashMap<String, String>,
 }
 
@@ -417,7 +417,7 @@ struct PluginEntry {
     component: Component,
     capabilities: Capabilities,
     plugin_name: String,
-    /// Per-plugin env vars (merged from plugin.toml + plugin-spec.toml).
+    /// Per-plugin env vars (merged from plugin.toml + plugin.toml).
     env_map: HashMap<String, String>,
 }
 

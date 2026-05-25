@@ -139,10 +139,9 @@ impl GenaiStreamBuilder {
     /// `openai-compat` profiles if you need multiple-account semantics
     /// against the same vendor.
     ///
-    /// OAuth profiles ([`ProviderAuth::AnthropicOauth`]) are accepted
-    /// but skipped here — Phase 2 of provider work will plug them in
-    /// via a refresh-aware auth path. Callers can list them in their
-    /// UIs today; trying to actually use one returns a clear error.
+    /// OAuth profiles are wired through a refresh-aware auth path.
+    /// Callers still need to run the matching browser login flow first
+    /// so the token store contains usable credentials.
     pub fn with_provider_profiles(mut self, profiles: &[ProviderProfile]) -> Self {
         for p in profiles {
             match &p.auth {
@@ -171,14 +170,16 @@ impl GenaiStreamBuilder {
                 }
                 ProviderAuth::AnthropicOauth => {
                     if let Some(config) = config_for_provider("anthropic") {
+                        let token_profile = config.provider.clone();
                         self.oauth_map
-                            .insert("anthropic".to_string(), (p.name.clone(), config));
+                            .insert("anthropic".to_string(), (token_profile, config));
                     }
                 }
                 ProviderAuth::OpenAiOauth => {
                     if let Some(config) = config_for_provider("openai") {
+                        let token_profile = config.provider.clone();
                         self.oauth_map
-                            .insert("openai".to_string(), (p.name.clone(), config));
+                            .insert("openai".to_string(), (token_profile, config));
                     }
                 }
             }
@@ -242,9 +243,9 @@ impl GenaiStreamBuilder {
                         get_valid_access_token_with_config_sync(config, profile_name)
                             .ok()
                             .flatten()
-                    {
-                        return Ok(Some(AuthData::from_single(token)));
-                    }
+                {
+                    return Ok(Some(AuthData::from_single(token)));
+                }
                 // 4. Fall through to genai's default lookup by returning None.
                 Ok(None)
             };
@@ -320,7 +321,8 @@ fn is_loopback_url(raw: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_loopback_url;
+    use super::{GenaiStreamBuilder, is_loopback_url};
+    use crate::provider::{ProviderAuth, ProviderKind, ProviderProfile};
 
     #[test]
     fn loopback_url_detection_covers_local_provider_hosts() {
@@ -328,5 +330,21 @@ mod tests {
         assert!(is_loopback_url("http://localhost:1234/v1/"));
         assert!(is_loopback_url("http://[::1]:1234/v1/"));
         assert!(!is_loopback_url("https://api.example.com/v1/"));
+    }
+
+    #[test]
+    fn oauth_profiles_read_tokens_from_provider_store() {
+        let profiles = vec![ProviderProfile {
+            name: "chatgpt-pro".to_string(),
+            kind: ProviderKind::OpenAi,
+            base_url: None,
+            model: "openai/gpt-5".to_string(),
+            auth: ProviderAuth::OpenAiOauth,
+        }];
+
+        let builder = GenaiStreamBuilder::new().with_provider_profiles(&profiles);
+        let (token_profile, config) = builder.oauth_map.get("openai").unwrap();
+        assert_eq!(token_profile, "openai");
+        assert_eq!(config.provider, "openai");
     }
 }

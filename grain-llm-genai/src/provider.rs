@@ -5,8 +5,8 @@
 //! authenticate. Profiles let the user have e.g. `openai-work` and
 //! `openai-personal` pointing at the same vendor with different
 //! `OPENAI_API_KEY_*` env vars, switch between MiniMax / DeepSeek /
-//! Kimi at runtime, or (Phase 2) attach a Claude.ai Pro/Max OAuth
-//! identity instead of an API key.
+//! Kimi at runtime, or attach a Claude.ai / ChatGPT OAuth identity
+//! instead of an API key.
 //!
 //! Profile files live at:
 //!
@@ -78,8 +78,9 @@ pub enum ProviderAuth {
 }
 
 impl ProviderAuth {
-    /// Whether the profile is ready to actually drive an agent
-    /// today. OAuth variants are not ready yet (Phase 2).
+    /// Whether this auth entry is immediately usable without consulting
+    /// the OAuth token store. Callers that accept OAuth profiles must
+    /// separately check whether tokens have already been persisted.
     pub fn is_usable(&self) -> bool {
         matches!(self, ProviderAuth::ApiKey { .. })
     }
@@ -245,11 +246,12 @@ pub fn profile_from_entry(entry: ProfileEntry) -> Result<ProviderProfile, String
             // SAFETY: called during single-threaded boot (profile
             // loading), before any other threads read the env.
             if let Some(val) = &entry.auth.value
-                && !val.is_empty() {
-                    unsafe {
-                        std::env::set_var(&env, val);
-                    }
+                && !val.is_empty()
+            {
+                unsafe {
+                    std::env::set_var(&env, val);
                 }
+            }
             ProviderAuth::ApiKey { env }
         }
         "anthropic_oauth" => ProviderAuth::AnthropicOauth,
@@ -378,7 +380,7 @@ auth = { kind = "api_key", value = "sk-no-env" }
     }
 
     #[test]
-    fn loads_oauth_profile_even_though_login_not_wired() {
+    fn loads_oauth_profile_but_requires_token_store_readiness() {
         let tmp = tempfile::tempdir().unwrap();
         let path = write_providers(
             tmp.path(),

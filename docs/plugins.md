@@ -4,7 +4,7 @@ A Neovim/lazy.nvim-style plugin layer for the grain agent. Drop a directory unde
 
 中文版：[zh/plugins.md](./zh/plugins.md)。
 
-> **Declarative plugin entries belong in [`config.toml`](./config.md#consolidated-plugin--provider-declarations)** under `[[plugin]]` blocks. The legacy `<workspace>/.grain/plugin-spec.toml` is still read for back-compat, and runtime install / remove operations write to a separate `plugin-lock.toml` so they never trample your hand-edited config. See the config-file doc for the merge rules.
+> **Declarative plugin entries belong in [`config.toml`](./config.md#consolidated-plugin--provider-declarations)** under `[[plugin]]` blocks. The legacy `<workspace>/.grain/plugin.toml` is still read for back-compat, and runtime install / remove operations write to a separate `plugin-lock.toml` so they never trample your hand-edited config. See the config-file doc for the merge rules.
 
 ---
 
@@ -43,12 +43,12 @@ The default directory `<workspace>/.grain/plugins/` can be overridden with `--pl
 
 ---
 
-## Declarative install: `plugin-spec.toml`
+## Declarative install: `plugin.toml`
 
-Hand-installing every plugin by `cd .grain/plugins && git clone …` works but doesn't survive moving to a new machine. The engine reads an optional `<workspace>/.grain/plugin-spec.toml` at boot and **fills in any declared plugin whose directory is missing**.
+Hand-installing every plugin by `cd .grain/plugins && git clone …` works but doesn't survive moving to a new machine. The engine reads an optional `<workspace>/.grain/plugin.toml` at boot and **fills in any declared plugin whose directory is missing**.
 
 ```toml
-# <workspace>/.grain/plugin-spec.toml
+# <workspace>/.grain/plugin.toml
 
 [[plugin]]
 name = "rust-helper"
@@ -233,7 +233,7 @@ Inside the TUI:
 | **B-1** | Scripts merged into one Boa worker | ✓ Shipped |
 | **B-2** | `/plugins` overlay UI | ✓ Shipped |
 | **B-3** | `prompts/*.md` appended to system prompt | ✓ Shipped |
-| **C-0** | `plugin-spec.toml` declarative install (git + local symlink) | ✓ Shipped |
+| **C-0** | `plugin.toml` declarative install (git + local symlink) | ✓ Shipped |
 | **C-1** | `lazy-gagent` manager plugin: agent-callable install / update / remove tools | Planned |
 
 ---

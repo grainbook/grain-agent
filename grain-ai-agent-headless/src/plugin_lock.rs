@@ -1,7 +1,7 @@
 //! Plugin lock file — `<workspace>/.grain/plugin-lock.toml`.
 //!
 //! Auto-managed by the runtime plugin manager (`lazy_install` /
-//! `lazy_remove`). Same TOML shape as the legacy `plugin-spec.toml`
+//! `lazy_remove`). Same TOML shape as the legacy `plugin.toml`
 //! (a `[[plugin]]` array). Splitting it out means user-authored
 //! declarations in `config.toml` are never touched by the engine —
 //! all runtime mutations land here, so the user's hand-written
@@ -13,7 +13,7 @@
 //!
 //! 1. `config.toml`'s `[[plugin]]` blocks (declarative; user-authored)
 //! 2. `plugin-lock.toml`'s `[[plugin]]` blocks (auto-managed)
-//! 3. `plugin-spec.toml`'s `[[plugin]]` blocks (legacy; deprecated)
+//! 3. `plugin.toml`'s `[[plugin]]` blocks (legacy; deprecated)
 //!
 //! …with first-source-wins on `name` collision. Removing a plugin
 //! that lives in `config.toml` is refused — the user must edit
@@ -31,7 +31,7 @@ pub fn default_lock_path(workspace_root: &Path) -> PathBuf {
 }
 
 /// Load (or default-empty) the lock file. Same wire format as
-/// `plugin-spec.toml` — a `[[plugin]]` array. Missing file →
+/// `plugin.toml` — a `[[plugin]]` array. Missing file →
 /// `Ok(empty)`.
 pub fn load_plugin_lock(path: &Path) -> std::io::Result<PluginSpecFile> {
     load_plugin_spec(path)
@@ -59,7 +59,7 @@ pub enum PluginOrigin {
     /// Added at runtime by `lazy_install`; lives in
     /// `plugin-lock.toml`. Mutable by `lazy_remove`.
     Lock,
-    /// Pre-consolidation `plugin-spec.toml` entry. Deprecated; the
+    /// Pre-consolidation `plugin.toml` entry. Deprecated; the
     /// engine still reads it and `lazy_remove` still mutates it
     /// for back-compat. Boot emits a one-line warning suggesting
     /// migration.
@@ -70,7 +70,7 @@ pub enum PluginOrigin {
 /// union of config + lock + legacy spec, with first-source-wins on
 /// `name` collisions. Returns the merged spec plus a list of
 /// human-facing warnings (e.g. "found N entries in legacy
-/// plugin-spec.toml; consider migrating to config.toml").
+/// plugin.toml; consider migrating to config.toml").
 pub fn effective_spec(workspace_root: &Path, config: &ConfigFile) -> (PluginSpecFile, Vec<String>) {
     let mut out = PluginSpecFile::default();
     let mut warnings = Vec::new();
@@ -92,7 +92,7 @@ pub fn effective_spec(workspace_root: &Path, config: &ConfigFile) -> (PluginSpec
         }
     }
 
-    // 3. plugin-spec.toml — legacy.
+    // 3. plugin.toml — legacy.
     let legacy_path = default_spec_path(workspace_root);
     if legacy_path.exists()
         && let Ok(legacy) = load_plugin_spec(&legacy_path)

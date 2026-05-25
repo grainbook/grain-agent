@@ -1934,6 +1934,7 @@ name = "grain-ai-agent-tui"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "async-trait",
  "clap",
  "crossterm 0.28.1",
  "futures",

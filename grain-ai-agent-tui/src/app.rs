@@ -64,6 +64,15 @@ pub enum Overlay {
     ProviderPicker {
         focused: usize,
     },
+    /// OAuth login picker/progress panel. `focused` selects the provider
+    /// before login starts; progress and terminal status append to `lines`.
+    Login {
+        focused: usize,
+        selected: Option<String>,
+        status: LoginStatus,
+        lines: Vec<String>,
+        scroll: usize,
+    },
     /// Model picker — `focused` is the index into the filtered list of
     /// models returned by the worker for the current provider. Same key
     /// model as ThemePicker / ProviderPicker. `query` is a live search
@@ -188,6 +197,14 @@ pub enum Overlay {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginStatus {
+    Selecting,
+    Running,
+    Succeeded,
+    Failed,
+}
+
 /// Where a [`Overlay::SessionLockConflict`] originated. Drives the
 /// choice list (boot offers `Quit`, resume offers `Cancel`) and the
 /// rendered title.
@@ -255,6 +272,7 @@ struct ActiveToolDisplay {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranscriptKind {
     UserPrompt,
+    SkillPrompt,
     AssistantText,
     ThinkingText,
     ToolCallStart,
@@ -536,7 +554,7 @@ pub enum Command {
     /// call every time the user opens the overlay.
     ReturnPlugins,
     /// `/install <name> <src> [rev]` — append a `[[plugin]]` block to
-    /// `<workspace>/.grain/plugin-spec.toml` and sync. Worker emits
+    /// `<workspace>/.grain/plugin.toml` and sync. Worker emits
     /// a [`TuiEvent::Info`] on success or
     /// [`TuiEvent::AgentWorkerError`] on failure.
     InstallPlugin {
@@ -578,7 +596,9 @@ pub enum Command {
     /// (`"anthropic"` or `"openai"`). The worker will emit
     /// `TuiEvent::Info` for progress and a terminal
     /// `OauthLoginSucceeded` / `OauthLoginFailed`.
-    OauthLogin { provider_kind: String },
+    OauthLogin {
+        provider_kind: String,
+    },
     Quit,
 }
 
@@ -764,7 +784,7 @@ pub(crate) const SLASH_CATALOG: &[CommandCatalogItem] = &[
     },
     CommandCatalogItem {
         trigger: "/install",
-        description: "/install <name> <src> [rev] — add to plugin-spec.toml + sync",
+        description: "/install <name> <src> [rev] — add to plugin.toml + sync",
     },
     CommandCatalogItem {
         trigger: "/update",
@@ -1210,6 +1230,49 @@ pub(crate) fn filter_models(models: &[(String, String)], query: &str) -> Vec<(St
             .then_with(|| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()))
     });
     filtered
+}
+
+pub(crate) const LOGIN_PROVIDERS: [(&str, &str); 2] = [
+    ("openai", "OpenAI ChatGPT/Codex"),
+    ("anthropic", "Anthropic Claude"),
+];
+
+fn login_provider_index(provider: &str) -> usize {
+    LOGIN_PROVIDERS
+        .iter()
+        .position(|(kind, _)| *kind == provider)
+        .unwrap_or(0)
+}
+
+fn new_login_overlay(selected_provider: Option<&str>) -> Overlay {
+    Overlay::Login {
+        focused: selected_provider.map(login_provider_index).unwrap_or(0),
+        selected: selected_provider.map(ToString::to_string),
+        status: LoginStatus::Selecting,
+        lines: vec![
+            "Select an OAuth provider and press Enter to open the browser.".to_string(),
+            "Use Up/Down to choose; Esc closes this panel.".to_string(),
+        ],
+        scroll: 0,
+    }
+}
+
+fn login_overlay_running(provider: &str) -> Overlay {
+    Overlay::Login {
+        focused: login_provider_index(provider),
+        selected: Some(provider.to_string()),
+        status: LoginStatus::Running,
+        lines: vec![format!(
+            "Starting OAuth login for '{provider}'. The browser will open shortly."
+        )],
+        scroll: 0,
+    }
+}
+
+fn parse_login_progress(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix("[login:")?;
+    let (provider, message) = rest.split_once("] ")?;
+    Some((provider, message))
 }
 
 impl AppState {
@@ -2045,6 +2108,23 @@ impl AppState {
                 Vec::new()
             }
             TuiEvent::Info(text) => {
+                if let Some((provider, message)) = parse_login_progress(&text)
+                    && let Some(Overlay::Login {
+                        selected,
+                        status,
+                        lines,
+                        scroll,
+                        ..
+                    }) = &mut self.overlay
+                {
+                    if selected.is_none() {
+                        *selected = Some(provider.to_string());
+                    }
+                    *status = LoginStatus::Running;
+                    lines.push(message.to_string());
+                    *scroll = u16::MAX as usize;
+                    return Vec::new();
+                }
                 self.push(TranscriptKind::Info, text);
                 Vec::new()
             }
@@ -2191,6 +2271,8 @@ impl AppState {
                     *scroll = scroll.saturating_sub(amount as usize);
                 } else if let Some(Overlay::Skills { scroll, .. }) = &mut self.overlay {
                     *scroll = scroll.saturating_sub(amount as usize);
+                } else if let Some(Overlay::Login { scroll, .. }) = &mut self.overlay {
+                    *scroll = scroll.saturating_sub(amount as usize);
                 } else {
                     self.scroll_up(amount as usize);
                 }
@@ -2202,6 +2284,8 @@ impl AppState {
                 } else if let Some(Overlay::Doctor { scroll, .. }) = &mut self.overlay {
                     *scroll = scroll.saturating_add(amount as usize);
                 } else if let Some(Overlay::Skills { scroll, .. }) = &mut self.overlay {
+                    *scroll = scroll.saturating_add(amount as usize);
+                } else if let Some(Overlay::Login { scroll, .. }) = &mut self.overlay {
                     *scroll = scroll.saturating_add(amount as usize);
                 } else {
                     self.scroll_down(amount as usize);
@@ -2339,6 +2423,22 @@ impl AppState {
             TuiEvent::OauthLoginSucceeded { provider } => {
                 // Tokens are now on disk; the next time the user opens
                 // the provider picker the gate will see them as present.
+                if let Some(Overlay::Login {
+                    selected,
+                    status,
+                    lines,
+                    scroll,
+                    ..
+                }) = &mut self.overlay
+                {
+                    *selected = Some(provider.clone());
+                    *status = LoginStatus::Succeeded;
+                    lines.push(format!(
+                        "OAuth login succeeded for '{provider}'. Press Enter or Esc to close."
+                    ));
+                    *scroll = u16::MAX as usize;
+                    return Vec::new();
+                }
                 self.push(
                     TranscriptKind::Info,
                     format!("(OAuth login succeeded for '{provider}' — you can now select this profile via /provider)"),
@@ -2346,6 +2446,21 @@ impl AppState {
                 Vec::new()
             }
             TuiEvent::OauthLoginFailed { provider, error } => {
+                if let Some(Overlay::Login {
+                    selected,
+                    status,
+                    lines,
+                    scroll,
+                    ..
+                }) = &mut self.overlay
+                {
+                    *selected = Some(provider.clone());
+                    *status = LoginStatus::Failed;
+                    lines.push(format!("OAuth login failed for '{provider}': {error}"));
+                    lines.push("Press Enter or Esc to close.".to_string());
+                    *scroll = u16::MAX as usize;
+                    return Vec::new();
+                }
                 self.push(
                     TranscriptKind::Error,
                     format!("(OAuth login failed for '{provider}': {error})"),
@@ -2438,6 +2553,9 @@ impl AppState {
         }
         if matches!(self.overlay, Some(Overlay::ProviderPicker { .. })) {
             return self.on_key_provider_picker(key);
+        }
+        if matches!(self.overlay, Some(Overlay::Login { .. })) {
+            return self.on_key_login(key);
         }
         if matches!(self.overlay, Some(Overlay::ModelPicker { .. })) {
             return self.on_key_model_picker(key);
@@ -2662,6 +2780,7 @@ impl AppState {
                 let display_line = self.input.trim().to_string();
                 let line = self.expand_input_for_submission();
                 let is_skill_invocation = !self.skill_tokens.is_empty();
+                let skill_label = self.skill_tokens.first().map(|token| token.label.clone());
                 if line.is_empty() {
                     return Vec::new();
                 }
@@ -2672,7 +2791,14 @@ impl AppState {
                 self.palette_focused = 0;
                 self.history_cursor = None;
                 self.history_draft.clear();
-                self.push(TranscriptKind::UserPrompt, display_line.clone());
+                if is_skill_invocation {
+                    self.push(TranscriptKind::SkillPrompt, display_line.clone());
+                    if let Some(label) = skill_label {
+                        self.push(TranscriptKind::Info, format!("(skill: {label} injected)"));
+                    }
+                } else {
+                    self.push(TranscriptKind::UserPrompt, display_line.clone());
+                }
                 if !is_skill_invocation && let Some(stripped) = display_line.strip_prefix('/') {
                     return self.dispatch_slash(stripped);
                 }
@@ -2811,6 +2937,82 @@ impl AppState {
                 self.set_overlay(None);
                 vec![Command::ApplyProvider(chosen)]
             }
+            _ => Vec::new(),
+        }
+    }
+
+    fn on_key_login(&mut self, key: KeyEvent) -> Vec<Command> {
+        let Some(Overlay::Login {
+            focused,
+            selected,
+            status,
+            lines,
+            scroll,
+        }) = &mut self.overlay
+        else {
+            return Vec::new();
+        };
+        let last = LOGIN_PROVIDERS.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Up => {
+                if *status == LoginStatus::Selecting {
+                    *focused = focused.saturating_sub(1);
+                } else {
+                    *scroll = scroll.saturating_sub(1);
+                }
+                Vec::new()
+            }
+            KeyCode::Down => {
+                if *status == LoginStatus::Selecting {
+                    *focused = (*focused + 1).min(last);
+                } else {
+                    *scroll = scroll.saturating_add(1);
+                }
+                Vec::new()
+            }
+            KeyCode::PageUp => {
+                *scroll = scroll.saturating_sub(12);
+                Vec::new()
+            }
+            KeyCode::PageDown => {
+                *scroll = scroll.saturating_add(12);
+                Vec::new()
+            }
+            KeyCode::Home => {
+                if *status == LoginStatus::Selecting {
+                    *focused = 0;
+                } else {
+                    *scroll = 0;
+                }
+                Vec::new()
+            }
+            KeyCode::End => {
+                if *status == LoginStatus::Selecting {
+                    *focused = last;
+                } else {
+                    *scroll = u16::MAX as usize;
+                }
+                Vec::new()
+            }
+            KeyCode::Enter => match status {
+                LoginStatus::Selecting => {
+                    let provider = LOGIN_PROVIDERS[*focused].0.to_string();
+                    *selected = Some(provider.clone());
+                    *status = LoginStatus::Running;
+                    lines.push(format!(
+                        "Starting OAuth login for '{provider}'. The browser will open shortly."
+                    ));
+                    *scroll = u16::MAX as usize;
+                    vec![Command::OauthLogin {
+                        provider_kind: provider,
+                    }]
+                }
+                LoginStatus::Succeeded | LoginStatus::Failed => {
+                    self.set_overlay(None);
+                    Vec::new()
+                }
+                LoginStatus::Running => Vec::new(),
+            },
             _ => Vec::new(),
         }
     }
@@ -3626,25 +3828,20 @@ impl AppState {
                 let mut parts = rest.split_whitespace();
                 let _ = parts.next(); // skip "login"
                 let Some(provider_kind) = parts.next() else {
-                    self.push(
-                        TranscriptKind::Info,
-                        "(usage: /login <anthropic|openai>)".into(),
-                    );
+                    self.set_overlay(Some(new_login_overlay(None)));
                     return Vec::new();
                 };
                 if provider_kind != "anthropic" && provider_kind != "openai" {
-                    self.push(
-                        TranscriptKind::Info,
-                        format!(
-                            "(unknown OAuth provider '{provider_kind}'; known providers: anthropic, openai)"
-                        ),
-                    );
+                    let mut overlay = new_login_overlay(None);
+                    if let Overlay::Login { lines, .. } = &mut overlay {
+                        lines.push(format!(
+                            "Unknown OAuth provider '{provider_kind}'. Choose anthropic or openai."
+                        ));
+                    }
+                    self.set_overlay(Some(overlay));
                     return Vec::new();
                 }
-                self.push(
-                    TranscriptKind::Info,
-                    format!("(starting OAuth login for '{provider_kind}' — browser will open…)"),
-                );
+                self.set_overlay(Some(login_overlay_running(provider_kind)));
                 vec![Command::OauthLogin {
                     provider_kind: provider_kind.into(),
                 }]
@@ -3854,7 +4051,10 @@ impl AppState {
                 line.text.push_str(canonical);
                 return;
             }
-            if matches!(line.kind, TranscriptKind::UserPrompt) || is_tool_call_terminator(line.kind)
+            if matches!(
+                line.kind,
+                TranscriptKind::UserPrompt | TranscriptKind::SkillPrompt
+            ) || is_tool_call_terminator(line.kind)
             {
                 break;
             }
@@ -3944,7 +4144,7 @@ fn tool_primary_arg(tool_name: &str, args: &serde_json::Value) -> Option<String>
         "read" | "write" | "edit" | "list" => get("path").or_else(|| get("file_path")),
         "grep" | "glob" => get("pattern"),
         "web_fetch" => get("url"),
-        _ => None,
+        _ => get("command"),
     }
     .map(|s| truncate_oneline(&s, 120))
 }
@@ -6809,12 +7009,10 @@ mod tests {
         })));
         // Even with show_thinking off, the underlying transcript
         // holds the line — the renderer is what filters it out.
-        assert!(
-            s.transcript
-                .iter()
-                .any(|l| l.kind == TranscriptKind::ThinkingText
-                    && l.text.contains("thinking-text"))
-        );
+        assert!(s
+            .transcript
+            .iter()
+            .any(|l| l.kind == TranscriptKind::ThinkingText && l.text.contains("thinking-text")));
     }
 
     // ---- skill palette injection -----------------------------------
@@ -6924,7 +7122,19 @@ mod tests {
                 "---\nname: test-skill\ndescription: test\n---\n\n## body\nDo the thing.".into()
             )]
         );
-        assert_eq!(s.transcript.last().unwrap().text, "/skill:test-skill");
+        assert_eq!(
+            s.transcript[s.transcript.len() - 2].kind,
+            TranscriptKind::SkillPrompt
+        );
+        assert_eq!(
+            s.transcript[s.transcript.len() - 2].text,
+            "/skill:test-skill"
+        );
+        assert_eq!(s.transcript.last().unwrap().kind, TranscriptKind::Info);
+        assert_eq!(
+            s.transcript.last().unwrap().text,
+            "(skill: /skill:test-skill injected)"
+        );
         assert_eq!(s.history.last().unwrap(), "/skill:test-skill");
         assert!(s.skill_tokens.is_empty());
     }
@@ -6943,6 +7153,11 @@ mod tests {
             cmds,
             vec![Command::SendPrompt("body\n\nUser: run it".into())]
         );
+        assert_eq!(
+            s.transcript[s.transcript.len() - 2].text,
+            "/skill:test-skill run it"
+        );
+        assert_eq!(s.transcript.last().unwrap().kind, TranscriptKind::Info);
     }
 
     #[test]
@@ -7026,6 +7241,24 @@ mod tests {
     }
 
     #[test]
+    fn unknown_tool_start_prefers_command_arg_over_json_preview() {
+        let line = format_tool_start_line(
+            "semble_rs",
+            &serde_json::json!({
+                "group": true,
+                "mode": "compact",
+                "query": "plugin 加载流程",
+                "command": "semble_rs search \"plugin 加载流程\" --compact -k 15 --group"
+            }),
+        );
+
+        assert_eq!(
+            line,
+            "● Tool(semble_rs search \"plugin 加载流程\" --compact -k 15 --group)"
+        );
+    }
+
+    #[test]
     fn block_summary_thinking() {
         let mut s = fresh();
         s.push(TranscriptKind::ThinkingText, "Hmm...".into());
@@ -7061,6 +7294,14 @@ mod tests {
             )),
             "expected OauthLogin {{provider_kind: \"openai\"}} in {cmds:?}"
         );
+        assert!(matches!(
+            s.overlay,
+            Some(Overlay::Login {
+                selected: Some(ref provider),
+                status: LoginStatus::Running,
+                ..
+            }) if provider == "openai"
+        ));
     }
 
     #[test]
@@ -7077,10 +7318,85 @@ mod tests {
             )),
             "expected OauthLogin {{provider_kind: \"anthropic\"}} in {cmds:?}"
         );
+        assert!(matches!(
+            s.overlay,
+            Some(Overlay::Login {
+                selected: Some(ref provider),
+                status: LoginStatus::Running,
+                ..
+            }) if provider == "anthropic"
+        ));
     }
 
     #[test]
-    fn slash_login_unknown_provider_pushes_info_not_command() {
+    fn slash_login_without_provider_opens_overlay() {
+        let mut s = fresh();
+        s.input = "/login".into();
+        s.cursor = s.input.len();
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert!(cmds.is_empty());
+        assert!(matches!(
+            s.overlay,
+            Some(Overlay::Login {
+                status: LoginStatus::Selecting,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn login_overlay_enter_starts_focused_provider() {
+        let mut s = fresh();
+        s.overlay = Some(new_login_overlay(None));
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                Command::OauthLogin { provider_kind }
+                if provider_kind == "openai"
+            )),
+            "expected OpenAI OAuth login command in {cmds:?}"
+        );
+        assert!(matches!(
+            s.overlay,
+            Some(Overlay::Login {
+                selected: Some(ref provider),
+                status: LoginStatus::Running,
+                ..
+            }) if provider == "openai"
+        ));
+    }
+
+    #[test]
+    fn login_overlay_updates_on_progress_and_success() {
+        let mut s = fresh();
+        s.overlay = Some(login_overlay_running("openai"));
+        s.on_event(TuiEvent::Info(
+            "[login:openai] Opening browser for openai.".into(),
+        ));
+        let Some(Overlay::Login { lines, status, .. }) = &s.overlay else {
+            panic!("expected login overlay");
+        };
+        assert_eq!(*status, LoginStatus::Running);
+        assert!(lines.iter().any(|line| line.contains("Opening browser")));
+
+        s.on_event(TuiEvent::OauthLoginSucceeded {
+            provider: "openai".into(),
+        });
+        assert!(matches!(
+            s.overlay,
+            Some(Overlay::Login {
+                status: LoginStatus::Succeeded,
+                ..
+            })
+        ));
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert!(cmds.is_empty());
+        assert!(s.overlay.is_none());
+    }
+
+    #[test]
+    fn slash_login_unknown_provider_opens_overlay_not_command() {
         let mut s = fresh();
         s.input = "/login fakecloud".into();
         s.cursor = s.input.len();
@@ -7088,16 +7404,11 @@ mod tests {
         let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
         // No OauthLogin command should be emitted for an unknown provider.
         assert!(
-            !cmds
-                .iter()
-                .any(|c| matches!(c, Command::OauthLogin { .. })),
+            !cmds.iter().any(|c| matches!(c, Command::OauthLogin { .. })),
             "unexpected OauthLogin command for unknown provider"
         );
-        // An info line explaining the error should be pushed instead.
-        assert!(
-            s.transcript.len() > before_len,
-            "expected an info transcript line for unknown provider"
-        );
+        assert_eq!(s.transcript.len(), before_len + 1);
+        assert!(matches!(s.overlay, Some(Overlay::Login { .. })));
     }
 
     #[test]

@@ -9,13 +9,13 @@
 //
 // Loaded by `grain-script-rhai` when grain-ai-agent-tui is built
 // with `--features scripts-rhai`. See docs/plugins.md for the
-// `plugin-spec.toml` bootstrap that pulls this script in.
+// `plugin.toml` bootstrap that pulls this script in.
 
 fn tools() {
     [
         #{
             name: "lazy_install",
-            description: "Install a plugin: append a [[plugin]] entry to plugin-spec.toml and sync (git clone for URLs, symlink for local paths). `src` accepts the same forms as the spec file: https://..., git@..., or a filesystem path. Returns a status message.",
+            description: "Install a plugin: append a [[plugin]] entry to plugin.toml and sync (git clone for URLs, symlink for local paths). `src` accepts the same forms as the spec file: https://..., git@..., or a filesystem path. Returns a status message.",
             parameters: #{
                 type: "object",
                 properties: #{
@@ -40,7 +40,7 @@ fn tools() {
         },
         #{
             name: "lazy_remove",
-            description: "Drop a plugin from plugin-spec.toml. By default also tears down the installed directory (symlinks are unlinked, real dirs are rm -rf'd); pass delete_files=false to keep the local files.",
+            description: "Drop a plugin from plugin.toml. By default also tears down the installed directory (symlinks are unlinked, real dirs are rm -rf'd); pass delete_files=false to keep the local files.",
             parameters: #{
                 type: "object",
                 properties: #{
@@ -165,7 +165,7 @@ fn ui_remove_confirm(args) {
     #{
         kind: "confirm",
         title: "Remove plugin",
-        body:  "Remove '" + name + "' from plugin-spec.toml and delete its installed files? This cannot be undone.",
+        body:  "Remove '" + name + "' from plugin.toml and delete its installed files? This cannot be undone.",
         on_yes: "ui_remove_submit",
         yes_args: #{ name: name }
     }
@@ -255,7 +255,7 @@ fn ui_plugin_details(args) {
     } else if p.origin == "lock" {
         "added by lazy_install (writable via lazy_remove)"
     } else if p.origin == "legacy" {
-        "in legacy plugin-spec.toml (deprecated — consider migrating to config.toml)"
+        "in legacy plugin.toml (deprecated — consider migrating to config.toml)"
     } else {
         "discovered on disk only (no spec entry)"
     };

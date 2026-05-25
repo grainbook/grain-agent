@@ -91,13 +91,16 @@ fn builtin_configs() -> Vec<OauthConfig> {
             client_id: "f7a5c308-b193-4dc8-a21a-50d593a0f5b8".to_string(), // public client
             scopes: "openid profile email".to_string(),
         },
-        // OpenAI OAuth — used by ChatGPT web and the Codex CLI OSS.
+        // OpenAI ChatGPT/Codex OAuth. Keep this aligned with the public
+        // Codex CLI login client: fixed localhost callback, extra authorize
+        // parameters, and the auth.openai.com OAuth path.
         OauthConfig {
             provider: "openai".to_string(),
-            authorize_url: "https://auth.openai.com/authorize".to_string(),
+            authorize_url: "https://auth.openai.com/oauth/authorize".to_string(),
             token_url: "https://auth.openai.com/oauth/token".to_string(),
-            client_id: "TdS8dKq5y3GQ8xH2zV1mR7pB4cA9fL6o".to_string(), // Codex CLI public client
-            scopes: "openid profile email offline_access".to_string(),
+            client_id: "app_EMoamEEZ73f0CkXaXp7hrann".to_string(), // Codex CLI public client
+            scopes: "openid profile email offline_access api.connectors.read api.connectors.invoke"
+                .to_string(),
         },
     ]
 }
@@ -121,6 +124,10 @@ pub fn config_for_kind(kind: &str) -> Option<OauthConfig> {
     config_for_provider(provider)
 }
 
+fn is_openai_codex(config: &OauthConfig) -> bool {
+    config.provider == "openai"
+}
+
 // ---------------------------------------------------------------------------
 // Token representation
 // ---------------------------------------------------------------------------
@@ -130,6 +137,10 @@ pub fn config_for_kind(kind: &str) -> Option<OauthConfig> {
 pub struct StoredTokens {
     pub access_token: String,
     pub refresh_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
     /// Unix timestamp at which `access_token` expires.
     pub expires_at: u64,
     pub token_type: String,
@@ -315,7 +326,7 @@ async fn exchange_code(
             ("grant_type", "authorization_code"),
             ("code", code),
             ("redirect_uri", redirect_uri),
-            ("client_id", &config.client_id),
+            ("client_id", config.client_id.as_str()),
             ("code_verifier", code_verifier),
         ])
         .send()
@@ -342,6 +353,20 @@ async fn exchange_code(
         .as_str()
         .ok_or_else(|| OauthError::AuthServer(format!("missing refresh_token in: {body}")))?
         .to_string();
+    let id_token = raw["id_token"].as_str().map(ToString::to_string);
+    let api_key = if is_openai_codex(config) {
+        match id_token.as_deref() {
+            Some(id_token) => Some(obtain_openai_api_key(config, id_token).await?),
+            None => {
+                return Err(OauthError::AuthServer(
+                    "OpenAI Codex OAuth response did not include id_token; cannot derive API credential"
+                        .to_string(),
+                ));
+            }
+        }
+    } else {
+        None
+    };
 
     let expires_in = raw["expires_in"].as_u64().unwrap_or(3600);
     let token_type = raw["token_type"].as_str().unwrap_or("Bearer").to_string();
@@ -356,9 +381,54 @@ async fn exchange_code(
     Ok(StoredTokens {
         access_token,
         refresh_token,
+        id_token,
+        api_key,
         expires_at,
         token_type,
     })
+}
+
+async fn obtain_openai_api_key(config: &OauthConfig, id_token: &str) -> Result<String, OauthError> {
+    let client = reqwest13::Client::new();
+    let resp = client
+        .post(&config.token_url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[
+            (
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:token-exchange",
+            ),
+            ("client_id", &config.client_id),
+            ("requested_token", "openai-api-key"),
+            ("subject_token", id_token),
+            (
+                "subject_token_type",
+                "urn:ietf:params:oauth:token-type:id_token",
+            ),
+        ])
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let body = resp.text().await?;
+    if !status.is_success() {
+        return Err(OauthError::AuthServer(format!(
+            "OpenAI API credential exchange returned {status}: {body}"
+        )));
+    }
+    let raw: serde_json::Value = serde_json::from_str(&body).map_err(|_| {
+        OauthError::AuthServer(format!(
+            "bad JSON from OpenAI API credential exchange: {body}"
+        ))
+    })?;
+    raw["access_token"]
+        .as_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            OauthError::AuthServer(format!(
+                "missing access_token in OpenAI API credential exchange: {body}"
+            ))
+        })
 }
 
 /// Refresh tokens using a stored `refresh_token`.
@@ -367,15 +437,28 @@ async fn refresh_tokens(
     refresh_token: &str,
 ) -> Result<StoredTokens, OauthError> {
     let client = reqwest13::Client::new();
-    let resp = client
-        .post(&config.token_url)
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-            ("client_id", &config.client_id),
-        ])
-        .send()
-        .await?;
+    let resp = if is_openai_codex(config) {
+        client
+            .post(&config.token_url)
+            .header("Content-Type", "application/json")
+            .json(&serde_json::json!({
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": config.client_id.as_str(),
+            }))
+            .send()
+            .await?
+    } else {
+        client
+            .post(&config.token_url)
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh_token),
+                ("client_id", &config.client_id),
+            ])
+            .send()
+            .await?
+    };
 
     let status = resp.status();
     let body = resp.text().await?;
@@ -399,6 +482,15 @@ async fn refresh_tokens(
     // Some providers may issue a new refresh token; prefer it if present.
     let new_refresh = raw["refresh_token"].as_str();
     let refresh_token = new_refresh.unwrap_or(refresh_token).to_string();
+    let id_token = raw["id_token"].as_str().map(ToString::to_string);
+    let api_key = if is_openai_codex(config) {
+        match id_token.as_deref() {
+            Some(id_token) => Some(obtain_openai_api_key(config, id_token).await?),
+            None => None,
+        }
+    } else {
+        None
+    };
 
     let expires_in = raw["expires_in"].as_u64().unwrap_or(3600);
     let token_type = raw["token_type"].as_str().unwrap_or("Bearer").to_string();
@@ -412,6 +504,8 @@ async fn refresh_tokens(
     Ok(StoredTokens {
         access_token,
         refresh_token,
+        id_token,
+        api_key,
         expires_at,
         token_type,
     })
@@ -439,11 +533,15 @@ pub async fn get_valid_access_token(profile_name: &str) -> Result<Option<String>
 
     // Refresh if expired or about to expire (within 60s).
     if now >= tokens.expires_at {
+        let previous_api_key = tokens.api_key.clone();
         tokens = refresh_tokens(&config, &tokens.refresh_token).await?;
+        if tokens.api_key.is_none() {
+            tokens.api_key = previous_api_key;
+        }
         save_tokens(profile_name, &tokens)?;
     }
 
-    Ok(Some(tokens.access_token))
+    Ok(Some(tokens.api_key.unwrap_or(tokens.access_token)))
 }
 
 /// Like [`get_valid_access_token`] but takes the OAuth config explicitly
@@ -464,11 +562,15 @@ pub async fn get_valid_access_token_with_config(
 
     // Refresh if expired or about to expire (within 60s).
     if now >= tokens.expires_at {
+        let previous_api_key = tokens.api_key.clone();
         tokens = refresh_tokens(config, &tokens.refresh_token).await?;
+        if tokens.api_key.is_none() {
+            tokens.api_key = previous_api_key;
+        }
         save_tokens(profile_name, &tokens)?;
     }
 
-    Ok(Some(tokens.access_token))
+    Ok(Some(tokens.api_key.unwrap_or(tokens.access_token)))
 }
 
 /// Synchronous version of [`get_valid_access_token_with_config`].
@@ -506,11 +608,12 @@ pub async fn start_login_flow(
     let code_challenge = compute_code_challenge(&code_verifier);
     let state = generate_code_verifier(); // reuse the same random generation
 
-    // Bind to a random port.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(OauthError::Io)?;
+    // Anthropic accepts a dynamic localhost callback. OpenAI Codex uses a
+    // registered native-app callback, so it must stay on the known ports/path.
+    let listener = bind_callback_listener(config)?;
     let local_addr = listener.local_addr().map_err(OauthError::Io)?;
     let port = local_addr.port();
-    let redirect_uri = format!("http://127.0.0.1:{port}");
+    let redirect_uri = redirect_uri_for(config, port);
 
     // Build the authorization URL.
     let mut auth_url = Url::parse(&config.authorize_url)
@@ -524,6 +627,11 @@ pub async fn start_login_flow(
         q.append_pair("code_challenge", &code_challenge);
         q.append_pair("code_challenge_method", "S256");
         q.append_pair("state", &state);
+        if is_openai_codex(config) {
+            q.append_pair("id_token_add_organizations", "true");
+            q.append_pair("codex_cli_simplified_flow", "true");
+            q.append_pair("originator", "codex_cli");
+        }
     }
 
     // Open the browser.
@@ -540,11 +648,8 @@ pub async fn start_login_flow(
 
     // Accept exactly one connection from the listener, with a 5-minute
     // timeout.  Use tokio::net::TcpListener for async accept.
-    listener
-        .set_nonblocking(true)
-        .map_err(OauthError::Io)?;
-    let tokio_listener =
-        tokio::net::TcpListener::from_std(listener).map_err(OauthError::Io)?;
+    listener.set_nonblocking(true).map_err(OauthError::Io)?;
+    let tokio_listener = tokio::net::TcpListener::from_std(listener).map_err(OauthError::Io)?;
 
     let timeout = tokio::time::sleep(Duration::from_secs(300));
     let accept = tokio_listener.accept();
@@ -575,6 +680,34 @@ pub async fn start_login_flow(
     save_tokens(&config.provider, &tokens)?;
 
     Ok(tokens)
+}
+
+fn bind_callback_listener(config: &OauthConfig) -> Result<std::net::TcpListener, OauthError> {
+    if !is_openai_codex(config) {
+        return std::net::TcpListener::bind("127.0.0.1:0").map_err(OauthError::Io);
+    }
+
+    let mut last_error = None;
+    for port in [1455_u16, 1457] {
+        match std::net::TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) => return Ok(listener),
+            Err(err) => last_error = Some(err),
+        }
+    }
+    Err(OauthError::Io(last_error.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            "OpenAI Codex callback ports 1455 and 1457 are unavailable",
+        )
+    })))
+}
+
+fn redirect_uri_for(config: &OauthConfig, port: u16) -> String {
+    if is_openai_codex(config) {
+        format!("http://localhost:{port}/auth/callback")
+    } else {
+        format!("http://127.0.0.1:{port}")
+    }
 }
 
 /// Parse the OAuth callback from the browser redirect stream and verify
@@ -746,6 +879,31 @@ mod tests {
         let c = config_for_provider("anthropic").unwrap();
         assert!(c.authorize_url.contains("anthropic"));
         assert!(c.token_url.contains("anthropic"));
+    }
+
+    #[test]
+    fn openai_config_matches_codex_oauth_client() {
+        let c = config_for_provider("openai").unwrap();
+        assert_eq!(c.authorize_url, "https://auth.openai.com/oauth/authorize");
+        assert_eq!(c.token_url, "https://auth.openai.com/oauth/token");
+        assert_eq!(c.client_id, "app_EMoamEEZ73f0CkXaXp7hrann");
+        assert!(c.scopes.contains("offline_access"));
+        assert!(c.scopes.contains("api.connectors.read"));
+        assert!(c.scopes.contains("api.connectors.invoke"));
+    }
+
+    #[test]
+    fn redirect_uri_uses_codex_callback_for_openai() {
+        let openai = config_for_provider("openai").unwrap();
+        let anthropic = config_for_provider("anthropic").unwrap();
+        assert_eq!(
+            redirect_uri_for(&openai, 1455),
+            "http://localhost:1455/auth/callback"
+        );
+        assert_eq!(
+            redirect_uri_for(&anthropic, 43210),
+            "http://127.0.0.1:43210"
+        );
     }
 
     #[test]

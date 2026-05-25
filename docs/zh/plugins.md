@@ -42,12 +42,12 @@ English: [../plugins.md](../plugins.md).
 
 ---
 
-## 声明式安装：`plugin-spec.toml`
+## 声明式安装：`plugin.toml`
 
-手动 `cd .grain/plugins && git clone …` 装每个插件能用，但换机器就废了。引擎启动时会读可选的 `<workspace>/.grain/plugin-spec.toml`，**把列里没安装的插件自动拉过来**：
+手动 `cd .grain/plugins && git clone …` 装每个插件能用，但换机器就废了。引擎启动时会读可选的 `<workspace>/.grain/plugin.toml`，**把列里没安装的插件自动拉过来**：
 
 ```toml
-# <workspace>/.grain/plugin-spec.toml
+# <workspace>/.grain/plugin.toml
 
 [[plugin]]
 name = "rust-helper"
@@ -233,7 +233,7 @@ TUI 里：
 | **B-1** | scripts 合并到同一个 Boa worker | ✓ 已发布 |
 | **B-2** | `/plugins` 遮罩面板 UI | ✓ 已发布 |
 | **B-3** | `prompts/*.md` append 到系统提示 | ✓ 已发布 |
-| **C-0** | `plugin-spec.toml` 声明式安装（git + 本地 symlink）| ✓ 已发布 |
+| **C-0** | `plugin.toml` 声明式安装（git + 本地 symlink）| ✓ 已发布 |
 | **C-1** | `lazy-gagent` 管理器插件：让 agent 通过工具调用 install / update / remove | 计划中 |
 
 ---

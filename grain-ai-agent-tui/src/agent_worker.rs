@@ -18,8 +18,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use grain_agent_core::{
-    AgentEvent, AgentLoopTurnUpdate, AgentMessage, AgentTool, BeforeToolCallFn, ConvertToLlmFn,
-    Message, Model, PrepareNextTurnFn, StreamFn, TransformContextFn,
+    AgentEvent, AgentLoopTurnUpdate, AgentMessage, AgentTool, AgentToolError, AgentToolResult,
+    BeforeToolCallFn, ConvertToLlmFn, Message, Model, PrepareNextTurnFn, StreamFn, ToolDefinition,
+    ToolUpdateCallback, TransformContextFn,
 };
 use grain_agent_harness::{
     AgentHarness, AgentHarnessOptions, InMemorySessionStorage, Session, SessionMetadata,
@@ -39,6 +40,98 @@ use crate::app::Command;
 use crate::cli::Args;
 use crate::event::TuiEvent;
 use grain_llm_genai::{ProviderAuth, ProviderKind, ProviderProfile};
+
+#[derive(Debug)]
+struct ProviderSafeTool {
+    inner: Arc<dyn AgentTool>,
+    definition: ToolDefinition,
+}
+
+#[async_trait::async_trait]
+impl AgentTool for ProviderSafeTool {
+    fn definition(&self) -> &ToolDefinition {
+        &self.definition
+    }
+
+    fn prepare_arguments(
+        &self,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, AgentToolError> {
+        self.inner.prepare_arguments(args)
+    }
+
+    async fn execute(
+        &self,
+        tool_call_id: &str,
+        args: serde_json::Value,
+        cancel: tokio_util::sync::CancellationToken,
+        on_update: ToolUpdateCallback,
+    ) -> Result<AgentToolResult, AgentToolError> {
+        self.inner
+            .execute(tool_call_id, args, cancel, on_update)
+            .await
+    }
+}
+
+fn provider_safe_tool_name(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len().max(4));
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    while out.contains("__") {
+        out = out.replace("__", "_");
+    }
+    let out = out.trim_matches('_').to_string();
+    if out.is_empty() {
+        "tool".to_string()
+    } else {
+        out
+    }
+}
+
+fn make_unique_tool_name(base: String, used: &mut std::collections::HashSet<String>) -> String {
+    if used.insert(base.clone()) {
+        return base;
+    }
+
+    let mut idx = 2usize;
+    loop {
+        let candidate = format!("{base}_{idx}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        idx += 1;
+    }
+}
+
+fn normalize_tool_names_for_provider(tools: Vec<Arc<dyn AgentTool>>) -> Vec<Arc<dyn AgentTool>> {
+    let mut used = std::collections::HashSet::new();
+    tools
+        .into_iter()
+        .map(|tool| {
+            let original = tool.definition().name.clone();
+            let safe = make_unique_tool_name(provider_safe_tool_name(&original), &mut used);
+            if safe == original {
+                return tool;
+            }
+
+            let mut definition = tool.definition().clone();
+            definition.name = safe.clone();
+            eprintln!(
+                "[info] provider-safe tool alias: '{}' -> '{}'",
+                original, safe
+            );
+            Arc::new(ProviderSafeTool {
+                inner: tool,
+                definition,
+            }) as Arc<dyn AgentTool>
+        })
+        .collect()
+}
 
 /// Configuration crystallized out of [`Args`]. Pulled into its own
 /// struct so the spawn function isn't argument-soup.
@@ -413,7 +506,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     };
 
     // --- Plugins -----------------------------------------------------------
-    // Phase C-0: read `<workspace>/.grain/plugin-spec.toml` and
+    // Phase C-0: read `<workspace>/.grain/plugin.toml` and
     // sync (git clone / local symlink) any plugins declared there
     // but not yet present under `plugins_dir`. This is the
     // bootstrap path that lets things like `lazy-gagent` (the
@@ -426,7 +519,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         .unwrap_or_else(|| grain_ai_agent_headless::default_plugins_dir(workspace.root()));
     // Spec base for relative `src` paths is `<workspace>/.grain/`
     // — the parent of config.toml / plugin-lock.toml / legacy
-    // plugin-spec.toml (all three live there). `src = "../lazy-gagent"`
+    // plugin.toml (all three live there). `src = "../lazy-gagent"`
     // resolves to `<workspace>/lazy-gagent`.
     let spec_base = workspace.root().join(".grain");
     // Buffer plugin-install failures so we can mirror them into the
@@ -435,7 +528,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // screen takes over and get scrolled out of view.
     let mut deferred_warnings: Vec<String> = Vec::new();
     // Effective spec = config.toml [[plugin]] ∪ plugin-lock.toml ∪
-    // legacy plugin-spec.toml (first-source-wins). Reload config
+    // legacy plugin.toml (first-source-wins). Reload config
     // here so worker doesn't depend on the earlier apply pass —
     // the file read is cheap and the call site stays self-contained.
     let plugin_spec = {
@@ -796,7 +889,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                     // — calling `Handle::block_on` here panics with
                     // "Cannot start a runtime from within a runtime".
                     // Just `.await` the plugin load directly.
-                    // Resolve auth entries from plugin-spec.toml.
+                    // Resolve auth entries from plugin.toml.
                     // Priority: higher wins when multiple entries target the same env var.
                     let mut env_map = std::collections::HashMap::new();
                     if let Some(spec) = plugin_spec.plugins.iter().find(|s| s.name == plugin_id) {
@@ -804,10 +897,11 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                         entries.sort_by_key(|e| e.priority);
                         for entry in &entries {
                             if entry.kind == "api_key"
-                                && let Some(ref val) = entry.value {
-                                    env_map.insert(entry.env.clone(), val.clone());
-                                }
-                                // If no value: leave it for OS env fallback.
+                                && let Some(ref val) = entry.value
+                            {
+                                env_map.insert(entry.env.clone(), val.clone());
+                            }
+                            // If no value: leave it for OS env fallback.
                         }
                     }
                     match runtime
@@ -864,6 +958,8 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             );
         }
     }
+
+    tools = normalize_tool_names_for_provider(tools);
 
     // --- Shared active-model handle -----------------------------------------
     // Both ContextGuard and TokenBudgetPolicy read from the same handle
@@ -1796,7 +1892,7 @@ async fn run_command_loop(
                     }
                     None => {
                         let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
-                            "remove '{name}': not declared in config.toml, plugin-lock.toml, or plugin-spec.toml"
+                            "remove '{name}': not declared in config.toml, plugin-lock.toml, or plugin.toml"
                         )));
                         continue;
                     }
@@ -2171,8 +2267,8 @@ async fn run_command_loop(
                 // `start_login_flow` needs `on_message: impl Fn(&str) + Send + Sync`.
                 // An `UnboundedSender` is `Clone + Send + Sync`, so the closure is fine.
                 let on_message = move |msg: &str| {
-                    let _ = tx_progress
-                        .send(TuiEvent::Info(format!("[login:{provider_name}] {msg}")));
+                    let _ =
+                        tx_progress.send(TuiEvent::Info(format!("[login:{provider_name}] {msg}")));
                 };
                 match grain_llm_genai::oauth::start_login_flow(&config, on_message).await {
                     Ok(_tokens) => {
@@ -2359,7 +2455,7 @@ fn build_rhai_bundle(
                     }
                     None => {
                         return format!(
-                            "remove '{name}' error: not declared in config.toml, plugin-lock.toml, or plugin-spec.toml"
+                            "remove '{name}' error: not declared in config.toml, plugin-lock.toml, or plugin.toml"
                         );
                     }
                 };
@@ -2519,5 +2615,37 @@ fn synthetic_model_from_profile(profile: &ProviderProfile) -> grain_agent_core::
         context_window: 32_768,
         max_tokens: 4_096,
         cost: grain_agent_core::Cost::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_safe_tool_name_replaces_provider_hostile_chars() {
+        assert_eq!(provider_safe_tool_name("web-search"), "web_search");
+        assert_eq!(
+            provider_safe_tool_name("web.search/fetch"),
+            "web_search_fetch"
+        );
+        assert_eq!(provider_safe_tool_name("  "), "tool");
+    }
+
+    #[test]
+    fn make_unique_tool_name_appends_suffix_for_collisions() {
+        let mut used = std::collections::HashSet::new();
+        assert_eq!(
+            make_unique_tool_name("web_fetch".to_string(), &mut used),
+            "web_fetch"
+        );
+        assert_eq!(
+            make_unique_tool_name("web_fetch".to_string(), &mut used),
+            "web_fetch_2"
+        );
+        assert_eq!(
+            make_unique_tool_name("web_fetch".to_string(), &mut used),
+            "web_fetch_3"
+        );
     }
 }
