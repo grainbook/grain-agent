@@ -1389,15 +1389,14 @@ fn build_footer_paragraph<'a>(state: &'a AppState, palette: &Palette) -> Paragra
     // next request carries fewer messages).  Output tokens are deliberately
     // excluded: they count against `max_output_tokens`, not the context budget.
     //
-    // Fallback: before the first API response lands (`tokens_in == 0`), estimate
-    // from the pinned system prompt so the user sees a rough starting occupancy.
+    // Fallback: before the first API response lands (`tokens_in == 0`), use the
+    // worker's tiktoken preflight estimate for pinned system prompt + tools.
     if state.context_window > 0 {
         let estimated = if state.tokens_in > 0 {
             // Ground truth from the most recent API request.
             state.tokens_in
-        } else if state.system_prompt_chars > 0 {
-            // Boot-time estimate: system prompt only, no messages yet.
-            (state.system_prompt_chars as u64).div_ceil(4) + 24
+        } else if state.preflight_context_tokens > 0 {
+            state.preflight_context_tokens
         } else {
             0
         };

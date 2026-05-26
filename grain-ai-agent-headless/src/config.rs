@@ -17,6 +17,7 @@
 //! allow_bash = false
 //! allow_web = false
 //! allow_semantic_search = false
+//! dynamic_tools_enabled = true
 //! skills_dir = ".claude/skills"
 //! workspace_skills_only = true
 //! session_dir = ".grain/sessions" # base dir for JSONL sessions; --session overrides
@@ -71,6 +72,9 @@ pub struct ConfigFile {
     pub allow_bash: Option<bool>,
     pub allow_web: Option<bool>,
     pub allow_semantic_search: Option<bool>,
+    /// Enable prompt-based tool schema pruning. Enabled by default in
+    /// CLIs; set false to expose every registered tool every turn.
+    pub dynamic_tools_enabled: Option<bool>,
     pub skills_dir: Option<PathBuf>,
     /// When true, default skill discovery ignores user-global and
     /// ancestor `.agents/skills` directories and scans only the current
@@ -221,6 +225,11 @@ impl ConfigFile {
         {
             args.allow_semantic_search = b;
         }
+        if !explicit.contains("disable_dynamic_tools")
+            && let Some(enabled) = self.dynamic_tools_enabled
+        {
+            args.disable_dynamic_tools = !enabled;
+        }
         if !explicit.contains("skills_dir")
             && args.skills_dir.is_none()
             && let Some(d) = &self.skills_dir
@@ -280,6 +289,9 @@ fn merge_into(dst: &mut ConfigFile, src: ConfigFile) {
     }
     if src.allow_semantic_search.is_some() {
         dst.allow_semantic_search = src.allow_semantic_search;
+    }
+    if src.dynamic_tools_enabled.is_some() {
+        dst.dynamic_tools_enabled = src.dynamic_tools_enabled;
     }
     if src.skills_dir.is_some() {
         dst.skills_dir = src.skills_dir;
@@ -444,6 +456,24 @@ mod tests {
         let explicit = std::collections::HashSet::new();
         cfg.apply_to_args(&mut args, &explicit, &Args::cli_defaults());
         assert!(!args.allow_bash);
+    }
+
+    #[test]
+    fn dynamic_tools_config_can_disable_default() {
+        use crate::cli::Args;
+        use clap::Parser;
+        let mut args = Args::try_parse_from(["grain-headless"]).unwrap();
+        assert!(!args.disable_dynamic_tools);
+        let cfg = ConfigFile {
+            dynamic_tools_enabled: Some(false),
+            ..Default::default()
+        };
+        cfg.apply_to_args(
+            &mut args,
+            &std::collections::HashSet::new(),
+            &Args::cli_defaults(),
+        );
+        assert!(args.disable_dynamic_tools);
     }
 
     #[test]

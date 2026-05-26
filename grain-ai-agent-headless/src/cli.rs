@@ -24,11 +24,13 @@ use std::io::BufRead;
 
 use crate::config::{ArgDefaults, ConfigFile};
 use crate::diagnostics::{render_doctor_report, render_source_info_block};
+use crate::dynamic_tools::{filter_tools_by_names, select_dynamic_tool_names};
 use crate::prompt::coding_agent_system_prompt;
 use crate::runtime::{coding_bash_tools, coding_read_tools, coding_write_tools};
 use crate::session::{SessionWriter, load_messages};
 use crate::skills::{find_skills_in_dirs, resolve_skill_dirs_with_scope};
 use crate::slash::{HELP_TEXT, SlashCommand, parse as parse_slash};
+use crate::tool_names::normalize_tool_names_for_provider;
 use crate::workspace::Workspace;
 
 /// `grain-headless` — single-prompt coding agent over the local workspace.
@@ -121,6 +123,12 @@ pub struct Args {
     /// agent can then reach arbitrary HTTP(S) endpoints.
     #[arg(long, default_value_t = false)]
     pub allow_web: bool,
+
+    /// Disable prompt-based tool schema pruning. When unset, each turn
+    /// exposes only the tools that look relevant to the latest request
+    /// plus cheap read/search tools.
+    #[arg(long, default_value_t = false)]
+    pub disable_dynamic_tools: bool,
 
     /// Event output format. `text` (default) prints a human-friendly
     /// stream; `json` emits one `AgentEvent` JSON-serialized per line
@@ -384,12 +392,6 @@ pub async fn run(args: Args) -> Result<(), CliError> {
         system_prompt.push_str(&skills_block);
     }
 
-    // --- Context guard -----------------------------------------------------
-    let guard = ContextGuard::new(registry.clone(), args.model.clone())
-        .with_policy(ContextGuardPolicy::DropOldest)
-        .with_headroom_tokens(args.headroom_tokens)
-        .into_transform_fn();
-
     // --- Agent options + agent --------------------------------------------
     let deepseek = crate::deepseek::DeepSeekPack::new(&model);
     if deepseek.is_enabled() {
@@ -398,7 +400,6 @@ pub async fn run(args: Args) -> Result<(), CliError> {
         );
     }
     let mut opts = AgentOptions::new(model, stream);
-    opts.system_prompt = system_prompt;
     let mut tools = coding_read_tools(workspace.clone());
     if args.allow_write {
         tools.extend(coding_write_tools(workspace.clone()));
@@ -463,8 +464,29 @@ pub async fn run(args: Args) -> Result<(), CliError> {
             scripts_path.display()
         );
     }
+    tools = normalize_tool_names_for_provider(tools);
+    let all_tools = tools.clone();
+
+    // --- Context guard -----------------------------------------------------
+    let estimator = grain_agent_harness::TokenEstimator::for_model(&args.model);
+    let mut system_overhead_tokens = estimator.estimate_string(&system_prompt);
+    for t in &tools {
+        let def = t.definition();
+        system_overhead_tokens += estimator.estimate_string(&def.name);
+        system_overhead_tokens += estimator.estimate_string(&def.description);
+        system_overhead_tokens +=
+            estimator.estimate_string(&serde_json::to_string(&def.parameters).unwrap_or_default());
+    }
+    system_overhead_tokens = (system_overhead_tokens as f64 * 1.3).ceil() as u64;
+    let guard = ContextGuard::new(registry.clone(), args.model.clone())
+        .with_policy(ContextGuardPolicy::DropOldest)
+        .with_estimator(estimator)
+        .with_headroom_tokens(args.headroom_tokens)
+        .with_system_overhead_tokens(system_overhead_tokens)
+        .into_transform_fn();
 
     let _ = workspace; // keep alive when no further tool branches consume it
+    opts.system_prompt = system_prompt;
     opts.tools = tools;
     opts.messages = prior_messages;
     opts.transform_context = Some(guard);
@@ -518,6 +540,7 @@ pub async fn run(args: Args) -> Result<(), CliError> {
 
     // --- Run --------------------------------------------------------------
     if let Some(text) = initial_prompt {
+        apply_dynamic_tools(&agent, &all_tools, !args.disable_dynamic_tools, &text).await;
         agent.prompt_text(text).await?;
         let state = agent.state().await;
         if let Some(err) = state.error_message {
@@ -539,6 +562,8 @@ pub async fn run(args: Args) -> Result<(), CliError> {
                 args.workspace_skills_only,
             ),
             session_path: args.session.clone(),
+            all_tools,
+            dynamic_tools_enabled: !args.disable_dynamic_tools,
         };
         run_interactive_loop(&agent, &ctx).await?;
     }
@@ -555,6 +580,8 @@ struct InteractiveContext {
     /// Active JSONL session file (if any). `/clear` truncates it so the
     /// next load doesn't show stale messages alongside the new transcript.
     session_path: Option<PathBuf>,
+    all_tools: Vec<Arc<dyn grain_agent_core::AgentTool>>,
+    dynamic_tools_enabled: bool,
 }
 
 /// Read-prompt-respond loop. Reads lines from stdin until EOF or `/exit`.
@@ -641,6 +668,7 @@ async fn run_interactive_loop(agent: &Agent, ctx: &InteractiveContext) -> Result
             }
             continue;
         }
+        apply_dynamic_tools(agent, &ctx.all_tools, ctx.dynamic_tools_enabled, trimmed).await;
         if let Err(e) = agent.prompt_text(trimmed).await {
             eprintln!("[error] {e}");
             continue;
@@ -651,6 +679,27 @@ async fn run_interactive_loop(agent: &Agent, ctx: &InteractiveContext) -> Result
         }
     }
     Ok(())
+}
+
+async fn apply_dynamic_tools(
+    agent: &Agent,
+    all_tools: &[Arc<dyn grain_agent_core::AgentTool>],
+    enabled: bool,
+    prompt: &str,
+) {
+    if !enabled {
+        agent.set_tools(all_tools.to_vec()).await;
+        return;
+    }
+    let state = agent.state().await;
+    let decision = select_dynamic_tool_names(all_tools, &state.messages, prompt);
+    let filtered = filter_tools_by_names(all_tools, &decision.names);
+    eprintln!(
+        "[info] dynamic tools: {} ({})",
+        decision.names.join(", "),
+        decision.reason
+    );
+    agent.set_tools(filtered).await;
 }
 
 /// Whether a provider profile is ready to drive a request:

@@ -339,7 +339,7 @@ async fn event_loop(
         handles.model_id.clone(),
         handles.model_cost.clone(),
         handles.context_window,
-        handles.system_prompt_chars,
+        handles.preflight_context_tokens,
         handles.workspace_display.clone(),
         Capabilities {
             allow_write: handles.allow_write,

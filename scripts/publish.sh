@@ -62,15 +62,17 @@ for arg in "$@"; do
 done
 
 # ── Publish order (topological sort by dependency graph) ───────
+# lazy-gagent is intentionally omitted: it is still versioned separately.
 CRATES=(
   grain-agent-core
   grain-llm-models
-  grain-deepseek-pack
-  grain-llm-genai
   grain-script-boa
   grain-script-rhai
+  grain-pi-compat
   grain-plugin-wasm
+  grain-llm-genai
   grain-agent-harness
+  grain-deepseek-pack
   grain-ai-agent-headless
   grain-ai-agent-tui
 )

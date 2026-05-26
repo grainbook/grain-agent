@@ -923,10 +923,9 @@ pub struct AppState {
     /// `[ctx N%]` chip in the footer. `0` when unknown — the chip is
     /// omitted in that case.
     pub context_window: u64,
-    /// Length of the pinned system prompt in bytes. Used together with
-    /// a local scan of the transcript to estimate context-window
-    /// occupancy without waiting for an API response.
-    pub system_prompt_chars: usize,
+    /// Preflight input-token estimate for the pinned system prompt and
+    /// tool schemas. Used until provider-reported usage arrives.
+    pub preflight_context_tokens: u64,
     /// Number of compaction events in this session. Bumped when a
     /// `TuiEvent::SessionCompacted` is received. Rendered as
     /// `[compact N]` in the footer when > 0.
@@ -1307,7 +1306,7 @@ impl AppState {
         model_id: String,
         model_cost: Cost,
         context_window: u64,
-        system_prompt_chars: usize,
+        preflight_context_tokens: u64,
         workspace_display: String,
         capabilities: Capabilities,
         show_thinking: bool,
@@ -1346,7 +1345,7 @@ impl AppState {
             model_id,
             model_cost,
             context_window,
-            system_prompt_chars,
+            preflight_context_tokens,
             compaction_count: 0,
             workspace_display,
             git_prompt,
@@ -4891,7 +4890,7 @@ mod tests {
             "deepseek/deepseek-chat".into(),
             Cost::default(),
             0,
-            0, // system_prompt_chars — 0 means unknown (chip hidden when context_window is also 0)
+            0, // preflight_context_tokens — 0 means unknown
             "/tmp/proj".into(),
             Capabilities::default(),
             false,
@@ -4909,7 +4908,7 @@ mod tests {
             "deepseek/deepseek-chat".into(),
             Cost::default(),
             0,
-            0, // system_prompt_chars — 0 means unknown (chip hidden when context_window is also 0)
+            0, // preflight_context_tokens — 0 means unknown
             "/tmp/proj".into(),
             Capabilities::default(),
             false,

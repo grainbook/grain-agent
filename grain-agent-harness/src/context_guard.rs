@@ -3,9 +3,10 @@
 //! and applies a truncation policy before each turn so the request never
 //! exceeds the budget.
 //!
-//! Token counts here are **estimated** with a fixed chars-per-token ratio —
-//! good enough for budget enforcement without dragging in a tokenizer crate.
-//! Swap in a real tokenizer later by providing a custom [`TokenEstimator`].
+//! Token counts here are **estimated** locally. The default estimator uses
+//! tiktoken's BPE tables for OpenAI-style models, with a deterministic
+//! bytes-per-token fallback still available for tests and conservative
+//! provider-agnostic accounting.
 //!
 //! Wiring:
 //!
@@ -33,6 +34,7 @@ use grain_agent_core::{
     UserMessage,
 };
 use grain_llm_models::Registry;
+use tiktoken_rs::tokenizer::Tokenizer;
 
 /// How to handle a transcript that exceeds the model's context budget.
 #[derive(Debug, Clone, Default)]
@@ -50,17 +52,15 @@ pub enum ContextGuardPolicy {
     Identity,
 }
 
-/// Fixed UTF-8-bytes-per-token estimator.
+/// Token estimator used by context guard, compaction, and pruning.
 ///
-/// Counts **bytes**, not Unicode characters: BPE tokenizers (cl100k,
-/// o200k) charge roughly 3-4 bytes/token across English, code, and
-/// CJK alike, while chars/token swings wildly (4 for English, ~1 for
-/// Chinese). At the default 4.0 ratio, ASCII estimates are identical
-/// to the legacy chars/4 behavior; CJK is now ~0.75 tokens/char
-/// instead of 0.25 — close to the real ~1 token/char BPE charges.
+/// The preferred mode uses tiktoken's BPE tables (`o200k_base` by
+/// default, or a model-specific OpenAI tokenizer when recognized).
+/// The byte-ratio estimator remains available as a deterministic
+/// fallback for callers that need hand-computable behavior.
 #[derive(Debug, Clone, Copy)]
 pub struct TokenEstimator {
-    bytes_per_token: f64,
+    backend: TokenEstimatorBackend,
     /// Tokens charged on top of content for each transcript message —
     /// covers the JSON framing (`{"role":...,"content":[...]}`) and the
     /// per-message structural tokens BPE tokenizers assess. Without
@@ -70,22 +70,24 @@ pub struct TokenEstimator {
     per_message_overhead: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum TokenEstimatorBackend {
+    BytesPerToken(f64),
+    Tiktoken(Tokenizer),
+}
+
 impl Default for TokenEstimator {
     fn default() -> Self {
-        TokenEstimator::approximate()
+        TokenEstimator::tiktoken_o200k()
     }
 }
 
 impl TokenEstimator {
-    /// Standard bytes-per-token approximation (4.0). ASCII content
-    /// matches legacy chars/4 estimates; CJK is much closer to truth
-    /// than the old chars-based variant. Defaults to 16 tokens
-    /// per-message overhead — a conservative middle estimate for
-    /// OpenAI/Anthropic-style JSON framing (real values land in the
-    /// 7-30 range depending on message type).
+    /// Deterministic bytes-per-token approximation (4.0). Kept as a
+    /// fallback and for tests that need simple hand-computable values.
     pub const fn approximate() -> Self {
         TokenEstimator {
-            bytes_per_token: 4.0,
+            backend: TokenEstimatorBackend::BytesPerToken(4.0),
             // 24 tokens/message covers the chatml-style wrapper
             // (`<|im_start|>role`, `<|im_end|>`, role tokens) plus
             // the `tool_call_id` / `tool_use_id` keys that
@@ -96,11 +98,38 @@ impl TokenEstimator {
         }
     }
 
+    /// Industry-standard local estimate: tiktoken `o200k_base`, used
+    /// by current OpenAI GPT-4o/GPT-5/Codex-family models and a better
+    /// CJK/code approximation than bytes-per-token for preflight UI.
+    pub const fn tiktoken_o200k() -> Self {
+        TokenEstimator {
+            backend: TokenEstimatorBackend::Tiktoken(Tokenizer::O200kBase),
+            per_message_overhead: Self::approximate().per_message_overhead,
+        }
+    }
+
+    /// Pick the tokenizer for a known OpenAI model id, falling back to
+    /// `o200k_base`. Provider-qualified ids like `openai/gpt-5.1-codex`
+    /// are handled by trying both the full id and the segment after `/`.
+    pub fn for_model(model_id: &str) -> Self {
+        let tokenizer = tiktoken_rs::tokenizer::get_tokenizer(model_id)
+            .or_else(|| {
+                model_id
+                    .rsplit_once('/')
+                    .and_then(|(_, id)| tiktoken_rs::tokenizer::get_tokenizer(id))
+            })
+            .unwrap_or(Tokenizer::O200kBase);
+        TokenEstimator {
+            backend: TokenEstimatorBackend::Tiktoken(tokenizer),
+            per_message_overhead: Self::approximate().per_message_overhead,
+        }
+    }
+
     /// Customize the ratio. Values ≤ 0 are clamped to 1.0 to avoid divide-by-zero.
     pub fn with_bytes_per_token(n: f64) -> Self {
         let n = if n <= 0.0 { 1.0 } else { n };
         TokenEstimator {
-            bytes_per_token: n,
+            backend: TokenEstimatorBackend::BytesPerToken(n),
             per_message_overhead: Self::approximate().per_message_overhead,
         }
     }
@@ -126,12 +155,21 @@ impl TokenEstimator {
         self.per_message_overhead
     }
 
-    /// Tokens for a UTF-8 string (byte count divided by ratio).
-    /// Counts bytes rather than chars so CJK content (3 bytes/char) is
-    /// estimated near its real BPE token count instead of 4× under.
+    /// Tokens for a UTF-8 string. In tiktoken mode this uses the
+    /// selected BPE vocabulary; in fallback mode it counts UTF-8 bytes
+    /// divided by the configured ratio.
     pub fn estimate_string(&self, s: &str) -> u64 {
-        let bytes = s.len();
-        (bytes as f64 / self.bytes_per_token).ceil() as u64
+        match self.backend {
+            TokenEstimatorBackend::BytesPerToken(bytes_per_token) => {
+                (s.len() as f64 / bytes_per_token).ceil() as u64
+            }
+            TokenEstimatorBackend::Tiktoken(tokenizer) => {
+                match tiktoken_rs::bpe_for_tokenizer(tokenizer) {
+                    Ok(bpe) => bpe.encode_with_special_tokens(s).len() as u64,
+                    Err(_) => (s.len() as f64 / 4.0).ceil() as u64,
+                }
+            }
+        }
     }
 
     /// Tokens for one [`AgentMessage`] — content only, no framing.
@@ -264,11 +302,13 @@ impl ContextGuard {
     /// If the model isn't in the registry at hook time, the guard becomes a
     /// no-op rather than failing — easier to wire defensively.
     pub fn new(registry: Arc<Registry>, model_id: impl Into<String>) -> Self {
+        let model_id = model_id.into();
+        let estimator = TokenEstimator::for_model(&model_id);
         ContextGuard {
             registry,
             model_handle: Arc::new(RwLock::new(ActiveModelInfo::id(model_id))),
             policy: ContextGuardPolicy::default(),
-            estimator: TokenEstimator::approximate(),
+            estimator,
             headroom_tokens: 1024,
             system_overhead_tokens: 0,
         }
@@ -280,11 +320,16 @@ impl ContextGuard {
     /// policy) to track the same active model — pass the same
     /// [`ActiveModelHandle`] to each.
     pub fn with_active_model_handle(registry: Arc<Registry>, handle: ActiveModelHandle) -> Self {
+        let estimator = handle
+            .read()
+            .ok()
+            .map(|m| TokenEstimator::for_model(&m.id))
+            .unwrap_or_default();
         ContextGuard {
             registry,
             model_handle: handle,
             policy: ContextGuardPolicy::default(),
-            estimator: TokenEstimator::approximate(),
+            estimator,
             headroom_tokens: 1024,
             system_overhead_tokens: 0,
         }
@@ -533,10 +578,11 @@ mod tests {
     /// Build a transcript whose estimated token count exceeds `small_model`'s
     /// context window (1000 tokens) but fits `big_model` (1M tokens).
     fn large_transcript() -> Vec<AgentMessage> {
-        // Each message ~1000 chars → ~250 tokens at 4 chars/token.
-        // 6 messages → ~1500 tokens, exceeds the small model's 1000-token budget.
+        // Repeated ASCII compresses well under BPE, so use a large
+        // payload to exceed the 1000-token test window with both the
+        // tiktoken default and the byte-ratio fallback estimator.
         (0..6)
-            .map(|i| user_msg(&format!("msg{i}: {}", "x".repeat(1000))))
+            .map(|i| user_msg(&format!("msg{i}: {}", "x".repeat(10_000))))
             .collect()
     }
 

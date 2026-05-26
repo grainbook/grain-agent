@@ -67,11 +67,17 @@ pub fn build_auto_compaction_policy(
     let mut base_settings = DEFAULT_COMPACTION_SETTINGS;
     config.apply_to_settings(&mut base_settings);
 
+    let estimator = active_model_handle
+        .read()
+        .ok()
+        .map(|m| TokenEstimator::for_model(&m.id))
+        .unwrap_or_default();
+
     let mut token_budget_policy = TokenBudgetPolicy::new(
         registry,
         active_model_handle,
         base_settings.clone(),
-        TokenEstimator::approximate(),
+        estimator,
     );
     let mode_label = if config.deepseek_cache_first {
         let deepseek_resolver = grain_deepseek_pack::cache_first_settings_resolver();

@@ -32,6 +32,7 @@ pub mod compaction;
 pub mod config;
 pub mod deepseek;
 pub mod diagnostics;
+pub mod dynamic_tools;
 pub mod extensions;
 pub mod memory;
 pub mod migrations;
@@ -63,6 +64,10 @@ pub use compaction::{AutoCompactionConfig, AutoCompactionPolicy, build_auto_comp
 pub use config::{ArgDefaults, ConfigError, ConfigFile};
 pub use deepseek::DeepSeekPack;
 pub use diagnostics::{SourceInfo, render_doctor_report, render_source_info_block, source_info};
+pub use dynamic_tools::{
+    BASE_READ_TOOLS, BASH_TOOLS, SEMANTIC_TOOLS, ToolActivationDecision, WEB_TOOLS, WRITE_TOOLS,
+    filter_tools_by_names, select_dynamic_tool_names,
+};
 pub use extensions::{Extension, ExtensionRegistry};
 pub use memory::{
     DEFAULT_MAX_RECORDS as MEMORY_DEFAULT_MAX_RECORDS,

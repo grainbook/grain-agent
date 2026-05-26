@@ -71,3 +71,4 @@ arboard = { version = "3", default-features = false }
 textwrap = "0.16"
 fs2 = "0.4"
 nucleo-matcher = "0.3"
+tiktoken-rs = "0.11.0"

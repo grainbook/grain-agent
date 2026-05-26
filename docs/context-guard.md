@@ -41,13 +41,14 @@ pub enum ContextGuardPolicy {
 
 ## Token estimation
 
-`TokenEstimator` is a fixed chars-per-token approximation (default 4.0). Good enough for budget enforcement; swap in a tokenizer-backed estimator when worth the cost.
+`TokenEstimator` defaults to a local tiktoken BPE estimate. `ContextGuard::new` picks a model-specific OpenAI tokenizer when it can (for example `gpt-4` → `cl100k_base`, GPT-4o/GPT-5/Codex-family models → `o200k_base`) and otherwise falls back to `o200k_base`. A bytes-per-token estimator is still available for deterministic tests or provider-specific tuning.
 
 ```rust
 use grain_agent_harness::TokenEstimator;
 
-let est = TokenEstimator::approximate();         // 4.0 chars / token
-let custom = TokenEstimator::with_chars_per_token(2.5);  // CJK-heavy
+let est = TokenEstimator::for_model("openai/gpt-5.1-codex");
+let fallback = TokenEstimator::approximate();             // UTF-8 bytes / 4.0
+let custom = TokenEstimator::with_bytes_per_token(2.5);    // provider-specific fallback
 
 let tokens = est.estimate_string("hello world");
 let total  = est.estimate_messages(&transcript);
@@ -57,27 +58,27 @@ Per-content cost:
 
 | `AgentMessage` content | counted as |
 |---|---|
-| `UserContent::Text` | chars / ratio |
+| `UserContent::Text` | selected tokenizer, or bytes / fallback ratio |
 | `UserContent::Image` | flat 100 tokens |
-| `AssistantContent::Text` | chars / ratio |
-| `AssistantContent::Thinking` | thinking text + signature, each chars / ratio |
-| `AssistantContent::ToolCall` | name + JSON-serialized args, chars / ratio |
+| `AssistantContent::Text` | selected tokenizer, or bytes / fallback ratio |
+| `AssistantContent::Thinking` | thinking text + signature |
+| `AssistantContent::ToolCall` | name + JSON-serialized args |
 | `AssistantContent::Image` | flat 100 tokens |
-| `ToolResultMessage` (text content) | chars / ratio |
-| `AgentMessage::Custom(value)` | JSON-serialized value, chars / ratio |
+| `ToolResultMessage` (text content) | selected tokenizer, or bytes / fallback ratio |
+| `AgentMessage::Custom(value)` | JSON-serialized value |
 
 Override the estimator on the guard:
 
 ```rust
 ContextGuard::new(registry, "anthropic/claude-sonnet-4-5")
-    .with_estimator(TokenEstimator::with_chars_per_token(2.5))
+    .with_estimator(TokenEstimator::with_bytes_per_token(2.5))
     .into_transform_fn();
 ```
 
 ## Behavior summary
 
 1. Look up `model_id` in the registry. If not found, the guard becomes a **no-op** (defensive — never breaks the loop).
-2. Compute `budget = context_window - headroom_tokens`.
+2. Compute `budget = context_window - headroom_tokens - system_overhead_tokens`.
 3. Estimate total transcript tokens.
 4. If under budget, return unchanged.
 5. Otherwise apply the policy.
@@ -86,6 +87,6 @@ The headroom only matters when the budget is positive; `context_window = 0` (an 
 
 ## Caveats
 
-- The chars-per-token approximation is **conservative-on-average but not bounded**: CJK or code can push real tokenization 1.5–2× higher than the estimate. Raise `chars_per_token` or shrink the headroom if you see truncation that's too aggressive (or, conversely, requests that still overflow).
-- The system prompt isn't visible at this hook (it lives on `AgentContext.system_prompt`, not in `messages`). Leave room for it via `headroom_tokens`.
+- Local tokenization still is not provider ground truth: non-OpenAI providers may serialize roles, tools, images, and reasoning differently. Treat the estimator as preflight safety, and prefer provider-reported `usage` once a response returns.
+- The system prompt and tool schemas are not visible in the `messages` slice. Pre-charge them with `with_system_overhead_tokens`; otherwise a transcript that fits locally can still overflow when the request is serialized.
 - The hook receives the **filtered** `AgentMessage` snapshot. If a `convert_to_llm` later drops messages (e.g. all custom variants in `Agent`'s default), the actual request will be smaller than what we counted — being over-conservative is the safer direction.

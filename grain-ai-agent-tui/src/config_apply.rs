@@ -85,6 +85,11 @@ pub fn apply_config_to_args(cfg: &ConfigFile, args: &mut Args, explicit: &HashSe
     {
         args.allow_semantic_search = b;
     }
+    if !explicit.contains("disable_dynamic_tools")
+        && let Some(enabled) = cfg.dynamic_tools_enabled
+    {
+        args.disable_dynamic_tools = !enabled;
+    }
     if !explicit.contains("bypass_proxy")
         && args.bypass_proxy.is_none()
         && cfg.bypass_proxy.is_some()
@@ -219,6 +224,18 @@ mod tests {
         };
         apply_config_to_args(&cfg, &mut args, &HashSet::new());
         assert!(!args.allow_bash);
+    }
+
+    #[test]
+    fn dynamic_tools_config_can_disable_default() {
+        let mut args = parse(&[]);
+        assert!(!args.disable_dynamic_tools);
+        let cfg = ConfigFile {
+            dynamic_tools_enabled: Some(false),
+            ..ConfigFile::default()
+        };
+        apply_config_to_args(&cfg, &mut args, &HashSet::new());
+        assert!(args.disable_dynamic_tools);
     }
 
     #[test]

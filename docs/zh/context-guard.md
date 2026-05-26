@@ -43,13 +43,14 @@ pub enum ContextGuardPolicy {
 
 ## token 估算
 
-`TokenEstimator` 是定长 chars-per-token 近似（默认 4.0）。够预算守门用，未来要真 tokenizer 时再换。
+`TokenEstimator` 默认使用本地 tiktoken BPE 估算。`ContextGuard::new` 会尽量按模型选择 OpenAI tokenizer（例如 `gpt-4` → `cl100k_base`，GPT-4o/GPT-5/Codex 系列 → `o200k_base`），识别不到时回退到 `o200k_base`。如果要做确定性测试或特定 provider 调参，仍然可以使用 bytes-per-token fallback。
 
 ```rust
 use grain_agent_harness::TokenEstimator;
 
-let est = TokenEstimator::approximate();         // 4.0 chars / token
-let custom = TokenEstimator::with_chars_per_token(2.5);  // CJK 多
+let est = TokenEstimator::for_model("openai/gpt-5.1-codex");
+let fallback = TokenEstimator::approximate();             // UTF-8 bytes / 4.0
+let custom = TokenEstimator::with_bytes_per_token(2.5);    // provider 特定 fallback
 
 let tokens = est.estimate_string("hello world");
 let total  = est.estimate_messages(&transcript);
@@ -59,27 +60,27 @@ let total  = est.estimate_messages(&transcript);
 
 | `AgentMessage` content | 计算方式 |
 |---|---|
-| `UserContent::Text` | chars / 比率 |
+| `UserContent::Text` | 选中的 tokenizer，或 bytes / fallback 比率 |
 | `UserContent::Image` | 定额 100 tokens |
-| `AssistantContent::Text` | chars / 比率 |
-| `AssistantContent::Thinking` | 思考文本 + signature，各 chars / 比率 |
-| `AssistantContent::ToolCall` | name + JSON 序列化后的 args，chars / 比率 |
+| `AssistantContent::Text` | 选中的 tokenizer，或 bytes / fallback 比率 |
+| `AssistantContent::Thinking` | 思考文本 + signature |
+| `AssistantContent::ToolCall` | name + JSON 序列化后的 args |
 | `AssistantContent::Image` | 定额 100 tokens |
-| `ToolResultMessage`（文本 content） | chars / 比率 |
-| `AgentMessage::Custom(value)` | JSON 序列化后的 value，chars / 比率 |
+| `ToolResultMessage`（文本 content） | 选中的 tokenizer，或 bytes / fallback 比率 |
+| `AgentMessage::Custom(value)` | JSON 序列化后的 value |
 
 在 guard 上覆盖 estimator：
 
 ```rust
 ContextGuard::new(registry, "anthropic/claude-sonnet-4-5")
-    .with_estimator(TokenEstimator::with_chars_per_token(2.5))
+    .with_estimator(TokenEstimator::with_bytes_per_token(2.5))
     .into_transform_fn();
 ```
 
 ## 行为总览
 
 1. 在 registry 里查 `model_id`。查不到 → guard 变成 **no-op**（防御式——绝不破坏循环）。
-2. 计算 `budget = context_window - headroom_tokens`。
+2. 计算 `budget = context_window - headroom_tokens - system_overhead_tokens`。
 3. 估算 transcript 总 tokens。
 4. 不超预算就原样返回。
 5. 否则按策略处理。
@@ -88,6 +89,6 @@ ContextGuard::new(registry, "anthropic/claude-sonnet-4-5")
 
 ## 注意事项
 
-- chars-per-token 近似 **平均偏保守，但不是上界**：CJK 或代码场景实际 tokenization 可能比估算高 1.5–2 倍。看到截得太狠就调大 `chars_per_token`，或者请求仍超就缩小 headroom。
-- system prompt 在这个 hook 里看不到（它在 `AgentContext.system_prompt`，不在 `messages` 里）。用 `headroom_tokens` 给它留位置。
+- 本地 tokenizer 仍然不是 provider 的最终真值：非 OpenAI provider 可能用不同方式序列化 role、tools、images、reasoning。它适合做 preflight 安全阀；响应回来后仍应优先相信 provider reported `usage`。
+- system prompt 和 tool schemas 不在 `messages` slice 里。请用 `with_system_overhead_tokens` 预扣；否则本地 transcript 看起来没超，真正序列化请求时仍可能溢出。
 - hook 收到的是**过滤前**的 `AgentMessage` 快照。后续 `convert_to_llm` 可能再丢消息（例如 `Agent` 默认丢所有 custom），所以实际请求会比估算小——偏保守是更安全的方向。

@@ -932,49 +932,8 @@ async fn produce_summary(
     Ok(summary)
 }
 
-/// Crude token estimate (chars / 4). Matches the heuristic used by
-/// `grain-agent-harness::context_guard`'s default `TokenEstimator`.
 fn approximate_token_count(messages: &[AgentMessage]) -> u64 {
-    let mut chars = 0usize;
-    for m in messages {
-        match m {
-            AgentMessage::Standard(Message::User(u)) => {
-                for c in &u.content {
-                    if let UserContent::Text(t) = c {
-                        chars += t.text.chars().count();
-                    }
-                }
-            }
-            AgentMessage::Standard(Message::Assistant(a)) => {
-                for c in &a.content {
-                    match c {
-                        AssistantContent::Text(t) => chars += t.text.chars().count(),
-                        AssistantContent::Thinking(t) => chars += t.thinking.chars().count(),
-                        AssistantContent::ToolCall(tc) => {
-                            chars += tc.name.chars().count();
-                            chars += serde_json::to_string(&tc.arguments)
-                                .map(|s| s.chars().count())
-                                .unwrap_or(0);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            AgentMessage::Standard(Message::ToolResult(t)) => {
-                for c in &t.content {
-                    if let UserContent::Text(t) = c {
-                        chars += t.text.chars().count();
-                    }
-                }
-            }
-            AgentMessage::Custom(value) => {
-                chars += serde_json::to_string(value)
-                    .map(|s| s.chars().count())
-                    .unwrap_or(0);
-            }
-        }
-    }
-    (chars as u64).div_ceil(4)
+    TokenEstimator::default().estimate_messages(messages)
 }
 
 fn current_time_ms() -> i64 {

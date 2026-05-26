@@ -71,6 +71,35 @@ fn workspace_file_candidates(root: &std::path::Path) -> Vec<String> {
     out
 }
 
+fn dir_contains_extension(dir: &std::path::Path, extension: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if dir_contains_extension(&path, extension) {
+                return true;
+            }
+            continue;
+        }
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn script_dirs_contain_extension(script_dirs: &[PathBuf], extension: &str) -> bool {
+    script_dirs
+        .iter()
+        .any(|dir| dir_contains_extension(dir, extension))
+}
+
 /// Configuration crystallized out of [`Args`]. Pulled into its own
 /// struct so the spawn function isn't argument-soup.
 #[derive(Debug, Clone)]
@@ -84,6 +113,7 @@ pub struct WorkerConfig {
     pub allow_bash: bool,
     pub allow_web: bool,
     pub allow_semantic_search: bool,
+    pub dynamic_tools_enabled: bool,
     pub skills_dir: Option<PathBuf>,
     pub workspace_skills_only: bool,
     pub session: Option<PathBuf>,
@@ -152,6 +182,7 @@ impl From<&Args> for WorkerConfig {
             allow_bash: a.allow_bash,
             allow_web: a.allow_web,
             allow_semantic_search: a.allow_semantic_search,
+            dynamic_tools_enabled: !a.disable_dynamic_tools,
             skills_dir: a.skills_dir.clone(),
             workspace_skills_only: a.workspace_skills_only,
             session: a.session.clone(),
@@ -199,10 +230,10 @@ pub struct WorkerHandles {
     /// models.dev snapshot). `0` when unknown — the footer omits the
     /// `[ctx N%]` chip in that case.
     pub context_window: u64,
-    /// Length of the pinned system prompt in bytes (used by the
-    /// footer to estimate context-window occupancy locally, without
-    /// waiting for an API round-trip).
-    pub system_prompt_chars: usize,
+    /// Preflight input-token estimate for the pinned system prompt and
+    /// tool schemas. Used by the footer before the first provider usage
+    /// response arrives.
+    pub preflight_context_tokens: u64,
 }
 
 /// Errors that can happen *before* the worker successfully takes over.
@@ -257,6 +288,7 @@ struct HarnessBuilder {
     stream: StreamFn,
     system_prompt: String,
     tools: Vec<Arc<dyn AgentTool>>,
+    dynamic_tools_enabled: bool,
     transform_context: TransformContextFn,
     before_tool_call: Option<BeforeToolCallFn>,
     /// Compaction summarizer (= a clone of the live LlmStream).
@@ -605,7 +637,6 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         pinned.digest()
     );
     let system_prompt = pinned.to_string_owned();
-    let system_prompt_chars = system_prompt.len();
 
     // --- Session auto-create + restore -------------------------------------
     let session_repo =
@@ -757,23 +788,27 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         all_dirs.extend(grain_ai_agent_headless::plugin_script_dirs(
             &discovered_plugins,
         ));
-        match grain_script_boa::BoaExtension::from_scripts_dirs(&all_dirs) {
-            Ok(ext) => {
-                let scripted = ext.tools();
-                if !scripted.is_empty() {
-                    eprintln!(
-                        "[info] loaded {} JS tool(s) from {} dir(s) ({} from plugins)",
-                        scripted.len(),
-                        all_dirs.len(),
-                        all_dirs.len().saturating_sub(1)
-                    );
+        if !script_dirs_contain_extension(&all_dirs, "js") {
+            None
+        } else {
+            match grain_script_boa::BoaExtension::from_scripts_dirs(&all_dirs) {
+                Ok(ext) => {
+                    let scripted = ext.tools();
+                    if !scripted.is_empty() {
+                        eprintln!(
+                            "[info] loaded {} JS tool(s) from {} dir(s) ({} from plugins)",
+                            scripted.len(),
+                            all_dirs.len(),
+                            all_dirs.len().saturating_sub(1)
+                        );
+                    }
+                    tools.extend(scripted);
+                    Some(ext)
                 }
-                tools.extend(scripted);
-                Some(ext)
-            }
-            Err(e) => {
-                eprintln!("[warn] boa scripts: {e}");
-                None
+                Err(e) => {
+                    eprintln!("[warn] boa scripts: {e}");
+                    None
+                }
             }
         }
     };
@@ -808,6 +843,8 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     };
     #[cfg(feature = "scripts-rhai")]
     let workspace_for_rhai: PathBuf = workspace.root().to_path_buf();
+    #[cfg(feature = "scripts-rhai")]
+    let has_rhai_scripts = script_dirs_contain_extension(&rhai_dirs, "rhai");
 
     // Base tools snapshot **before** Rhai contribution — held by the
     // worker so hot-reload can rebuild the full tool list as
@@ -817,7 +854,14 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
 
     #[cfg(feature = "scripts-rhai")]
     let rhai_bundle: RhaiBundle = {
-        let bundle = build_rhai_bundle(&workspace_for_rhai, &plugins_dir, &rhai_dirs);
+        let bundle = if has_rhai_scripts {
+            build_rhai_bundle(&workspace_for_rhai, &plugins_dir, &rhai_dirs)
+        } else {
+            RhaiBundle {
+                tools: Vec::new(),
+                handles: Vec::new(),
+            }
+        };
         if !bundle.tools.is_empty() {
             eprintln!(
                 "[info] loaded {} Rhai tool(s) from {} dir(s)",
@@ -842,89 +886,95 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     #[cfg(feature = "wasm-plugins")]
     {
         use std::sync::Arc as StdArc;
-        // Route guest `log` host imports through the TUI event channel
-        // (single ephemeral-status row above the input) instead of the
-        // default `eprintln!`, which would clobber the alt-screen. Each
-        // new log line replaces the previous one; `Status` sink already
-        // animates the swap.
-        let evt_tx_for_wasm_log = evt_tx.clone();
-        let wasm_log_sink: grain_plugin_wasm::LogSink =
-            StdArc::new(move |level: &str, plugin: &str, msg: &str| {
-                let _ = evt_tx_for_wasm_log.send(TuiEvent::Status(format!(
-                    "[{level}] wasm '{plugin}': {msg}"
-                )));
-            });
-        match grain_plugin_wasm::WasmPluginRuntime::new() {
-            Ok(runtime) => {
-                let runtime = runtime.with_log_sink(wasm_log_sink);
-                let runtime = StdArc::new(runtime);
-                for plugin in &discovered_plugins {
-                    let Some(wasm_path) = plugin.wasm_module() else {
-                        continue;
-                    };
-                    let caps =
-                        grain_plugin_wasm::Capabilities::from_list(&plugin.wasm_capabilities());
-                    let plugin_id = plugin.manifest.name.clone();
-                    let plugin_name = plugin.manifest.name.clone();
-                    // `spawn()` is already an async fn driven by tokio
-                    // — calling `Handle::block_on` here panics with
-                    // "Cannot start a runtime from within a runtime".
-                    // Just `.await` the plugin load directly.
-                    // Resolve auth entries from plugin.toml.
-                    // Priority: higher wins when multiple entries target the same env var.
-                    let mut env_map = std::collections::HashMap::new();
-                    if let Some(spec) = plugin_spec.plugins.iter().find(|s| s.name == plugin_id) {
-                        let mut entries: Vec<_> = spec.auth.iter().collect();
-                        entries.sort_by_key(|e| e.priority);
-                        for entry in &entries {
-                            if entry.kind == "api_key"
-                                && let Some(ref val) = entry.value
-                            {
-                                env_map.insert(entry.env.clone(), val.clone());
+        let wasm_plugins: Vec<_> = discovered_plugins
+            .iter()
+            .filter_map(|plugin| plugin.wasm_module().map(|path| (plugin, path)))
+            .collect();
+        if !wasm_plugins.is_empty() {
+            // Route guest `log` host imports through the TUI event channel
+            // (single ephemeral-status row above the input) instead of the
+            // default `eprintln!`, which would clobber the alt-screen. Each
+            // new log line replaces the previous one; `Status` sink already
+            // animates the swap.
+            let evt_tx_for_wasm_log = evt_tx.clone();
+            let wasm_log_sink: grain_plugin_wasm::LogSink =
+                StdArc::new(move |level: &str, plugin: &str, msg: &str| {
+                    let _ = evt_tx_for_wasm_log.send(TuiEvent::Status(format!(
+                        "[{level}] wasm '{plugin}': {msg}"
+                    )));
+                });
+            match grain_plugin_wasm::WasmPluginRuntime::new() {
+                Ok(runtime) => {
+                    let runtime = runtime.with_log_sink(wasm_log_sink);
+                    let runtime = StdArc::new(runtime);
+                    for (plugin, wasm_path) in wasm_plugins {
+                        let caps =
+                            grain_plugin_wasm::Capabilities::from_list(&plugin.wasm_capabilities());
+                        let plugin_id = plugin.manifest.name.clone();
+                        let plugin_name = plugin.manifest.name.clone();
+                        // `spawn()` is already an async fn driven by tokio
+                        // — calling `Handle::block_on` here panics with
+                        // "Cannot start a runtime from within a runtime".
+                        // Just `.await` the plugin load directly.
+                        // Resolve auth entries from plugin.toml.
+                        // Priority: higher wins when multiple entries target the same env var.
+                        let mut env_map = std::collections::HashMap::new();
+                        if let Some(spec) = plugin_spec.plugins.iter().find(|s| s.name == plugin_id)
+                        {
+                            let mut entries: Vec<_> = spec.auth.iter().collect();
+                            entries.sort_by_key(|e| e.priority);
+                            for entry in &entries {
+                                if entry.kind == "api_key"
+                                    && let Some(ref val) = entry.value
+                                {
+                                    env_map.insert(entry.env.clone(), val.clone());
+                                }
+                                // If no value: leave it for OS env fallback.
                             }
-                            // If no value: leave it for OS env fallback.
                         }
-                    }
-                    match runtime
-                        .load(&wasm_path, &plugin_id, caps, &plugin_name, env_map)
-                        .await
-                    {
-                        Ok(loaded) => {
-                            let orchestration = loaded.orchestration.clone();
-                            // Boot-time load summary: route through the
-                            // event channel as an `Info` line so it
-                            // lands in the transcript scrollback, not
-                            // bleeding to stderr.
-                            let _ = evt_tx.send(TuiEvent::Info(format!(
-                                "wasm plugin '{}' v{}: {} tool(s)",
-                                loaded.info.name,
-                                loaded.info.version,
-                                loaded.tool_defs.len()
-                            )));
-                            for td in &loaded.tool_defs {
-                                tools.push(StdArc::new(grain_plugin_wasm::WasmTool::new(
-                                    runtime.clone(),
-                                    &plugin_id,
-                                    td,
+                        match runtime
+                            .load(&wasm_path, &plugin_id, caps, &plugin_name, env_map)
+                            .await
+                        {
+                            Ok(loaded) => {
+                                let orchestration = loaded.orchestration.clone();
+                                // Boot-time load summary: route through the
+                                // event channel as an `Info` line so it
+                                // lands in the transcript scrollback, not
+                                // bleeding to stderr.
+                                let _ = evt_tx.send(TuiEvent::Info(format!(
+                                    "wasm plugin '{}' v{}: {} tool(s)",
+                                    loaded.info.name,
+                                    loaded.info.version,
+                                    loaded.tool_defs.len()
                                 )));
+                                for td in &loaded.tool_defs {
+                                    tools.push(StdArc::new(grain_plugin_wasm::WasmTool::new(
+                                        runtime.clone(),
+                                        &plugin_id,
+                                        td,
+                                    )));
+                                }
+                                wasm_orchestration_plugins.push((
+                                    plugin_id.clone(),
+                                    runtime.clone(),
+                                    orchestration,
+                                ));
                             }
-                            wasm_orchestration_plugins.push((
-                                plugin_id.clone(),
-                                runtime.clone(),
-                                orchestration,
-                            ));
-                        }
-                        Err(e) => {
-                            let msg =
-                                format!("wasm plugin '{}' load failed: {e}", plugin.manifest.name);
-                            deferred_warnings.push(msg);
+                            Err(e) => {
+                                let msg = format!(
+                                    "wasm plugin '{}' load failed: {e}",
+                                    plugin.manifest.name
+                                );
+                                deferred_warnings.push(msg);
+                            }
                         }
                     }
                 }
-            }
-            Err(e) => {
-                let msg = format!("wasmtime runtime init failed: {e}");
-                deferred_warnings.push(msg);
+                Err(e) => {
+                    let msg = format!("wasmtime runtime init failed: {e}");
+                    deferred_warnings.push(msg);
+                }
             }
         }
     }
@@ -1001,7 +1051,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // pinned prompt + serialized tool definitions; 1.3x fudge covers
     // per-message JSON framing and provider-side role tokens.
     let system_overhead_tokens: u64 = {
-        let estimator = grain_agent_harness::TokenEstimator::approximate();
+        let estimator = grain_agent_harness::TokenEstimator::for_model(&active_model_id);
         let mut raw = estimator.estimate_string(&system_prompt);
         for t in &tools {
             let def = t.definition();
@@ -1024,9 +1074,18 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // here so it shows up in the TUI transcript instead of being
     // hidden behind the alt screen.
     let overhead_banner_for_replay = overhead_banner;
+    let initial_context_tokens = {
+        let estimator = grain_agent_harness::TokenEstimator::for_model(&active_model_id);
+        let session_context = session.build_context().await;
+        estimator.estimate_messages(&session_context.messages)
+    };
+    let preflight_context_tokens = system_overhead_tokens.saturating_add(initial_context_tokens);
     let guard =
         ContextGuard::with_active_model_handle(registry.clone(), active_model_handle.clone())
             .with_policy(ContextGuardPolicy::DropOldest)
+            .with_estimator(grain_agent_harness::TokenEstimator::for_model(
+                &active_model_id,
+            ))
             .with_headroom_tokens(cfg.headroom_tokens)
             .with_system_overhead_tokens(system_overhead_tokens)
             .into_transform_fn();
@@ -1200,6 +1259,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         stream,
         system_prompt,
         tools,
+        dynamic_tools_enabled: cfg.dynamic_tools_enabled,
         transform_context: guard,
         before_tool_call,
         compaction_policy,
@@ -1220,7 +1280,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         allow_semantic_search: cfg.allow_semantic_search,
         model_cost: model_cost.clone(),
         context_window: model_context_window,
-        system_prompt_chars,
+        preflight_context_tokens,
     };
 
     // --- Telemetry sink (Arc'd; lives across `/resume` swaps) -------------
@@ -1287,67 +1347,72 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     )> = {
         use notify::{RecursiveMode, Watcher};
 
-        let (event_tx, event_rx) = std::sync::mpsc::channel::<()>();
-        let watcher_result =
-            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                // Filter: only fire on data changes / file creation /
-                // removal. notify can also emit `Access` events on some
-                // platforms which would spam the bridge.
-                let should_fire = match res {
-                    Ok(ev) => matches!(
-                        ev.kind,
-                        notify::EventKind::Create(_)
-                            | notify::EventKind::Modify(_)
-                            | notify::EventKind::Remove(_)
-                    ),
-                    Err(_) => false,
-                };
-                if should_fire {
-                    let _ = event_tx.send(());
-                }
-            });
-        match watcher_result {
-            Ok(mut watcher) => {
-                let mut watched_any = false;
-                for dir in &rhai_dirs {
-                    if !dir.exists() {
-                        continue;
+        if !has_rhai_scripts {
+            None
+        } else {
+            let (event_tx, event_rx) = std::sync::mpsc::channel::<()>();
+            let watcher_result =
+                notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                    // Filter: only fire on data changes / file creation /
+                    // removal. notify can also emit `Access` events on some
+                    // platforms which would spam the bridge.
+                    let should_fire = match res {
+                        Ok(ev) => matches!(
+                            ev.kind,
+                            notify::EventKind::Create(_)
+                                | notify::EventKind::Modify(_)
+                                | notify::EventKind::Remove(_)
+                        ),
+                        Err(_) => false,
+                    };
+                    if should_fire {
+                        let _ = event_tx.send(());
                     }
-                    if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
-                        eprintln!("[warn] notify watch {}: {e}", dir.display());
-                    } else {
-                        watched_any = true;
-                    }
-                }
-                if watched_any {
-                    let cmd_tx_for_watcher = cmd_tx.clone();
-                    let bridge = std::thread::spawn(move || {
-                        // First-event blocks; bursts coalesce inside
-                        // the DEBOUNCE window so an editor's "atomic
-                        // save" (write-temp + rename) only triggers
-                        // one reload.
-                        const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
-                        while event_rx.recv().is_ok() {
-                            while event_rx.recv_timeout(DEBOUNCE).is_ok() {
-                                // drain
-                            }
-                            if cmd_tx_for_watcher.send(Command::ReloadRhaiScripts).is_err() {
-                                break;
-                            }
+                });
+            match watcher_result {
+                Ok(mut watcher) => {
+                    let mut watched_any = false;
+                    for dir in &rhai_dirs {
+                        if !dir.exists() {
+                            continue;
                         }
-                    });
-                    eprintln!(
-                        "[info] hot-reload: watching {} Rhai dir(s) for changes",
-                        rhai_dirs.len()
-                    );
-                    Some((watcher, bridge))
-                } else {
+                        if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
+                            eprintln!("[warn] notify watch {}: {e}", dir.display());
+                        } else {
+                            watched_any = true;
+                        }
+                    }
+                    if watched_any {
+                        let cmd_tx_for_watcher = cmd_tx.clone();
+                        let bridge = std::thread::spawn(move || {
+                            // First-event blocks; bursts coalesce inside
+                            // the DEBOUNCE window so an editor's "atomic
+                            // save" (write-temp + rename) only triggers
+                            // one reload.
+                            const DEBOUNCE: std::time::Duration =
+                                std::time::Duration::from_millis(250);
+                            while event_rx.recv().is_ok() {
+                                while event_rx.recv_timeout(DEBOUNCE).is_ok() {
+                                    // drain
+                                }
+                                if cmd_tx_for_watcher.send(Command::ReloadRhaiScripts).is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                        eprintln!(
+                            "[info] hot-reload: watching {} Rhai dir(s) for changes",
+                            rhai_dirs.len()
+                        );
+                        Some((watcher, bridge))
+                    } else {
+                        None
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[warn] hot-reload init failed: {e}");
                     None
                 }
-            }
-            Err(e) => {
-                eprintln!("[warn] hot-reload init failed: {e}");
-                None
             }
         }
     };
@@ -1629,7 +1694,31 @@ async fn run_command_loop(
                 // `install_subscriptions`.
                 let harness = harness.clone();
                 let evt_tx = evt_tx.clone();
+                let dynamic_tools_enabled = builder.dynamic_tools_enabled;
+                let all_tools = builder.tools.clone();
                 tokio::spawn(async move {
+                    if dynamic_tools_enabled {
+                        let state = harness.agent().state().await;
+                        let decision = grain_ai_agent_headless::select_dynamic_tool_names(
+                            &all_tools,
+                            &state.messages,
+                            &text,
+                        );
+                        let info = clamp_info_text(
+                            &format!(
+                                "(dynamic tools: {} — {})",
+                                decision.reason,
+                                decision.names.join(", ")
+                            ),
+                            600,
+                        );
+                        if let Err(e) = harness.set_active_tools(&decision.names).await {
+                            let _ = evt_tx
+                                .send(TuiEvent::AgentWorkerError(format!("dynamic tools: {e}")));
+                            return;
+                        }
+                        let _ = evt_tx.send(TuiEvent::Info(info));
+                    }
                     if let Err(e) = harness.prompt_text(text).await {
                         let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!("prompt: {e}")));
                     }

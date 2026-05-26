@@ -58,6 +58,12 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub allow_semantic_search: bool,
 
+    /// Disable prompt-based tool schema pruning. When unset, each turn
+    /// exposes only the tools that look relevant to the latest request
+    /// plus cheap read/search tools.
+    #[arg(long, default_value_t = false)]
+    pub disable_dynamic_tools: bool,
+
     /// Session tree directory: prior branch context is loaded on
     /// start; new session entries are appended as they finalize.
     /// Overrides `--sessions-dir` auto-create.
