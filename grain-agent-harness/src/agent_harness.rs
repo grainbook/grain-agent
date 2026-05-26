@@ -39,7 +39,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::compaction::{CompactionError, DEFAULT_COMPACTION_PROMPT, compact_transcript};
+use crate::compaction::{
+    CompactionError, DEFAULT_COMPACTION_PROMPT, compact_transcript, first_kept_context_entry_id,
+};
 use crate::messages::convert_to_llm as convert_to_llm_sync;
 use crate::session::{Session, SessionError};
 use crate::system_prompt::Skill;
@@ -836,19 +838,42 @@ impl AgentHarness {
         )
         .await?;
 
-        let leaf = self.session.leaf_id().await.unwrap_or_default();
-        // Use a placeholder "" for the summary body — the actual
-        // summary text lives in `new_transcript[0]` (a
-        // compactionSummary message). Future phases will extract
-        // the prose explicitly.
+        let first_kept = match first_kept_context_entry_id(&self.session, prefix_len).await {
+            Some(id) => id,
+            None => self.session.leaf_id().await.unwrap_or_default(),
+        };
+        let (summary, tokens_before) = match new_transcript.first() {
+            Some(AgentMessage::Custom(value)) => (
+                value
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                value
+                    .get("tokensBefore")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or_default(),
+            ),
+            _ => (String::new(), 0),
+        };
         let entry_id = self
             .session
-            .append_compaction("", leaf.clone(), 0, None, Some(false))
+            .append_compaction(
+                summary,
+                first_kept.clone(),
+                tokens_before,
+                None,
+                Some(false),
+            )
             .await?;
 
         self.agent.set_messages(new_transcript).await;
         self.emit(AgentHarnessEvent::SessionCompact {
-            kept_from: if leaf.is_empty() { None } else { Some(leaf) },
+            kept_from: if first_kept.is_empty() {
+                None
+            } else {
+                Some(first_kept)
+            },
         })
         .await;
         Ok(entry_id)
@@ -1562,7 +1587,7 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         let calls = Arc::new(AtomicU32::new(0));
         let calls_for_hook = calls.clone();
-        let hook: grain_agent_core::PrepareNextTurnFn = Arc::new(move |_ctx| {
+        let hook: grain_agent_core::PrepareNextTurnFn = Arc::new(move |_ctx, _cancel| {
             let calls = calls_for_hook.clone();
             Box::pin(async move {
                 calls.fetch_add(1, Ordering::Relaxed);

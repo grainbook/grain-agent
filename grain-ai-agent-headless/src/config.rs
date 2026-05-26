@@ -20,6 +20,10 @@
 //! skills_dir = ".claude/skills"
 //! workspace_skills_only = true
 //! session_dir = ".grain/sessions" # base dir for JSONL sessions; --session overrides
+//! memory_enabled = true
+//! memory_dir = ".grain/memory"
+//! auto_compaction_enabled = true
+//! compaction_threshold_percent = 92
 //!
 //! # Declarative plugin set. Equivalent to a hand-edited
 //! # plugin.toml entry. The runtime plugin manager
@@ -74,6 +78,22 @@ pub struct ConfigFile {
     /// takes precedence and is used as the sole scan path.
     pub workspace_skills_only: Option<bool>,
     pub session_dir: Option<PathBuf>,
+    /// Enable project-level long-term memory. When enabled, the TUI
+    /// injects `.grain/memory/memory_summary.md` into new sessions
+    /// and refreshes that file from session trees in the background.
+    pub memory_enabled: Option<bool>,
+    /// Override the directory containing project memory files.
+    /// Defaults to `<workspace>/.grain/memory`.
+    pub memory_dir: Option<PathBuf>,
+    /// Enable automatic pre-turn context compaction. Manual compact
+    /// commands can still run when this is false.
+    pub auto_compaction_enabled: Option<bool>,
+    pub compaction_threshold_tokens: Option<i64>,
+    pub compaction_threshold_percent: Option<i32>,
+    pub compaction_reserve_tokens: Option<u64>,
+    pub compaction_keep_recent_tokens: Option<u64>,
+    /// Enable DeepSeek-specific cache-first compaction defaults.
+    pub deepseek_cache_first: Option<bool>,
     /// Override for the proxy-bypass behavior of the genai HTTP client.
     /// `None` (unset) keeps the default auto-detect (bypass when a
     /// configured OpenAI-compat endpoint is on loopback). `Some(true)`
@@ -269,6 +289,30 @@ fn merge_into(dst: &mut ConfigFile, src: ConfigFile) {
     }
     if src.session_dir.is_some() {
         dst.session_dir = src.session_dir;
+    }
+    if src.memory_enabled.is_some() {
+        dst.memory_enabled = src.memory_enabled;
+    }
+    if src.memory_dir.is_some() {
+        dst.memory_dir = src.memory_dir;
+    }
+    if src.auto_compaction_enabled.is_some() {
+        dst.auto_compaction_enabled = src.auto_compaction_enabled;
+    }
+    if src.compaction_threshold_tokens.is_some() {
+        dst.compaction_threshold_tokens = src.compaction_threshold_tokens;
+    }
+    if src.compaction_threshold_percent.is_some() {
+        dst.compaction_threshold_percent = src.compaction_threshold_percent;
+    }
+    if src.compaction_reserve_tokens.is_some() {
+        dst.compaction_reserve_tokens = src.compaction_reserve_tokens;
+    }
+    if src.compaction_keep_recent_tokens.is_some() {
+        dst.compaction_keep_recent_tokens = src.compaction_keep_recent_tokens;
+    }
+    if src.deepseek_cache_first.is_some() {
+        dst.deepseek_cache_first = src.deepseek_cache_first;
     }
     if src.bypass_proxy.is_some() {
         dst.bypass_proxy = src.bypass_proxy;
@@ -474,6 +518,24 @@ auth  = { kind = "api_key", env = "OPENAI_API_KEY", value = "sk-openai-123" }
             cfg.providers[1].auth.value.as_deref(),
             Some("sk-openai-123")
         );
+    }
+
+    #[test]
+    fn config_parses_memory_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        write_toml(
+            &workspace_config_path(dir.path()),
+            "memory_enabled = false\nmemory_dir = \".grain/custom-memory\"\nauto_compaction_enabled = false\ncompaction_threshold_percent = 91\ndeepseek_cache_first = false\n",
+        );
+        let cfg = ConfigFile::load(dir.path()).unwrap();
+        assert_eq!(cfg.memory_enabled, Some(false));
+        assert_eq!(
+            cfg.memory_dir.as_deref(),
+            Some(Path::new(".grain/custom-memory"))
+        );
+        assert_eq!(cfg.auto_compaction_enabled, Some(false));
+        assert_eq!(cfg.compaction_threshold_percent, Some(91));
+        assert_eq!(cfg.deepseek_cache_first, Some(false));
     }
 
     #[test]

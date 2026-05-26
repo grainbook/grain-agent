@@ -40,11 +40,13 @@ pub use agent_harness::{
 };
 
 pub use compaction::{
-    CompactionError, CompactionPolicy, CompactionSettings, DEFAULT_COMPACTION_PROMPT,
+    CompactionError, CompactionNotice, CompactionNoticePhase, CompactionNotifyFn, CompactionPolicy,
+    CompactionSettings, CompactionSettingsResolver, DEFAULT_COMPACTION_PROMPT,
     DEFAULT_COMPACTION_SETTINGS, DEFAULT_KEEP_RECENT, DEFAULT_MESSAGE_THRESHOLD,
     DEFAULT_TOOL_RESULT_TRUNCATION_CAP_CHARS, MessageCountPolicy, TokenBudgetPolicy,
-    compact_transcript, compaction_prepare_next_turn, resolve_threshold_tokens, semantic_compress,
-    should_compact, snap_to_safe_boundary, tool_result_truncation_hook, truncate_tool_results,
+    compact_transcript, compaction_prepare_next_turn, compaction_prepare_next_turn_with_notify,
+    resolve_threshold_tokens, semantic_compress, should_compact, snap_to_safe_boundary,
+    tool_result_truncation_hook, truncate_tool_results,
 };
 pub use context_guard::{
     ActiveModelHandle, ActiveModelInfo, ContextGuard, ContextGuardPolicy, TokenEstimator,

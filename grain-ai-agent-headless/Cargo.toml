@@ -1,6 +1,6 @@
 [package]
 name = "grain-ai-agent-headless"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

@@ -58,14 +58,14 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub allow_semantic_search: bool,
 
-    /// JSONL session file: prior messages are loaded on start; new
-    /// messages are appended as they finalize. Overrides
-    /// `--sessions-dir` auto-create.
+    /// Session tree directory: prior branch context is loaded on
+    /// start; new session entries are appended as they finalize.
+    /// Overrides `--sessions-dir` auto-create.
     #[arg(long)]
     pub session: Option<PathBuf>,
 
-    /// Directory holding session JSONL files. When `--session` isn't
-    /// passed, the TUI auto-creates a fresh `<uuidv7>.jsonl` inside
+    /// Directory holding session tree directories. When `--session` isn't
+    /// passed, the TUI auto-creates a fresh `<uuidv7>/` inside
     /// this directory at startup so every run is recoverable later
     /// via `/resume`. Defaults to `<workspace>/.grain/sessions/`.
     #[arg(long)]
@@ -74,10 +74,51 @@ pub struct Args {
     /// Force a fresh session at startup. Without this flag, the TUI
     /// auto-resumes the most-recently-modified session found in
     /// `--sessions-dir`. Pair with `--session <path>` to pick a
-    /// specific transcript explicitly; pass this flag to ignore both
-    /// auto-resume and any existing transcripts and start clean.
+    /// specific session explicitly; pass this flag to ignore both
+    /// auto-resume and any existing sessions and start clean.
     #[arg(long, default_value_t = false)]
     pub new_session: bool,
+
+    /// Directory containing long-term project memory files. Defaults
+    /// to `<workspace>/.grain/memory/`. The TUI reads
+    /// `memory_summary.md` from here at startup and refreshes it from
+    /// session trees in the background.
+    #[arg(long)]
+    pub memory_dir: Option<PathBuf>,
+
+    /// Disable project-level long-term memory injection and refresh.
+    #[arg(long, default_value_t = false)]
+    pub disable_memory: bool,
+
+    /// Disable automatic pre-turn compaction. Manual `/compact` still works.
+    #[arg(long, default_value_t = false)]
+    pub disable_auto_compaction: bool,
+
+    /// Fixed token threshold for auto compaction. When unset, the
+    /// policy uses `--compaction-threshold-percent` or its default
+    /// fallback formula.
+    #[arg(long)]
+    pub compaction_threshold_tokens: Option<i64>,
+
+    /// Context-window percentage that triggers auto compaction
+    /// (`1..99`). Unset uses the default fallback formula.
+    #[arg(long)]
+    pub compaction_threshold_percent: Option<i32>,
+
+    /// Output reserve used by the auto-compaction fallback threshold.
+    #[arg(long)]
+    pub compaction_reserve_tokens: Option<u64>,
+
+    /// Recent token budget left untouched when auto compaction cuts
+    /// the old transcript prefix.
+    #[arg(long)]
+    pub compaction_keep_recent_tokens: Option<u64>,
+
+    /// Disable DeepSeek cache-first auto-compaction settings. By
+    /// default, DeepSeek model ids use a higher compaction threshold
+    /// to preserve prefix-cache efficiency.
+    #[arg(long, default_value_t = false)]
+    pub disable_deepseek_cache_first: bool,
 
     /// Directory scanned for skill files. By default pi-compatible locations
     /// are scanned; passing this flag uses only that path.

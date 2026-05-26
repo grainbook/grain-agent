@@ -18,18 +18,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use grain_agent_core::{
-    AgentEvent, AgentLoopTurnUpdate, AgentMessage, AgentTool, AgentToolError, AgentToolResult,
-    BeforeToolCallFn, ConvertToLlmFn, Message, Model, PrepareNextTurnFn, StreamFn, ToolDefinition,
-    ToolUpdateCallback, TransformContextFn,
+    AgentLoopTurnUpdate, AgentMessage, AgentTool, BeforeToolCallFn, ConvertToLlmFn, Message, Model,
+    PrepareNextTurnFn, StreamFn, TransformContextFn,
 };
 use grain_agent_harness::{
-    AgentHarness, AgentHarnessOptions, InMemorySessionStorage, Session, SessionMetadata,
-    SystemPrompt,
+    AgentHarness, AgentHarnessOptions, JsonlSessionRepo, Session,
+    SessionError as HarnessSessionError, SystemPrompt,
     context_guard::{ActiveModelHandle, ActiveModelInfo, ContextGuard, ContextGuardPolicy},
 };
 use grain_ai_agent_headless::{
-    SessionWriter, TelemetrySink, Workspace, coding_agent_system_prompt, coding_bash_tools,
-    coding_read_tools, coding_web_tools, coding_write_tools, find_skills_in_dirs, load_messages,
+    AutoCompactionConfig, TelemetrySink, Workspace, coding_agent_system_prompt, coding_bash_tools,
+    coding_read_tools, coding_web_tools, coding_write_tools, copy_session_tree_snapshot,
+    find_skills_in_dirs, list_sessions_excluding_active, new_session_path as new_session_dir,
+    normalize_tool_names_for_provider, open_or_create_session_dir, open_session_dir,
     render_doctor_report, resolve_skill_dirs_with_scope,
 };
 use grain_llm_genai::GenaiStream;
@@ -40,119 +41,6 @@ use crate::app::Command;
 use crate::cli::Args;
 use crate::event::TuiEvent;
 use grain_llm_genai::{ProviderAuth, ProviderKind, ProviderProfile};
-
-#[derive(Debug)]
-struct ProviderSafeTool {
-    inner: Arc<dyn AgentTool>,
-    definition: ToolDefinition,
-}
-
-#[async_trait::async_trait]
-impl AgentTool for ProviderSafeTool {
-    fn definition(&self) -> &ToolDefinition {
-        &self.definition
-    }
-
-    fn prepare_arguments(
-        &self,
-        args: serde_json::Value,
-    ) -> Result<serde_json::Value, AgentToolError> {
-        self.inner.prepare_arguments(args)
-    }
-
-    async fn execute(
-        &self,
-        tool_call_id: &str,
-        args: serde_json::Value,
-        cancel: tokio_util::sync::CancellationToken,
-        on_update: ToolUpdateCallback,
-    ) -> Result<AgentToolResult, AgentToolError> {
-        self.inner
-            .execute(tool_call_id, args, cancel, on_update)
-            .await
-    }
-}
-
-fn provider_safe_tool_name(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len().max(4));
-    for ch in raw.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            out.push(ch);
-        } else {
-            out.push('_');
-        }
-    }
-    while out.contains("__") {
-        out = out.replace("__", "_");
-    }
-    let out = out.trim_matches('_').to_string();
-    if out.is_empty() {
-        "tool".to_string()
-    } else {
-        out
-    }
-}
-
-fn make_unique_tool_name(base: String, used: &mut std::collections::HashSet<String>) -> String {
-    if used.insert(base.clone()) {
-        return base;
-    }
-
-    let mut idx = 2usize;
-    loop {
-        let candidate = format!("{base}_{idx}");
-        if used.insert(candidate.clone()) {
-            return candidate;
-        }
-        idx += 1;
-    }
-}
-
-fn normalize_tool_names_for_provider(tools: Vec<Arc<dyn AgentTool>>) -> Vec<Arc<dyn AgentTool>> {
-    let mut used = std::collections::HashSet::new();
-    tools
-        .into_iter()
-        .map(|tool| {
-            let original = tool.definition().name.clone();
-            let safe = make_unique_tool_name(provider_safe_tool_name(&original), &mut used);
-            if safe == original {
-                return tool;
-            }
-
-            let mut definition = tool.definition().clone();
-            definition.name = safe.clone();
-            eprintln!(
-                "[info] provider-safe tool alias: '{}' -> '{}'",
-                original, safe
-            );
-            Arc::new(ProviderSafeTool {
-                inner: tool,
-                definition,
-            }) as Arc<dyn AgentTool>
-        })
-        .collect()
-}
-
-fn paths_match(a: &std::path::Path, b: &std::path::Path) -> bool {
-    if a == b {
-        return true;
-    }
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    }
-}
-
-fn list_sessions_excluding_active(
-    sessions_dir: &std::path::Path,
-    active_session_path: Option<&std::path::Path>,
-) -> Vec<grain_ai_agent_headless::SessionMeta> {
-    let mut list = grain_ai_agent_headless::list_sessions(sessions_dir);
-    if let Some(active) = active_session_path {
-        list.retain(|meta| !paths_match(&meta.path, active));
-    }
-    list
-}
 
 fn workspace_file_candidates(root: &std::path::Path) -> Vec<String> {
     const MAX_FILE_CANDIDATES: usize = 20_000;
@@ -233,6 +121,18 @@ pub struct WorkerConfig {
     /// most-recently-modified session in `sessions_dir` so users
     /// return to where they left off across launches.
     pub new_session: bool,
+    /// Whether to inject project-level long-term memory and refresh it
+    /// from session trees in the background.
+    pub memory_enabled: bool,
+    /// Directory for `.grain/memory` artifacts. `None` →
+    /// `<workspace>/.grain/memory/`.
+    pub memory_dir: Option<PathBuf>,
+    pub auto_compaction_enabled: bool,
+    pub compaction_threshold_tokens: Option<i64>,
+    pub compaction_threshold_percent: Option<i32>,
+    pub compaction_reserve_tokens: Option<u64>,
+    pub compaction_keep_recent_tokens: Option<u64>,
+    pub deepseek_cache_first: bool,
     /// Root directory for `lazy.gagent` plugins. `None` →
     /// `<workspace>/.grain/plugins`. Phase A merges each plugin's
     /// `skills/` (and, on the TUI side, `themes/`) into the existing
@@ -267,6 +167,14 @@ impl From<&Args> for WorkerConfig {
             debug_log: a.debug_log,
             sessions_dir: a.sessions_dir.clone(),
             new_session: a.new_session,
+            memory_enabled: !a.disable_memory,
+            memory_dir: a.memory_dir.clone(),
+            auto_compaction_enabled: !a.disable_auto_compaction,
+            compaction_threshold_tokens: a.compaction_threshold_tokens,
+            compaction_threshold_percent: a.compaction_threshold_percent,
+            compaction_reserve_tokens: a.compaction_reserve_tokens,
+            compaction_keep_recent_tokens: a.compaction_keep_recent_tokens,
+            deepseek_cache_first: !a.disable_deepseek_cache_first,
             plugins_dir: a.plugins_dir.clone(),
         }
     }
@@ -357,6 +265,8 @@ struct HarnessBuilder {
     compaction_policy: Arc<dyn grain_agent_harness::CompactionPolicy>,
     /// Prompt fed to the summarizer.
     compaction_prompt: String,
+    /// UI event channel used by pre-turn auto compaction progress.
+    evt_tx: mpsc::UnboundedSender<TuiEvent>,
     /// Optional escalation hook chained AFTER compaction in
     /// [`Self::build_with_model`]. Compaction is built fresh per-build
     /// so it can capture the just-created `Session`; escalation has no
@@ -370,15 +280,12 @@ struct HarnessBuilder {
 }
 
 impl HarnessBuilder {
-    /// Build a fresh harness backed by an in-memory session seeded
-    /// with `prior_messages`. The harness mirrors every finalized
-    /// message back into the session (used by `compact()` and any
-    /// future branch / fork logic); on-disk JSONL persistence stays
-    /// with the separate `SessionWriter` subscription installed in
-    /// [`install_subscriptions`].
-    async fn build(&self, prior_messages: Vec<AgentMessage>) -> Arc<AgentHarness> {
-        self.build_with_model(prior_messages, self.model.clone())
-            .await
+    /// Build a fresh harness backed by the supplied persistent
+    /// session. The harness mirrors every finalized message back into
+    /// that same session tree, so normal messages, compactions,
+    /// branches, and custom messages share one durable log.
+    async fn build(&self, session: Session) -> Arc<AgentHarness> {
+        self.build_with_model(session, self.model.clone()).await
     }
 
     /// Same as [`Self::build`] but pins the new harness to the
@@ -387,29 +294,60 @@ impl HarnessBuilder {
     /// **currently** selected provider/model (the one the user is
     /// actively driving in this run) instead of snapping back to
     /// whatever was active at TUI startup.
-    async fn build_with_model(
-        &self,
-        prior_messages: Vec<AgentMessage>,
-        model: Model,
-    ) -> Arc<AgentHarness> {
-        let session = Session::new(Arc::new(
-            InMemorySessionStorage::new(SessionMetadata::new()),
-        ));
-        for msg in prior_messages {
-            if let Err(e) = session.append_message(msg).await {
-                eprintln!("[warn] seed session message failed: {e}");
-            }
-        }
+    async fn build_with_model(&self, session: Session, model: Model) -> Arc<AgentHarness> {
         // Build the compaction hook fresh per-build so it captures THIS
         // session, then chain it ahead of escalation. Without this, the
         // hook would carry a stale session from the previous /resume
         // and `append_compaction` would write into a session the UI
         // and on-disk JSONL no longer track.
-        let compaction_hook = grain_agent_harness::compaction_prepare_next_turn(
+        let evt_tx_for_compaction = self.evt_tx.clone();
+        let compaction_notify: grain_agent_harness::CompactionNotifyFn = Arc::new(
+            move |notice, _cancel| {
+                let evt_tx = evt_tx_for_compaction.clone();
+                Box::pin(async move {
+                    match notice.phase {
+                        grain_agent_harness::CompactionNoticePhase::Started => {
+                            let _ = evt_tx.send(TuiEvent::Info(format!(
+                                "(auto compaction starting before next turn — summarizing {} of {} message(s), ~{} tokens; Ctrl-C to cancel)",
+                                notice.prefix_len, notice.message_count, notice.tokens_before
+                            )));
+                        }
+                        grain_agent_harness::CompactionNoticePhase::Finished => {
+                            if let Some(messages) = notice.messages {
+                                let _ = evt_tx.send(TuiEvent::SessionCompacted { messages });
+                            }
+                            let _ = evt_tx.send(TuiEvent::Info(format!(
+                                "(auto compacted — summarized {} message(s), summary {} bytes)",
+                                notice.prefix_len, notice.summary_bytes
+                            )));
+                        }
+                        grain_agent_harness::CompactionNoticePhase::Skipped => {
+                            let reason = notice.reason.unwrap_or_else(|| "skipped".into());
+                            let _ =
+                                evt_tx.send(TuiEvent::Info(format!("(auto compaction {reason})")));
+                        }
+                        grain_agent_harness::CompactionNoticePhase::Failed => {
+                            let reason = notice.reason.unwrap_or_else(|| "failed".into());
+                            if reason.contains("aborted") || reason.contains("cancelled") {
+                                let _ = evt_tx.send(TuiEvent::Info(format!(
+                                    "(auto compaction cancelled — {reason})"
+                                )));
+                            } else {
+                                let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                                    "auto compaction failed: {reason}"
+                                )));
+                            }
+                        }
+                    }
+                })
+            },
+        );
+        let compaction_hook = grain_agent_harness::compaction_prepare_next_turn_with_notify(
             self.compaction_summarizer.clone(),
             self.compaction_policy.clone(),
             self.compaction_prompt.clone(),
             session.clone(),
+            Some(compaction_notify),
         );
         // Chain: truncation → compaction → escalation → WASM orchestration.
         // Truncation runs first so compaction sees already-capped tool
@@ -442,18 +380,12 @@ impl HarnessBuilder {
 }
 
 /// Fan the harness's inner-`Agent` events into the TUI's mpsc channel
-/// plus (optionally) a telemetry sink and an on-disk session writer.
+/// plus (optionally) a telemetry sink.
 /// Called once at startup and again on every `/resume` swap.
-///
-/// The session-writer subscription duplicates what the harness already
-/// mirrors into its in-memory session — that's deliberate: harness
-/// state powers branch / compaction logic, while the flat-file JSONL
-/// on disk is what `/resume`'s discovery scan reads.
 async fn install_subscriptions(
     harness: &Arc<AgentHarness>,
     evt_tx: &mpsc::UnboundedSender<TuiEvent>,
     telemetry_sink: Option<Arc<TelemetrySink>>,
-    session_writer: Option<Arc<SessionWriter>>,
 ) {
     let fan_tx = evt_tx.clone();
     harness
@@ -477,20 +409,6 @@ async fn install_subscriptions(
             }))
             .await;
     }
-
-    if let Some(writer) = session_writer {
-        harness
-            .agent()
-            .subscribe(Arc::new(move |event, _signal| {
-                let w = writer.clone();
-                Box::pin(async move {
-                    if let AgentEvent::MessageEnd { message } = event {
-                        let _ = w.append(&message);
-                    }
-                })
-            }))
-            .await;
-    }
 }
 
 /// Spawn the agent worker. Returns a [`Worker`] bundle on success.
@@ -501,6 +419,20 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             .map_err(|e| WorkerInitError::Workspace(e.to_string()))?,
     );
     let registry = Arc::new(Registry::from_embedded_snapshot());
+    let sessions_dir = cfg
+        .sessions_dir
+        .clone()
+        .unwrap_or_else(|| workspace.root().join(".grain").join("sessions"));
+    let memory_dir = cfg
+        .memory_dir
+        .clone()
+        .unwrap_or_else(|| workspace.root().join(".grain").join("memory"));
+    let memory_settings = cfg.memory_enabled.then(|| {
+        grain_ai_agent_headless::ProjectMemorySettings::for_workspace(workspace.root())
+            .with_sessions_dir(&sessions_dir)
+            .with_memory_dir(&memory_dir)
+    });
+    let mut memory_boot_info: Option<String> = None;
 
     // Resolve the model that the agent boots with. If a startup profile
     // was named, its `model` (with provider rewritten to the profile
@@ -632,8 +564,23 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         })?,
         None => coding_agent_system_prompt(cfg.allow_write, cfg.allow_bash).to_string(),
     };
-    let base_prompt =
+    let mut base_prompt =
         grain_ai_agent_headless::compose_system_prompt_with_plugins(&raw_base, &discovered_plugins);
+    if let Some(settings) = &memory_settings {
+        match grain_ai_agent_headless::load_project_memory_prompt(&settings.memory_dir) {
+            Ok(Some(fragment)) => {
+                let bytes = fragment.len();
+                base_prompt.push_str("\n\n");
+                base_prompt.push_str(&fragment);
+                memory_boot_info = Some(format!(
+                    "(project memory injected: {bytes} bytes from {})",
+                    settings.memory_dir.join("memory_summary.md").display()
+                ));
+            }
+            Ok(None) => {}
+            Err(e) => deferred_warnings.push(format!("project memory load failed: {e}")),
+        }
+    }
     let skill_dirs = resolve_skill_dirs_with_scope(
         workspace.root(),
         cfg.skills_dir.as_deref(),
@@ -661,15 +608,18 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     let system_prompt_chars = system_prompt.len();
 
     // --- Session auto-create + restore -------------------------------------
-    let sessions_dir = cfg
-        .sessions_dir
-        .clone()
-        .unwrap_or_else(|| workspace.root().join(".grain").join("sessions"));
+    let session_repo =
+        Arc::new(
+            JsonlSessionRepo::new(&sessions_dir).map_err(|e| WorkerInitError::Session {
+                path: sessions_dir.clone(),
+                source: Box::new(e),
+            })?,
+        );
     if cfg.session.is_none() {
         // Two-step resolution: auto-resume the most-recently-modified
-        // transcript in `sessions_dir` when `--new-session` is off
+        // session tree in `sessions_dir` when `--new-session` is off
         // (the default — users expect to return to the conversation
-        // they had open). Falls back to minting a fresh `<uuidv7>.jsonl`
+        // they had open). Falls back to minting a fresh `<uuidv7>`
         // when no prior session exists, or when the caller forced
         // `--new-session`.
         let resumed = if !cfg.new_session {
@@ -685,56 +635,37 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             eprintln!("[info] auto-resume: {}", path.display());
             cfg.session = Some(path);
         } else {
-            match std::fs::create_dir_all(&sessions_dir) {
-                Ok(()) => {
-                    let path = grain_ai_agent_headless::new_session_path(&sessions_dir);
-                    eprintln!("[info] session: {}", path.display());
-                    cfg.session = Some(path);
-                }
-                Err(e) => {
-                    eprintln!(
-                        "[warn] could not create sessions dir {}: {e} \
-                         (session won't be persisted this run)",
-                        sessions_dir.display()
-                    );
-                }
-            }
+            let path = new_session_dir(&sessions_dir);
+            eprintln!("[info] session: {}", path.display());
+            cfg.session = Some(path);
         }
     }
-    // --- Lock-aware writer open --------------------------------------------
-    // Try to acquire the advisory lock on `cfg.session`. If a sibling
+    // --- Lock-aware session open -------------------------------------------
+    // Try to acquire the advisory lock on the session tree. If a sibling
     // grain process already holds it (auto-resume race), record the
     // contested path and silently re-mint a fresh uuidv7 so this run
     // still has a writable session. The worker will emit
     // `TuiEvent::SessionLockedAtBoot` after subscriptions install, and
-    // the UI overlay lets the user pick fresh (stay here) / fork /
-    // quit. Path resolution above guarantees `cfg.session` is
-    // populated only when the sessions dir exists.
+    // the UI overlay lets the user pick fresh (stay here) / fork / quit.
     let mut boot_locked_path: Option<PathBuf> = None;
-    let session_writer: Option<Arc<SessionWriter>> = match cfg.session.clone() {
-        Some(path) => match SessionWriter::open(&path) {
-            Ok(w) => Some(Arc::new(w)),
-            Err(grain_ai_agent_headless::SessionError::Locked { .. }) => {
+    let session = match cfg.session.clone() {
+        Some(path) => match open_or_create_session_dir(&session_repo, &path).await {
+            Ok(session) => session,
+            Err(HarnessSessionError::Locked { .. }) => {
                 eprintln!(
                     "[info] {} held by another grain process — starting fresh",
                     path.display()
                 );
                 boot_locked_path = Some(path);
-                // Mint a fresh path and retry. If the sessions dir
-                // creation failed at boot, cfg.session would have
-                // been None and we wouldn't be on this branch.
-                let fresh = grain_ai_agent_headless::new_session_path(&sessions_dir);
+                let fresh = new_session_dir(&sessions_dir);
                 cfg.session = Some(fresh.clone());
-                match SessionWriter::open(&fresh) {
-                    Ok(w) => Some(Arc::new(w)),
+                match open_or_create_session_dir(&session_repo, &fresh).await {
+                    Ok(session) => session,
                     Err(e) => {
-                        eprintln!(
-                            "[warn] open fresh session {} failed: {e} \
-                             (session won't be persisted this run)",
-                            fresh.display()
-                        );
-                        cfg.session = None;
-                        None
+                        return Err(WorkerInitError::Session {
+                            path: fresh,
+                            source: Box::new(e),
+                        });
                     }
                 }
             }
@@ -745,22 +676,15 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                 });
             }
         },
-        None => None,
-    };
-
-    let prior_messages = if boot_locked_path.is_some() {
-        // Fresh path — nothing to restore. Even though the locked
-        // file has prior messages, attaching them here would
-        // implicitly mean "we resumed it", which is exactly what
-        // the user must still opt into via Fork.
-        Vec::new()
-    } else {
-        match &cfg.session {
-            Some(path) => load_messages(path).map_err(|e| WorkerInitError::Session {
-                path: path.clone(),
-                source: Box::new(e),
-            })?,
-            None => Vec::new(),
+        None => {
+            let path = new_session_dir(&sessions_dir);
+            cfg.session = Some(path.clone());
+            open_or_create_session_dir(&session_repo, &path)
+                .await
+                .map_err(|e| WorkerInitError::Session {
+                    path,
+                    source: Box::new(e),
+                })?
         }
     };
 
@@ -1120,6 +1044,9 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     for msg in deferred_warnings.drain(..) {
         let _ = evt_tx.send(TuiEvent::AgentWorkerError(msg));
     }
+    if let Some(msg) = memory_boot_info.clone() {
+        let _ = evt_tx.send(TuiEvent::Info(msg));
+    }
     // Surface the context-guard overhead pre-charge so the user can
     // see what budget the guard is actually working against without
     // having to hunt for stderr behind the alt screen.
@@ -1155,13 +1082,29 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // The hook itself is constructed inside `HarnessBuilder::build_with_model`
     // because it needs to capture the fresh Session each /resume creates;
     // here we just stash the components.
-    let compaction_policy: Arc<dyn grain_agent_harness::CompactionPolicy> =
-        Arc::new(grain_agent_harness::TokenBudgetPolicy::new(
-            registry.clone(),
-            active_model_handle.clone(),
-            grain_agent_harness::DEFAULT_COMPACTION_SETTINGS,
-            grain_agent_harness::TokenEstimator::approximate(),
-        ));
+    let compaction_setup = grain_ai_agent_headless::build_auto_compaction_policy(
+        registry.clone(),
+        active_model_handle.clone(),
+        AutoCompactionConfig {
+            enabled: cfg.auto_compaction_enabled,
+            threshold_tokens: cfg.compaction_threshold_tokens,
+            threshold_percent: cfg.compaction_threshold_percent,
+            reserve_tokens: cfg.compaction_reserve_tokens,
+            keep_recent_tokens: cfg.compaction_keep_recent_tokens,
+            deepseek_cache_first: cfg.deepseek_cache_first,
+        },
+    );
+    let base_compaction_settings = compaction_setup.base_settings.clone();
+    let compaction_policy = compaction_setup.policy;
+    let compaction_mode = compaction_setup.mode_label;
+    let _ = evt_tx.send(TuiEvent::Info(format!(
+        "(compaction policy: {compaction_mode}; enabled={}, threshold_tokens={}, threshold_percent={}, reserve={}, keep_recent={})",
+        base_compaction_settings.enabled,
+        base_compaction_settings.threshold_tokens,
+        base_compaction_settings.threshold_percent,
+        base_compaction_settings.reserve_tokens,
+        base_compaction_settings.keep_recent_tokens,
+    )));
     let compaction_prompt = grain_agent_harness::DEFAULT_COMPACTION_PROMPT.to_string();
 
     // --- Debug-log `convert_to_llm` wrapper --------------------------------
@@ -1261,11 +1204,12 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         before_tool_call,
         compaction_policy,
         compaction_prompt,
+        evt_tx: evt_tx.clone(),
         escalation_hook,
         wasm_orchestration_hook,
         convert_to_llm,
     });
-    let harness = builder.build(prior_messages).await;
+    let harness = builder.build(session).await;
 
     let handles = WorkerHandles {
         model_id: active_model_id.clone(),
@@ -1293,27 +1237,19 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         None => None,
     };
 
-    // --- Session writer ----------------------------------------------------
-    // The writer was opened earlier (lock-aware boot path); rebinding
-    // here is the original anchor point so subscription wiring + the
-    // worker-loop signature stay identical to before. `session_writer`
-    // is reopened on every `/resume` or `/fork` swap inside
-    // `run_command_loop`.
-
     let profiles = cfg.profiles.clone();
     let workspace_for_task = workspace.clone();
     let registry_for_task = registry.clone();
     let skill_dirs_for_task = skill_dirs.clone();
     let sessions_dir_for_task = sessions_dir.clone();
+    let memory_settings_for_task = memory_settings.clone();
     let plugins_dir_for_task = plugins_dir.clone();
     let evt_tx_for_task = evt_tx.clone();
     let model_cost_for_task = model_cost.clone();
-    // Snapshot the on-disk path the harness is currently persisting
-    // to. The worker loop updates this on `/clear` (Reset) and
-    // `/resume` (ResumeSession) so `DeleteSession` can refuse to
-    // unlink the file the live `SessionWriter` is still appending
-    // to. `None` when boot-time `cfg.session` was None (sessions
-    // dir creation failed, etc.).
+    // Snapshot the on-disk session directory the harness is currently
+    // persisting to. The worker loop updates this on `/clear` and
+    // `/resume` so `DeleteSession` can refuse to remove the active
+    // locked tree.
     let active_session_path_for_task = cfg.session.clone();
     // Captured by the worker task closure so the Boa worker stays
     // alive for the whole agent lifetime; dropping at task end sends
@@ -1427,13 +1363,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         #[cfg(feature = "hot-reload")]
         let _hot_reload_keepalive_in_task = _hot_reload_keepalive;
 
-        install_subscriptions(
-            &harness,
-            &evt_tx_for_task,
-            telemetry_sink.clone(),
-            session_writer.clone(),
-        )
-        .await;
+        install_subscriptions(&harness, &evt_tx_for_task, telemetry_sink.clone()).await;
 
         // Send loaded skills to the UI so the slash-palette can offer
         // skill prompt injection alongside built-in commands.
@@ -1445,6 +1375,37 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         // TUI's dispatch_slash consults them before the built-in
         // table — that's how lazy-gagent claims `/plugins`.
         let _ = evt_tx_for_task.send(TuiEvent::SlashCommandsRegistered(plugin_slashes_at_boot));
+
+        if let Some(settings) = memory_settings_for_task.clone() {
+            let evt_tx_for_memory = evt_tx_for_task.clone();
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    grain_ai_agent_headless::refresh_project_memory(&settings)
+                })
+                .await;
+                match result {
+                    Ok(Ok(report)) => {
+                        if report.scanned_sessions > 0 {
+                            let _ = evt_tx_for_memory.send(TuiEvent::Info(format!(
+                                "(project memory refreshed: {} item(s), {} session(s), {})",
+                                report.record_count,
+                                report.scanned_sessions,
+                                report.memory_dir.join("memory_summary.md").display()
+                            )));
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        let _ = evt_tx_for_memory
+                            .send(TuiEvent::AgentWorkerError(format!("project memory: {e}")));
+                    }
+                    Err(e) => {
+                        let _ = evt_tx_for_memory.send(TuiEvent::AgentWorkerError(format!(
+                            "project memory task failed: {e}"
+                        )));
+                    }
+                }
+            });
+        }
 
         // If we booted with a profile, tell the UI so the status line
         // and `✓` marker land correctly on first frame.
@@ -1479,13 +1440,14 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             harness,
             builder,
             telemetry_sink,
-            session_writer,
+            session_repo,
             deepseek,
             workspace_for_task,
             registry_for_task,
             active_model_handle,
             skill_dirs_for_task,
             sessions_dir_for_task,
+            memory_settings_for_task,
             plugins_dir_for_task,
             profiles,
             overhead_banner_for_replay,
@@ -1573,11 +1535,11 @@ fn chain_prepare_next_turn(
     match (a, b) {
         (None, None) => None,
         (Some(f), None) | (None, Some(f)) => Some(f),
-        (Some(first), Some(second)) => Some(Arc::new(move |ctx| {
+        (Some(first), Some(second)) => Some(Arc::new(move |ctx, cancel| {
             let first = first.clone();
             let second = second.clone();
             Box::pin(async move {
-                let update_a = first(ctx.clone()).await;
+                let update_a = first(ctx.clone(), cancel.clone()).await;
 
                 // If A produced a context rewrite, build a new
                 // PrepareNextTurnContext with that context so B
@@ -1593,7 +1555,7 @@ fn chain_prepare_next_turn(
                     ctx
                 };
 
-                let update_b = second(ctx_for_b).await;
+                let update_b = second(ctx_for_b, cancel).await;
 
                 // Merge: B's fields override A's where present.
                 match (update_a, update_b) {
@@ -1610,26 +1572,36 @@ fn chain_prepare_next_turn(
     }
 }
 
+fn clamp_info_text(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n...(truncated)", text[..end].trim_end())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_command_loop(
     mut harness: Arc<AgentHarness>,
     builder: Arc<HarnessBuilder>,
     telemetry_sink: Option<Arc<TelemetrySink>>,
-    mut session_writer: Option<Arc<SessionWriter>>,
+    session_repo: Arc<JsonlSessionRepo>,
     deepseek: grain_ai_agent_headless::DeepSeekPack,
     workspace: Arc<Workspace>,
     registry: Arc<Registry>,
     active_model_handle: ActiveModelHandle,
     skill_dirs: Vec<PathBuf>,
     sessions_dir: PathBuf,
+    memory_settings: Option<grain_ai_agent_headless::ProjectMemorySettings>,
     plugins_dir: PathBuf,
     profiles: Vec<ProviderProfile>,
     overhead_banner: String,
-    // Path of the JSONL the live `session_writer` is appending to.
+    // Path of the session tree the live harness is appending to.
     // Mirrors what `Reset` / `ResumeSession` swap to so
-    // `DeleteSession` can refuse to unlink the file out from under
-    // an open writer. `None` when persistence is disabled (the
-    // sessions dir wasn't creatable at boot).
+    // `DeleteSession` can refuse to remove the active tree.
     mut active_session_path: Option<PathBuf>,
     mut cmd_rx: mpsc::UnboundedReceiver<Command>,
     evt_tx: mpsc::UnboundedSender<TuiEvent>,
@@ -1667,46 +1639,27 @@ async fn run_command_loop(
                 harness.abort().await;
             }
             Command::Reset => {
-                // `/clear` semantics: fresh in-memory transcript AND a
-                // fresh on-disk session file. The previous handler
-                // only ran `agent.reset()` — that cleared in-memory
-                // messages but the auto-resume path on next TUI
-                // launch would re-load the still-on-disk JSONL,
-                // dragging the "cleared" history right back. Plus
-                // the same session writer kept appending into the
-                // mid-debug file, conflating clean turns with the
-                // pre-clear transcript.
-                //
-                // Implementation mirrors `ResumeSession` but seeded
-                // with `Vec::new()` and a freshly-minted session
-                // path. The old JSONL is left alone — the user can
-                // still `/resume` it later if they want the history
-                // back.
+                // `/clear` semantics: fresh harness transcript AND a
+                // fresh persistent session tree. The old tree is left
+                // alone — the user can still `/resume` it later.
                 harness.abort().await;
                 harness.wait_for_idle().await;
-                let new_path = grain_ai_agent_headless::new_session_path(&sessions_dir);
-                let new_writer: Option<Arc<SessionWriter>> = match SessionWriter::open(&new_path) {
-                    Ok(w) => Some(Arc::new(w)),
+                let new_path = new_session_dir(&sessions_dir);
+                let new_session = match open_or_create_session_dir(&session_repo, &new_path).await {
+                    Ok(session) => session,
                     Err(e) => {
                         let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
-                            "clear: open new session writer {} failed: {e}",
+                            "clear: open new session {} failed: {e}",
                             new_path.display()
                         )));
-                        None
+                        continue;
                     }
                 };
                 let new_harness = builder
-                    .build_with_model(Vec::new(), current_model.clone())
+                    .build_with_model(new_session, current_model.clone())
                     .await;
-                install_subscriptions(
-                    &new_harness,
-                    &evt_tx,
-                    telemetry_sink.clone(),
-                    new_writer.clone(),
-                )
-                .await;
+                install_subscriptions(&new_harness, &evt_tx, telemetry_sink.clone()).await;
                 harness = new_harness;
-                session_writer = new_writer;
                 active_session_path = Some(new_path.clone());
                 let _ = evt_tx.send(TuiEvent::Info(format!(
                     "(cleared — fresh session: {})",
@@ -1736,18 +1689,34 @@ async fn run_command_loop(
             }
             Command::DeleteSession(path) => {
                 // If the user explicitly deletes the active session, treat it
-                // as "clear + rm": abort, close the writer (releasing the
-                // file handle so the OS lets us unlink), delete the old
-                // file, then mint a fresh session.  UX: the old history
+                // as "clear + rm": abort, drop the harness (releasing the
+                // directory lock), delete the old tree, then mint a fresh
+                // session. UX: the old history
                 // is gone for good — the user confirmed this path in the
                 // picker, so no additional confirmation dialog is needed.
                 if active_session_path.as_ref() == Some(&path) {
                     harness.abort().await;
                     harness.wait_for_idle().await;
-                    // Drop the writer first — it holds an open fd that
-                    // would otherwise keep the inode alive on Unix.
-                    drop(session_writer.take());
-                    match std::fs::remove_file(&path) {
+                    // Mint a fresh session so the user can continue.
+                    let new_path = new_session_dir(&sessions_dir);
+                    let new_session =
+                        match open_or_create_session_dir(&session_repo, &new_path).await {
+                            Ok(session) => session,
+                            Err(e) => {
+                                let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                                    "delete: open new session {} failed: {e}",
+                                    new_path.display()
+                                )));
+                                continue;
+                            }
+                        };
+                    let new_harness = builder
+                        .build_with_model(new_session, current_model.clone())
+                        .await;
+                    install_subscriptions(&new_harness, &evt_tx, telemetry_sink.clone()).await;
+                    let old_harness = std::mem::replace(&mut harness, new_harness);
+                    drop(old_harness);
+                    match std::fs::remove_dir_all(&path) {
                         Ok(()) => {
                             let _ = evt_tx.send(TuiEvent::Info(format!(
                                 "(deleted active session: {})",
@@ -1761,30 +1730,6 @@ async fn run_command_loop(
                             )));
                         }
                     }
-                    // Mint a fresh session so the user can continue.
-                    let new_path = grain_ai_agent_headless::new_session_path(&sessions_dir);
-                    let new_writer = match SessionWriter::open(&new_path) {
-                        Ok(w) => Some(Arc::new(w)),
-                        Err(e) => {
-                            let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
-                                "delete: open new session writer {} failed: {e}",
-                                new_path.display()
-                            )));
-                            None
-                        }
-                    };
-                    let new_harness = builder
-                        .build_with_model(Vec::new(), current_model.clone())
-                        .await;
-                    install_subscriptions(
-                        &new_harness,
-                        &evt_tx,
-                        telemetry_sink.clone(),
-                        new_writer.clone(),
-                    )
-                    .await;
-                    harness = new_harness;
-                    session_writer = new_writer;
                     active_session_path = Some(new_path.clone());
                     let _ = evt_tx.send(TuiEvent::Info(format!(
                         "(fresh session after delete: {})",
@@ -1804,15 +1749,8 @@ async fn run_command_loop(
                     continue;
                 }
                 // Constrain deletes to `sessions_dir` and require a
-                // `.jsonl` extension so a malformed Command can't
-                // be used to unlink arbitrary files. Compare on
-                // canonical paths because the picker's list may
-                // emit non-canonical PathBufs (the `sessions_dir`
-                // we hold isn't canonicalized either, so canonicalize
-                // both for a fair compare; fall back to the literal
-                // parent when canonicalize fails — e.g. on a
-                // permission-denied dir, the user-visible failure
-                // is the same).
+                // direct child directory so a malformed Command can't
+                // be used to remove arbitrary files.
                 let in_sessions_dir = match (path.parent(), Some(sessions_dir.as_path())) {
                     (Some(parent), Some(dir)) => {
                         let canon_parent = parent
@@ -1823,16 +1761,16 @@ async fn run_command_loop(
                     }
                     _ => false,
                 };
-                let is_jsonl = path.extension().and_then(|s| s.to_str()) == Some("jsonl");
-                if !in_sessions_dir || !is_jsonl {
+                let is_dir = path.is_dir();
+                if !in_sessions_dir || !is_dir {
                     let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
-                        "delete refused: {} is not a session jsonl under {}",
+                        "delete refused: {} is not a session directory under {}",
                         path.display(),
                         sessions_dir.display()
                     )));
                     continue;
                 }
-                match std::fs::remove_file(&path) {
+                match std::fs::remove_dir_all(&path) {
                     Ok(()) => {
                         let _ = evt_tx.send(TuiEvent::Info(format!(
                             "(deleted session: {})",
@@ -2067,44 +2005,29 @@ async fn run_command_loop(
                 harness.abort().await;
                 harness.wait_for_idle().await;
 
-                let prior = match load_messages(&path) {
-                    Ok(msgs) => msgs,
+                let new_session = match open_session_dir(&session_repo, &path).await {
+                    Ok(session) => session,
                     Err(e) => {
                         let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
-                            "resume load {} failed: {e}",
+                            "resume open {} failed: {e}",
                             path.display()
                         )));
                         continue;
                     }
                 };
-                let prior_for_ui = prior.clone();
-                let new_writer: Option<Arc<SessionWriter>> = match SessionWriter::open(&path) {
-                    Ok(w) => Some(Arc::new(w)),
-                    Err(e) => {
-                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
-                            "resume session writer open {} failed: {e}",
-                            path.display()
-                        )));
-                        None
-                    }
-                };
+                let prior_for_ui = new_session.build_context().await.messages;
                 // Pin the resumed harness to the **currently
                 // active** model — not the boot-time one captured
                 // in `builder.model`, and not anything saved in
                 // the resumed JSONL session's metadata. This
                 // matches what the user is actively driving in
                 // this run.
-                let new_harness = builder.build_with_model(prior, current_model.clone()).await;
-                install_subscriptions(
-                    &new_harness,
-                    &evt_tx,
-                    telemetry_sink.clone(),
-                    new_writer.clone(),
-                )
-                .await;
+                let new_harness = builder
+                    .build_with_model(new_session, current_model.clone())
+                    .await;
+                install_subscriptions(&new_harness, &evt_tx, telemetry_sink.clone()).await;
                 let prior_count = prior_for_ui.len();
                 harness = new_harness;
-                session_writer = new_writer;
                 active_session_path = Some(path.clone());
                 let path_display = path.display().to_string();
                 let _ = evt_tx.send(TuiEvent::SessionResumed {
@@ -2123,14 +2046,14 @@ async fn run_command_loop(
             }
             Command::ForkSession(src_path) => {
                 // "Resume into a copy". Mirrors ResumeSession exactly
-                // but against a fresh uuidv7 file copied from
+                // but against a fresh uuidv7 session tree copied from
                 // src_path, so the source (possibly locked by another
                 // grain process) is left alone.
                 harness.abort().await;
                 harness.wait_for_idle().await;
 
-                let dest_path = grain_ai_agent_headless::new_session_path(&sessions_dir);
-                if let Err(e) = std::fs::copy(&src_path, &dest_path) {
+                let dest_path = new_session_dir(&sessions_dir);
+                if let Err(e) = copy_session_tree_snapshot(&src_path, &dest_path) {
                     let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
                         "fork copy {} → {} failed: {e}",
                         src_path.display(),
@@ -2138,38 +2061,23 @@ async fn run_command_loop(
                     )));
                     continue;
                 }
-                let prior = match load_messages(&dest_path) {
-                    Ok(msgs) => msgs,
+                let new_session = match open_session_dir(&session_repo, &dest_path).await {
+                    Ok(session) => session,
                     Err(e) => {
                         let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
-                            "fork load {} failed: {e}",
+                            "fork open {} failed: {e}",
                             dest_path.display()
                         )));
                         continue;
                     }
                 };
-                let prior_for_ui = prior.clone();
-                let new_writer: Option<Arc<SessionWriter>> = match SessionWriter::open(&dest_path) {
-                    Ok(w) => Some(Arc::new(w)),
-                    Err(e) => {
-                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
-                            "fork session writer open {} failed: {e}",
-                            dest_path.display()
-                        )));
-                        None
-                    }
-                };
-                let new_harness = builder.build_with_model(prior, current_model.clone()).await;
-                install_subscriptions(
-                    &new_harness,
-                    &evt_tx,
-                    telemetry_sink.clone(),
-                    new_writer.clone(),
-                )
-                .await;
+                let prior_for_ui = new_session.build_context().await.messages;
+                let new_harness = builder
+                    .build_with_model(new_session, current_model.clone())
+                    .await;
+                install_subscriptions(&new_harness, &evt_tx, telemetry_sink.clone()).await;
                 let prior_count = prior_for_ui.len();
                 harness = new_harness;
-                session_writer = new_writer;
                 active_session_path = Some(dest_path.clone());
                 let path_display = dest_path.display().to_string();
                 let _ = evt_tx.send(TuiEvent::SessionResumed {
@@ -2193,6 +2101,59 @@ async fn run_command_loop(
                     let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!("compact: {e}")));
                 }
             },
+            Command::ReturnMemory { refresh } => {
+                let Some(settings) = memory_settings.clone() else {
+                    let _ = evt_tx.send(TuiEvent::Info("(project memory disabled)".into()));
+                    continue;
+                };
+                if refresh {
+                    let settings_for_refresh = settings.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        grain_ai_agent_headless::refresh_project_memory(&settings_for_refresh)
+                    })
+                    .await
+                    {
+                        Ok(Ok(report)) => {
+                            let _ = evt_tx.send(TuiEvent::Info(format!(
+                                "(project memory refreshed: {} item(s), {} session(s), {})",
+                                report.record_count,
+                                report.scanned_sessions,
+                                report.memory_dir.join("memory_summary.md").display()
+                            )));
+                        }
+                        Ok(Err(e)) => {
+                            let _ = evt_tx
+                                .send(TuiEvent::AgentWorkerError(format!("project memory: {e}")));
+                            continue;
+                        }
+                        Err(e) => {
+                            let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                                "project memory task failed: {e}"
+                            )));
+                            continue;
+                        }
+                    }
+                }
+                match grain_ai_agent_headless::read_memory_summary(&settings.memory_dir) {
+                    Ok(Some(summary)) => {
+                        let summary = clamp_info_text(&summary, 4_000);
+                        let _ = evt_tx.send(TuiEvent::Info(format!(
+                            "project memory ({})\n{summary}",
+                            settings.memory_dir.join("memory_summary.md").display()
+                        )));
+                    }
+                    Ok(None) => {
+                        let _ = evt_tx.send(TuiEvent::Info(format!(
+                            "(project memory is empty — run /memory refresh after a few sessions; path {})",
+                            settings.memory_dir.display()
+                        )));
+                    }
+                    Err(e) => {
+                        let _ =
+                            evt_tx.send(TuiEvent::AgentWorkerError(format!("project memory: {e}")));
+                    }
+                }
+            }
             Command::ApplyProvider(idx) => {
                 let Some(profile) = profiles.get(idx) else {
                     let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
@@ -2362,10 +2323,6 @@ async fn run_command_loop(
             }
         }
     }
-    // `session_writer` only feeds the subscription closures; we hold a
-    // copy here so swaps on `/resume` release the previous file
-    // handle when the old Arc count drops to zero.
-    let _ = session_writer;
 }
 
 /// For OpenAI-compat profiles, replace `Model.provider` with the
@@ -2685,74 +2642,5 @@ fn synthetic_model_from_profile(profile: &ProviderProfile) -> grain_agent_core::
         context_window: 32_768,
         max_tokens: 4_096,
         cost: grain_agent_core::Cost::default(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn list_sessions_excluding_active_hides_current_empty_locked_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let active = grain_ai_agent_headless::new_session_path(dir.path());
-        let _writer = SessionWriter::open(&active).unwrap();
-
-        let list = list_sessions_excluding_active(dir.path(), Some(active.as_path()));
-
-        assert!(list.is_empty());
-    }
-
-    #[test]
-    fn list_sessions_excluding_active_keeps_other_sessions() {
-        let dir = tempfile::tempdir().unwrap();
-        let active = grain_ai_agent_headless::new_session_path(dir.path());
-        let other = grain_ai_agent_headless::new_session_path(dir.path());
-        let _writer = SessionWriter::open(&active).unwrap();
-        let other_writer = SessionWriter::open(&other).unwrap();
-        other_writer
-            .append(&AgentMessage::user(grain_agent_core::UserMessage {
-                content: vec![grain_agent_core::UserContent::Text(
-                    grain_agent_core::TextContent {
-                        text: "older prompt".into(),
-                    },
-                )],
-                timestamp: 0,
-            }))
-            .unwrap();
-        drop(other_writer);
-
-        let list = list_sessions_excluding_active(dir.path(), Some(active.as_path()));
-
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].path, other);
-        assert_eq!(list[0].message_count, 1);
-    }
-
-    #[test]
-    fn provider_safe_tool_name_replaces_provider_hostile_chars() {
-        assert_eq!(provider_safe_tool_name("web-search"), "web_search");
-        assert_eq!(
-            provider_safe_tool_name("web.search/fetch"),
-            "web_search_fetch"
-        );
-        assert_eq!(provider_safe_tool_name("  "), "tool");
-    }
-
-    #[test]
-    fn make_unique_tool_name_appends_suffix_for_collisions() {
-        let mut used = std::collections::HashSet::new();
-        assert_eq!(
-            make_unique_tool_name("web_fetch".to_string(), &mut used),
-            "web_fetch"
-        );
-        assert_eq!(
-            make_unique_tool_name("web_fetch".to_string(), &mut used),
-            "web_fetch_2"
-        );
-        assert_eq!(
-            make_unique_tool_name("web_fetch".to_string(), &mut used),
-            "web_fetch_3"
-        );
     }
 }

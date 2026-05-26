@@ -109,7 +109,7 @@ impl WasmOrchestrator {
             return None;
         }
 
-        Some(Arc::new(move |ctx| {
+        Some(Arc::new(move |ctx, _cancel| {
             let orchestrator = self.clone();
             Box::pin(async move {
                 let mut draft = DraftUpdate::new((*ctx.context).clone());

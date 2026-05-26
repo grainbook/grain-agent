@@ -21,10 +21,12 @@
 //! next open recomputes leaf from the last entry).
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
@@ -37,6 +39,7 @@ use crate::session::{
 const META_FILE: &str = "meta.json";
 const STATE_FILE: &str = "state.json";
 const ENTRIES_FILE: &str = "entries.jsonl";
+const LOCK_FILE: &str = "session.lock";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +50,7 @@ struct StateFile {
 /// JSONL-backed implementation of [`SessionStorage`].
 pub struct JsonlSessionStorage {
     inner: Mutex<JsonlInner>,
+    _lock_file: std::fs::File,
 }
 
 struct JsonlInner {
@@ -69,6 +73,21 @@ impl JsonlSessionStorage {
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(io_err(dir.display().to_string()))?;
+
+        let lock_path = dir.join(LOCK_FILE);
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(io_err(lock_path.display().to_string()))?;
+        lock_file.try_lock_exclusive().map_err(|e| match e.kind() {
+            std::io::ErrorKind::WouldBlock => SessionError::Locked {
+                path: dir.display().to_string(),
+            },
+            _ => SessionError::Storage(format!("{}: {e}", lock_path.display())),
+        })?;
 
         let meta_path = dir.join(META_FILE);
         if !meta_path.exists() {
@@ -158,6 +177,7 @@ impl JsonlSessionStorage {
                 leaf_id,
                 labels,
             }),
+            _lock_file: lock_file,
         })
     }
 
@@ -318,6 +338,25 @@ impl JsonlSessionRepo {
     async fn read_metadata_in(dir: &Path) -> Option<SessionMetadata> {
         let raw = tokio::fs::read_to_string(dir.join(META_FILE)).await.ok()?;
         serde_json::from_str::<SessionMetadata>(&raw).ok()
+    }
+
+    /// Open an existing session directory by id.
+    pub async fn open_id(&self, id: &str) -> Result<Session, SessionError> {
+        let dir = self.session_dir(id);
+        let Some(metadata) = Self::read_metadata_in(&dir).await else {
+            return Err(SessionError::NotFound(format!("Session not found: {id}")));
+        };
+        self.open(&metadata).await
+    }
+
+    /// Open a session by id when it exists, otherwise create it.
+    pub async fn open_or_create_id(&self, id: &str) -> Result<Session, SessionError> {
+        let dir = self.session_dir(id);
+        let metadata = Self::read_metadata_in(&dir)
+            .await
+            .unwrap_or_else(|| SessionMetadata::with_id(id));
+        let storage = Arc::new(JsonlSessionStorage::open_or_init(dir, metadata).await?);
+        Ok(Session::new(storage))
     }
 }
 

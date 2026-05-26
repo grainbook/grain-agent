@@ -1,6 +1,6 @@
 [package]
 name = "grain-deepseek-pack"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -14,6 +14,7 @@ description = "DeepSeek-specific extensions (R1 reasoning_content scavenge, suba
 [dependencies]
 serde_json = { workspace = true }
 grain-agent-core = { workspace = true }
+grain-agent-harness = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

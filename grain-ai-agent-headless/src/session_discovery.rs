@@ -1,4 +1,4 @@
-//! Session discovery — scan a directory of JSONL session files and
+//! Session discovery — scan a directory of JSONL session trees and
 //! return metadata for each (title preview / model id / mtime).
 //!
 //! Used by the TUI's `/resume` overlay (and any future CLI tool that
@@ -9,16 +9,25 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use grain_agent_core::{AgentMessage, Message, UserContent};
+use grain_agent_harness::{
+    JsonlSessionRepo, Session, SessionError, SessionMetadata, SessionTreeEntry,
+    SessionTreeEntryKind,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// One session file's metadata, parsed from a JSONL transcript on disk.
+const META_FILE: &str = "meta.json";
+const STATE_FILE: &str = "state.json";
+const ENTRIES_FILE: &str = "entries.jsonl";
+const LOCK_FILE: &str = "session.lock";
+
+/// One session tree's metadata, parsed from disk.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMeta {
-    /// Session id derived from filename stem.
+    /// Session id derived from metadata / directory name.
     pub id: String,
-    /// Absolute path on disk.
+    /// Absolute session directory on disk.
     pub path: PathBuf,
     /// Last user prompt's text (clamped to ~80 chars). `None` when
     /// the session never recorded a user message yet.
@@ -26,15 +35,13 @@ pub struct SessionMeta {
     /// First assistant message's `model` field. `None` when no
     /// assistant turn has finished yet.
     pub model: Option<String>,
-    /// Number of finalized messages on disk (user / assistant /
-    /// tool-result combined).
+    /// Number of active-branch context messages on disk.
     pub message_count: usize,
     /// File mtime — what the picker sorts by ("most recently used
     /// first").
     pub modified_at: SystemTime,
     /// `true` when another grain process currently holds the
-    /// advisory exclusive lock on this jsonl (see
-    /// [`crate::is_session_locked`]). The TUI's `/resume` picker
+    /// advisory exclusive lock on this session tree. The TUI's `/resume` picker
     /// renders `[locked]` next to these rows and gates Enter on
     /// them through a "fresh / fork / cancel" dialog instead of
     /// emitting an in-place resume.
@@ -64,8 +71,8 @@ impl SessionMeta {
 pub const TITLE_PREVIEW_MAX: usize = 80;
 
 /// Generate a fresh session id (UUIDv7 — sortable by creation time)
-/// and return the path `dir / <id>.jsonl`. Caller is responsible for
-/// `create_dir_all(dir)` before opening the file.
+/// and return the path `dir / <id>`. Caller is responsible for
+/// `create_dir_all(dir)` before opening the session.
 ///
 /// # Examples
 ///
@@ -75,15 +82,84 @@ pub const TITLE_PREVIEW_MAX: usize = 80;
 ///
 /// let dir = Path::new("/tmp/sessions");
 /// let path = new_session_path(dir);
-/// assert_eq!(path.extension().and_then(|s| s.to_str()), Some("jsonl"));
 /// assert!(path.starts_with(dir));
 /// ```
 pub fn new_session_path(dir: &Path) -> PathBuf {
     let id = Uuid::now_v7();
-    dir.join(format!("{id}.jsonl"))
+    dir.join(id.to_string())
 }
 
-/// Scan `dir` for `*.jsonl` files, parse each into a [`SessionMeta`],
+pub fn paths_match(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+pub fn list_sessions_excluding_active(
+    sessions_dir: &Path,
+    active_session_path: Option<&Path>,
+) -> Vec<SessionMeta> {
+    let mut list = list_sessions(sessions_dir);
+    if let Some(active) = active_session_path {
+        list.retain(|meta| !paths_match(&meta.path, active));
+    }
+    list
+}
+
+pub fn session_id_from_path(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+pub async fn open_session_dir(
+    repo: &JsonlSessionRepo,
+    path: &Path,
+) -> Result<Session, SessionError> {
+    let id = session_id_from_path(path).ok_or_else(|| {
+        SessionError::NotFound(format!("invalid session path: {}", path.display()))
+    })?;
+    repo.open_id(&id).await
+}
+
+pub async fn open_or_create_session_dir(
+    repo: &JsonlSessionRepo,
+    path: &Path,
+) -> Result<Session, SessionError> {
+    let id = session_id_from_path(path).ok_or_else(|| {
+        SessionError::NotFound(format!("invalid session path: {}", path.display()))
+    })?;
+    repo.open_or_create_id(&id).await
+}
+
+pub fn copy_session_tree_snapshot(src: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for file in [META_FILE, ENTRIES_FILE, STATE_FILE] {
+        let src_file = src.join(file);
+        if src_file.exists() {
+            std::fs::copy(src_file, dest.join(file))?;
+        }
+    }
+    if let Some(id) = session_id_from_path(dest) {
+        let meta_path = dest.join(META_FILE);
+        if meta_path.exists() {
+            let raw = std::fs::read_to_string(&meta_path)?;
+            if let Ok(mut meta) = serde_json::from_str::<SessionMetadata>(&raw) {
+                meta.id = id;
+                let body = serde_json::to_string_pretty(&meta).map_err(std::io::Error::other)?;
+                std::fs::write(meta_path, body)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Scan `dir` for session directories, parse each into a [`SessionMeta`],
 /// and return the list sorted by `modified_at` descending (most
 /// recent first). Files that fail to read / parse are skipped with a
 /// `[warn]` line — corruption in one shouldn't hide the rest.
@@ -114,7 +190,7 @@ pub fn list_sessions(dir: &Path) -> Vec<SessionMeta> {
     let mut out: Vec<SessionMeta> = Vec::new();
     for entry in read_dir.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
         match parse_session_meta(&path) {
@@ -122,7 +198,7 @@ pub fn list_sessions(dir: &Path) -> Vec<SessionMeta> {
                 // Fill the lock-state snapshot here so the picker
                 // can render `[locked]` without re-probing each
                 // row at render time.
-                meta.locked = crate::is_session_locked(&path);
+                meta.locked = is_tree_session_locked(&path);
                 out.push(meta);
             }
             Err(e) => {
@@ -137,27 +213,47 @@ pub fn list_sessions(dir: &Path) -> Vec<SessionMeta> {
     out
 }
 
-/// Read a single JSONL session and derive its metadata.
+/// Read a single session directory and derive its metadata.
 ///
 /// # Errors
 ///
-/// Returns an I/O error when the file can't be opened / read.
+/// Returns an I/O error when required files can't be opened / read.
 /// Malformed individual lines inside the file are silently skipped
-/// — a file with no parseable messages still returns a valid
+/// — a session with no parseable messages still returns a valid
 /// [`SessionMeta`] with `title = None` and `message_count = 0`.
 pub fn parse_session_meta(path: &Path) -> std::io::Result<SessionMeta> {
     use std::io::{BufRead, BufReader};
 
-    let file = std::fs::File::open(path)?;
-    let modified_at = file
+    let metadata = read_session_metadata(path)?;
+    let entries_path = path.join(ENTRIES_FILE);
+    let file = match std::fs::File::open(&entries_path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let modified_at = path
+                .join(META_FILE)
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            return Ok(SessionMeta {
+                id: metadata.id,
+                path: path.to_path_buf(),
+                title: None,
+                model: None,
+                message_count: 0,
+                modified_at,
+                locked: false,
+            });
+        }
+        Err(e) => return Err(e),
+    };
+    let modified_at = entries_path
         .metadata()?
         .modified()
         .unwrap_or(SystemTime::UNIX_EPOCH);
     let reader = BufReader::new(file);
 
-    let mut title: Option<String> = None;
-    let mut model: Option<String> = None;
-    let mut count: usize = 0;
+    let mut entries: Vec<SessionTreeEntry> = Vec::new();
+    let mut by_id = std::collections::HashMap::new();
 
     for line in reader.lines() {
         let line = line?;
@@ -165,11 +261,34 @@ pub fn parse_session_meta(path: &Path) -> std::io::Result<SessionMeta> {
         if trimmed.is_empty() {
             continue;
         }
-        let Ok(msg) = serde_json::from_str::<AgentMessage>(trimmed) else {
+        let Ok(entry) = serde_json::from_str::<SessionTreeEntry>(trimmed) else {
+            continue;
+        };
+        by_id.insert(entry.id.clone(), entries.len());
+        entries.push(entry);
+    }
+
+    let mut path_entries = Vec::new();
+    let mut current = read_leaf_id(path).or_else(|| entries.last().map(|entry| entry.id.clone()));
+    while let Some(id) = current {
+        let Some(idx) = by_id.get(&id).copied() else {
+            break;
+        };
+        let entry = entries[idx].clone();
+        current = entry.parent_id.clone();
+        path_entries.push(entry);
+    }
+    path_entries.reverse();
+
+    let mut title: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut count: usize = 0;
+    for entry in &path_entries {
+        let SessionTreeEntryKind::Message { message } = &entry.kind else {
             continue;
         };
         count += 1;
-        let AgentMessage::Standard(msg) = &msg else {
+        let AgentMessage::Standard(msg) = message else {
             continue;
         };
         match msg {
@@ -185,14 +304,8 @@ pub fn parse_session_meta(path: &Path) -> std::io::Result<SessionMeta> {
         }
     }
 
-    let id = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-
     Ok(SessionMeta {
-        id,
+        id: metadata.id,
         path: path.to_path_buf(),
         title,
         model,
@@ -204,6 +317,39 @@ pub fn parse_session_meta(path: &Path) -> std::io::Result<SessionMeta> {
         // themselves.
         locked: false,
     })
+}
+
+fn read_session_metadata(path: &Path) -> std::io::Result<SessionMetadata> {
+    let raw = std::fs::read_to_string(path.join(META_FILE))?;
+    serde_json::from_str::<SessionMetadata>(&raw)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+fn read_leaf_id(path: &Path) -> Option<String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StateFile {
+        leaf_id: Option<String>,
+    }
+    let raw = std::fs::read_to_string(path.join(STATE_FILE)).ok()?;
+    serde_json::from_str::<StateFile>(&raw).ok()?.leaf_id
+}
+
+fn is_tree_session_locked(path: &Path) -> bool {
+    use fs2::FileExt;
+    let lock_path = path.join(LOCK_FILE);
+    let file = match std::fs::OpenOptions::new().read(true).open(&lock_path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => true,
+        Err(_) => false,
+    }
 }
 
 fn extract_user_text_preview(contents: &[UserContent]) -> String {
@@ -246,6 +392,7 @@ mod tests {
     use grain_agent_core::{
         AssistantMessage, StopReason, TextContent, Usage, UserContent, UserMessage,
     };
+    use grain_agent_harness::{JsonlSessionRepo, SessionRepo, SessionTreeEntry, uuidv7};
     use std::io::Write;
 
     fn user(text: &str) -> AgentMessage {
@@ -270,19 +417,43 @@ mod tests {
     }
 
     fn write_session(dir: &Path, name: &str, msgs: &[AgentMessage]) -> PathBuf {
-        let path = dir.join(format!("{name}.jsonl"));
-        let mut f = std::fs::File::create(&path).unwrap();
+        let path = dir.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        let metadata = SessionMetadata::with_id(name);
+        std::fs::write(
+            path.join(META_FILE),
+            serde_json::to_string_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+
+        let mut parent_id: Option<String> = None;
+        let mut last_id: Option<String> = None;
+        let mut f = std::fs::File::create(path.join(ENTRIES_FILE)).unwrap();
         for m in msgs {
-            writeln!(f, "{}", serde_json::to_string(m).unwrap()).unwrap();
+            let id = uuidv7();
+            let entry = SessionTreeEntry {
+                id: id.clone(),
+                parent_id: parent_id.clone(),
+                timestamp: "2026-01-01T00:00:00.000Z".into(),
+                kind: SessionTreeEntryKind::Message { message: m.clone() },
+            };
+            writeln!(f, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+            parent_id = Some(id.clone());
+            last_id = Some(id);
         }
+        std::fs::write(
+            path.join(STATE_FILE),
+            serde_json::json!({ "leafId": last_id }).to_string(),
+        )
+        .unwrap();
         path
     }
 
     #[test]
-    fn new_session_path_uses_uuidv7_extension() {
+    fn new_session_path_uses_uuidv7_directory_name() {
         let path = new_session_path(Path::new("/tmp"));
-        let stem = path.file_stem().unwrap().to_string_lossy().to_string();
-        assert!(path.extension().and_then(|s| s.to_str()) == Some("jsonl"));
+        let stem = path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(path.extension().is_none());
         // UUIDv7 is 36 chars hyphen-separated.
         assert_eq!(stem.len(), 36);
         assert!(stem.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
@@ -354,7 +525,14 @@ mod tests {
     fn list_sessions_skips_malformed_files() {
         let tmp = tempfile::tempdir().unwrap();
         write_session(tmp.path(), "good", &[user("hi")]);
-        std::fs::write(tmp.path().join("bad.jsonl"), "{not valid\n").unwrap();
+        let bad = tmp.path().join("bad");
+        std::fs::create_dir_all(&bad).unwrap();
+        std::fs::write(
+            bad.join(META_FILE),
+            serde_json::to_string_pretty(&SessionMetadata::with_id("bad")).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(bad.join(ENTRIES_FILE), "{not valid\n").unwrap();
         let sessions = list_sessions(tmp.path());
         // Parsing logic skips bad lines but still returns the file
         // (with title=None / count=0).
@@ -383,5 +561,61 @@ mod tests {
             meta.title.as_deref(),
             Some("final question — this should be the title")
         );
+    }
+
+    #[tokio::test]
+    async fn list_sessions_excluding_active_hides_current_empty_locked_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = JsonlSessionRepo::new(dir.path()).unwrap();
+        let _active_session = repo.create(Some("active".into())).await.unwrap();
+        let active = repo.session_dir("active");
+
+        let list = list_sessions_excluding_active(dir.path(), Some(active.as_path()));
+
+        assert!(list.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_excluding_active_keeps_other_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = JsonlSessionRepo::new(dir.path()).unwrap();
+        let _active_session = repo.create(Some("active".into())).await.unwrap();
+        let active = repo.session_dir("active");
+        let other_session = repo.create(Some("other".into())).await.unwrap();
+        let other = repo.session_dir("other");
+        other_session
+            .append_message(user("older prompt"))
+            .await
+            .unwrap();
+
+        let list = list_sessions_excluding_active(dir.path(), Some(active.as_path()));
+
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].path, other);
+        assert_eq!(list[0].message_count, 1);
+    }
+
+    #[tokio::test]
+    async fn open_or_create_session_dir_uses_directory_name_as_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = JsonlSessionRepo::new(dir.path()).unwrap();
+        let path = dir.path().join("session-a");
+
+        let session = open_or_create_session_dir(&repo, &path).await.unwrap();
+
+        assert_eq!(session.metadata().await.id, "session-a");
+    }
+
+    #[test]
+    fn copy_session_tree_snapshot_rewrites_destination_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = write_session(tmp.path(), "src", &[user("hello")]);
+        let dest = tmp.path().join("dest");
+
+        copy_session_tree_snapshot(&src, &dest).unwrap();
+
+        let meta = parse_session_meta(&dest).unwrap();
+        assert_eq!(meta.id, "dest");
+        assert_eq!(meta.title.as_deref(), Some("hello"));
     }
 }

@@ -17,7 +17,12 @@
 //!   stream. The parser extracts the optional JSON payload that
 //!   follows it.
 //!
-//! Both modules are passive parsers — no `LlmStream` wrapping yet, so
+//! - [`cache_first`] — compaction defaults tuned for DeepSeek prefix
+//!   cache behavior. This is exposed as a resolver so callers can plug
+//!   it into the generic harness without making the harness
+//!   DeepSeek-aware.
+//!
+//! These modules stay passive — no `LlmStream` wrapping yet, so
 //! adoption can stay incremental. A future revision may bundle them
 //! into a decorator (see crate-level discussion).
 //!
@@ -31,9 +36,14 @@
 
 use grain_agent_core::Model;
 
+pub mod cache_first;
 pub mod reasoning_scavenge;
 pub mod subagent;
 
+pub use cache_first::{
+    cache_first_compaction_settings, cache_first_settings_resolver, is_deepseek_model_id,
+    resolve_cache_first_compaction_settings,
+};
 pub use reasoning_scavenge::{ScavengedToolCall, scavenge_tool_calls};
 pub use subagent::{SubagentDoneEvent, parse_subagent_done};
 
@@ -61,5 +71,5 @@ pub use subagent::{SubagentDoneEvent, parse_subagent_done};
 /// assert!(!is_deepseek_model(&m));
 /// ```
 pub fn is_deepseek_model(model: &Model) -> bool {
-    model.provider == "deepseek" || model.id.starts_with("deepseek/")
+    model.provider == "deepseek" || is_deepseek_model_id(&model.id)
 }

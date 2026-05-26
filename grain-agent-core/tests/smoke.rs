@@ -216,7 +216,7 @@ async fn prepare_next_turn_context_rewrite_persists_to_agent_state() {
         stream,
     );
     opts.tools = vec![Arc::new(EchoTool::new())];
-    opts.prepare_next_turn = Some(Arc::new(|ctx| {
+    opts.prepare_next_turn = Some(Arc::new(|ctx, _cancel| {
         Box::pin(async move {
             Some(AgentLoopTurnUpdate {
                 context: Some(AgentContext {

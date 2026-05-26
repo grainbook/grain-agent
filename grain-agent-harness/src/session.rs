@@ -78,6 +78,8 @@ pub enum SessionError {
     InvalidForkTarget(String),
     #[error("storage error: {0}")]
     Storage(String),
+    #[error("{path} is held by another process")]
+    Locked { path: String },
     #[error("{0}")]
     Other(String),
 }

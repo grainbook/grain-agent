@@ -1,6 +1,6 @@
 [package]
 name = "grain-agent-harness"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -13,6 +13,7 @@ description = "Rust port of @earendil-works/pi-agent-core harness: session persi
 
 [dependencies]
 async-trait = { workspace = true }
+fs2 = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

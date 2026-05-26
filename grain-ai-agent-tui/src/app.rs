@@ -187,8 +187,8 @@ pub enum Overlay {
         title: String,
         children: Vec<grain_ai_agent_headless::OverlayDescriptor>,
     },
-    /// Modal shown when the live `SessionWriter` can't take the
-    /// advisory lock on a jsonl — either at boot (auto-resume
+    /// Modal shown when the live session tree can't take the
+    /// advisory lock — either at boot (auto-resume
     /// candidate held by another grain process) or at runtime when
     /// the user picks a `[locked]` row in the `/resume` overlay.
     /// Default focus is on the safest option ("Start a fresh
@@ -233,7 +233,7 @@ pub enum SessionConflictChoice {
     /// Discard the locked candidate, stay on the fresh session the
     /// worker minted. No copy, no resume.
     Fresh,
-    /// Copy the locked jsonl to a new uuidv7 path and resume the
+    /// Copy the locked session tree to a new uuidv7 path and resume the
     /// copy in place (worker handles via `Command::ForkSession`).
     Fork,
     /// Jump to the `/resume` picker to browse past sessions.
@@ -520,16 +520,16 @@ pub enum Command {
     /// calls `Agent::set_model(...)` then replies with
     /// [`TuiEvent::ModelApplied`].
     SetModel(String),
-    /// Scan `sessions_dir` for past `<uuidv7>.jsonl` files. Worker
+    /// Scan `sessions_dir` for past `<uuidv7>/` session trees. Worker
     /// returns the list via [`TuiEvent::SessionsListed`], which
     /// populates the `/resume` overlay.
     ReturnSessions,
     /// Tear down the current harness and re-build it on top of the
-    /// JSONL transcript at this path. Worker re-installs all
-    /// subscriptions (event fan-out, telemetry, session writer) and
+    /// persistent session tree at this path. Worker re-installs all
+    /// subscriptions (event fan-out, telemetry) and
     /// emits a [`TuiEvent::Info`] when the swap completes.
     ResumeSession(std::path::PathBuf),
-    /// Copy a (possibly-locked) source jsonl to a fresh uuidv7
+    /// Copy a (possibly-locked) source session tree to a fresh uuidv7
     /// path in `sessions_dir` and swap the harness onto it — same
     /// effect as [`Command::ResumeSession`] but against a copy, so
     /// the original keeps appending under whichever process owns
@@ -537,11 +537,10 @@ pub enum Command {
     /// "Fork" choice. Worker emits [`TuiEvent::SessionResumed`] +
     /// [`TuiEvent::Info`] on success.
     ForkSession(std::path::PathBuf),
-    /// Permanently remove a session's `<uuidv7>.jsonl` from disk.
-    /// Refused by the worker when `path` is the **currently active**
-    /// session (the one the live `SessionWriter` is appending to) —
-    /// the user must `/clear` or `/resume` away first. On success the
-    /// worker re-emits [`TuiEvent::SessionsListed`] so the open
+    /// Permanently remove a session's `<uuidv7>/` tree from disk.
+    /// If `path` is the **currently active** session the worker swaps
+    /// to a fresh session first, then removes the old tree. On success
+    /// the worker re-emits [`TuiEvent::SessionsListed`] so the open
     /// `/resume` overlay reflects the new list, plus an
     /// [`TuiEvent::Info`] confirmation; on failure it emits
     /// [`TuiEvent::AgentWorkerError`].
@@ -552,6 +551,12 @@ pub enum Command {
     /// on failure (e.g. empty transcript).
     Compact {
         keep_recent: usize,
+    },
+    /// Show current project memory or refresh it from persisted
+    /// session trees. Worker responds with [`TuiEvent::Info`] or
+    /// [`TuiEvent::AgentWorkerError`].
+    ReturnMemory {
+        refresh: bool,
     },
     /// Re-scan `plugins_dir` and reply via [`TuiEvent::PluginsListed`].
     /// Cheap (one shallow `read_dir` + N manifest parses); safe to
@@ -790,6 +795,10 @@ pub(crate) const SLASH_CATALOG: &[CommandCatalogItem] = &[
     CommandCatalogItem {
         trigger: "/compact",
         description: "summarize transcript prefix (keeps last 4 turns)",
+    },
+    CommandCatalogItem {
+        trigger: "/memory",
+        description: "show project memory; use /memory refresh to rebuild",
     },
     CommandCatalogItem {
         trigger: "/plugins",
@@ -1958,11 +1967,44 @@ impl AppState {
     /// conversation in the scrollback.
     fn push_agent_message(&mut self, msg: &AgentMessage) {
         use grain_agent_core::AssistantContent;
-        let AgentMessage::Standard(msg) = msg else {
-            return;
-        };
         match msg {
-            Message::User(u) => {
+            AgentMessage::Custom(value) => {
+                let role = value
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("custom");
+                match role {
+                    "compactionSummary" => {
+                        if let Some(summary) = value.get("summary").and_then(|v| v.as_str())
+                            && !summary.trim().is_empty()
+                        {
+                            self.push(
+                                TranscriptKind::Info,
+                                format!("compaction summary\n{summary}"),
+                            );
+                        }
+                    }
+                    "branchSummary" => {
+                        if let Some(summary) = value.get("summary").and_then(|v| v.as_str())
+                            && !summary.trim().is_empty()
+                        {
+                            self.push(TranscriptKind::Info, format!("branch summary\n{summary}"));
+                        }
+                    }
+                    "custom" => {
+                        if value
+                            .get("display")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                            && let Some(text) = value.get("content").and_then(|v| v.as_str())
+                        {
+                            self.push(TranscriptKind::Info, text.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            AgentMessage::Standard(Message::User(u)) => {
                 let text: String = u
                     .content
                     .iter()
@@ -1974,7 +2016,7 @@ impl AppState {
                     .join(" ");
                 self.push(TranscriptKind::UserPrompt, text);
             }
-            Message::Assistant(a) => {
+            AgentMessage::Standard(Message::Assistant(a)) => {
                 for c in &a.content {
                     match c {
                         AssistantContent::Text(t) => {
@@ -2013,7 +2055,7 @@ impl AppState {
                     }
                 }
             }
-            Message::ToolResult(tr) => {
+            AgentMessage::Standard(Message::ToolResult(tr)) => {
                 let text: String = tr
                     .content
                     .iter()
@@ -3846,6 +3888,13 @@ impl AppState {
                     "(compacting transcript — keeping last 4 messages)".into(),
                 );
                 vec![Command::Compact { keep_recent: 4 }]
+            }
+            "memory" => {
+                let refresh = rest.split_whitespace().nth(1) == Some("refresh");
+                if refresh {
+                    self.push(TranscriptKind::Info, "(refreshing project memory)".into());
+                }
+                vec![Command::ReturnMemory { refresh }]
             }
             "plugins" => {
                 // Open the overlay immediately with an empty list;
@@ -6728,6 +6777,11 @@ mod tests {
     }
 
     #[test]
+    fn slash_memory_appears_in_catalog() {
+        assert!(SLASH_CATALOG.iter().any(|c| c.trigger == "/memory"));
+    }
+
+    #[test]
     fn slash_compact_dispatches_compact_command() {
         let mut s = fresh();
         s.input = "/compact".into();
@@ -6737,6 +6791,15 @@ mod tests {
             cmds.as_slice(),
             [Command::Compact { keep_recent: 4 }]
         ));
+    }
+
+    #[test]
+    fn slash_memory_refresh_dispatches_refresh_command() {
+        let mut s = fresh();
+        s.input = "/memory refresh".into();
+        s.cursor = s.input.len();
+        let cmds = s.on_event(TuiEvent::Key(press(KeyCode::Enter)));
+        assert_eq!(cmds, vec![Command::ReturnMemory { refresh: true }]);
     }
 
     #[test]

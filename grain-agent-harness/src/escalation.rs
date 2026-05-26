@@ -47,7 +47,7 @@ impl EscalationConfig {
 /// running failure-signal count crosses `config.threshold`.
 pub fn failure_escalation_hook(config: EscalationConfig) -> PrepareNextTurnFn {
     let state: Arc<Mutex<EscalationState>> = Arc::new(Mutex::new(EscalationState::default()));
-    Arc::new(move |ctx| {
+    Arc::new(move |ctx, _cancel| {
         let state = state.clone();
         let config = config.clone();
         Box::pin(async move {

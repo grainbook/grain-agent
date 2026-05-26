@@ -46,18 +46,18 @@ toml = "0.8"
 dirs = "5"
 url = "2"
 dotenvy = "0.15"
-grain-agent-core = { version = "0.0.1-beta2", path = "grain-agent-core" }
-grain-agent-harness = { version = "0.0.1-beta2", path = "grain-agent-harness" }
-grain-llm-models = { version = "0.0.1-beta2", path = "grain-llm-models" }
-grain-llm-genai = { version = "0.0.1-beta2", path = "grain-llm-genai" }
-grain-ai-agent-headless = { version = "0.0.1-beta2", path = "grain-ai-agent-headless" }
-grain-ai-agent-tui = { version = "0.0.1-beta2", path = "grain-ai-agent-tui" }
-grain-script-boa = { version = "0.0.1-beta2", path = "grain-script-boa" }
-grain-pi-compat = { version = "0.0.1-beta2", path = "grain-pi-compat" }
-grain-deepseek-pack = { version = "0.0.1-beta2", path = "grain-deepseek-pack" }
+grain-agent-core = { version = "0.0.1-beta3", path = "grain-agent-core" }
+grain-agent-harness = { version = "0.0.1-beta3", path = "grain-agent-harness" }
+grain-llm-models = { version = "0.0.1-beta3", path = "grain-llm-models" }
+grain-llm-genai = { version = "0.0.1-beta3", path = "grain-llm-genai" }
+grain-ai-agent-headless = { version = "0.0.1-beta3", path = "grain-ai-agent-headless" }
+grain-ai-agent-tui = { version = "0.0.1-beta3", path = "grain-ai-agent-tui" }
+grain-script-boa = { version = "0.0.1-beta3", path = "grain-script-boa" }
+grain-pi-compat = { version = "0.0.1-beta3", path = "grain-pi-compat" }
+grain-deepseek-pack = { version = "0.0.1-beta3", path = "grain-deepseek-pack" }
 lazy-gagent = { version = "0.0.1-beta1", path = "lazy-gagent" }
-grain-script-rhai = { version = "0.0.1-beta2", path = "grain-script-rhai" }
-grain-plugin-wasm = { version = "0.0.1-beta2", path = "grain-plugin-wasm" }
+grain-script-rhai = { version = "0.0.1-beta3", path = "grain-script-rhai" }
+grain-plugin-wasm = { version = "0.0.1-beta3", path = "grain-plugin-wasm" }
 wasmtime = { version = "40.0.4", features = ["component-model"] }
 wasmtime-wasi = "40.0.4"
 ratatui = { version = "0.30", features = ["crossterm_0_28"] }

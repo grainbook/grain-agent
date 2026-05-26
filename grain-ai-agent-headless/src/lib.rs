@@ -28,10 +28,12 @@
 //! - rig-backed semantic search (`SemanticSearch` tool) — separate PR.
 
 pub mod cli;
+pub mod compaction;
 pub mod config;
 pub mod deepseek;
 pub mod diagnostics;
 pub mod extensions;
+pub mod memory;
 pub mod migrations;
 pub mod plugin_lock;
 pub mod plugin_manager;
@@ -45,6 +47,7 @@ pub mod session_discovery;
 pub mod skills;
 pub mod slash;
 pub mod telemetry;
+pub mod tool_names;
 pub mod tools;
 pub mod workspace;
 
@@ -56,10 +59,18 @@ pub mod wasm_orchestration;
 pub use cli::{
     Args, EventPrinter, EventSink, JsonEventPrinter, OpenAiCompatChoice, OutputFormat, run,
 };
+pub use compaction::{AutoCompactionConfig, AutoCompactionPolicy, build_auto_compaction_policy};
 pub use config::{ArgDefaults, ConfigError, ConfigFile};
 pub use deepseek::DeepSeekPack;
 pub use diagnostics::{SourceInfo, render_doctor_report, render_source_info_block, source_info};
 pub use extensions::{Extension, ExtensionRegistry};
+pub use memory::{
+    DEFAULT_MAX_RECORDS as MEMORY_DEFAULT_MAX_RECORDS,
+    DEFAULT_MAX_SESSIONS as MEMORY_DEFAULT_MAX_SESSIONS,
+    DEFAULT_SUMMARY_MAX_BYTES as MEMORY_DEFAULT_SUMMARY_MAX_BYTES, MemoryCategory, MemoryError,
+    MemoryRecord, MemoryRefreshReport, ProjectMemorySettings, load_project_memory_prompt,
+    read_memory_summary, refresh_project_memory,
+};
 pub use migrations::{
     CURRENT_SCHEMA_VERSION, Migration, MigrationError, default_migrations, migrate_all,
     migrate_session, schema_version_of, stamp_current_version, validate_migrations,
@@ -96,7 +107,9 @@ pub use runtime::{
 };
 pub use session::{SessionError, SessionWriter, is_session_locked, load_messages};
 pub use session_discovery::{
-    SessionMeta, TITLE_PREVIEW_MAX, list_sessions, new_session_path, parse_session_meta,
+    SessionMeta, TITLE_PREVIEW_MAX, copy_session_tree_snapshot, list_sessions,
+    list_sessions_excluding_active, new_session_path, open_or_create_session_dir, open_session_dir,
+    parse_session_meta, session_id_from_path,
 };
 pub use skills::{
     DEFAULT_SKILLS_DIR, SkillsError, find_skills, find_skills_in_dirs, maybe_load_agents_md,
@@ -104,6 +117,9 @@ pub use skills::{
 };
 pub use slash::{HELP_TEXT, SlashCommand, parse as parse_slash_command};
 pub use telemetry::{TelemetryError, TelemetrySink};
+pub use tool_names::{
+    make_unique_tool_name, normalize_tool_names_for_provider, provider_safe_tool_name,
+};
 pub use tools::{
     BashTool, EditTool, GlobTool, GrepTool, ListTool, ReadTool, SourceInfoTool, WebFetchTool,
     WriteTool,

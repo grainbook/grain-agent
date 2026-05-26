@@ -37,6 +37,7 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
+use futures::future::BoxFuture;
 use grain_agent_core::{
     AgentContext, AgentLoopTurnUpdate, AgentMessage, AssistantContent, AssistantMessageEvent,
     LlmContext, LlmStream, Message, Model, PrepareNextTurnContext, PrepareNextTurnFn,
@@ -46,11 +47,9 @@ use grain_llm_models::Registry;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-#[cfg(test)]
-use crate::context_guard::ActiveModelInfo;
-use crate::context_guard::{ActiveModelHandle, TokenEstimator};
+use crate::context_guard::{ActiveModelHandle, ActiveModelInfo, TokenEstimator};
 use crate::messages::compaction_summary_message;
-use crate::session::Session;
+use crate::session::{Session, SessionTreeEntry, SessionTreeEntryKind};
 
 /// Default amount of recent transcript to leave untouched. Compaction
 /// always preserves at least this many tail messages — older messages
@@ -79,6 +78,31 @@ pub trait CompactionPolicy: Send + Sync {
     /// `n` messages and replace them with one `compactionSummary` entry.
     fn evaluate(&self, messages: &[AgentMessage]) -> Option<usize>;
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactionNoticePhase {
+    Started,
+    Finished,
+    Skipped,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactionNotice {
+    pub phase: CompactionNoticePhase,
+    pub prefix_len: usize,
+    pub message_count: usize,
+    pub tokens_before: u64,
+    pub summary_bytes: usize,
+    pub messages: Option<Vec<AgentMessage>>,
+    pub reason: Option<String>,
+}
+
+pub type CompactionNotifyFn =
+    Arc<dyn Fn(CompactionNotice, CancellationToken) -> BoxFuture<'static, ()> + Send + Sync>;
+
+pub type CompactionSettingsResolver =
+    Arc<dyn Fn(&ActiveModelInfo, &CompactionSettings) -> CompactionSettings + Send + Sync>;
 
 /// Simple message-count policy: compact when the transcript reaches
 /// `threshold` messages, replacing everything except the most-recent
@@ -227,6 +251,7 @@ pub struct TokenBudgetPolicy {
     model_handle: ActiveModelHandle,
     settings: CompactionSettings,
     estimator: TokenEstimator,
+    settings_resolver: Option<CompactionSettingsResolver>,
 }
 
 impl TokenBudgetPolicy {
@@ -241,7 +266,13 @@ impl TokenBudgetPolicy {
             model_handle,
             settings,
             estimator,
+            settings_resolver: None,
         }
+    }
+
+    pub fn with_settings_resolver(mut self, resolver: CompactionSettingsResolver) -> Self {
+        self.settings_resolver = Some(resolver);
+        self
     }
 }
 
@@ -252,10 +283,15 @@ impl CompactionPolicy for TokenBudgetPolicy {
         // fall back to the window carried in ActiveModelInfo.
         let active_model = self.model_handle.read().ok()?.clone();
         let ctx_window = active_model.resolve_context_window(&self.registry)?;
+        let settings = self
+            .settings_resolver
+            .as_ref()
+            .map(|resolver| resolver(&active_model, &self.settings))
+            .unwrap_or_else(|| self.settings.clone());
 
         // 2. Estimate total tokens.
         let ctx_tokens = self.estimator.estimate_messages(messages);
-        if !should_compact(ctx_tokens, ctx_window, &self.settings) {
+        if !should_compact(ctx_tokens, ctx_window, &settings) {
             return None;
         }
 
@@ -272,7 +308,7 @@ impl CompactionPolicy for TokenBudgetPolicy {
         //    kept at least `keep_recent_tokens`. Include per-message
         //    framing in each entry so the running total matches what
         //    `estimate_messages` reported in step 2.
-        let keep_recent = self.settings.keep_recent_tokens;
+        let keep_recent = settings.keep_recent_tokens;
         let framing = self.estimator.per_message_overhead();
         let per_msg: Vec<u64> = messages
             .iter()
@@ -602,92 +638,212 @@ pub fn compaction_prepare_next_turn(
     compaction_prompt: String,
     session: Session,
 ) -> PrepareNextTurnFn {
-    Arc::new(move |ctx: PrepareNextTurnContext| {
-        let summarizer = summarizer.clone();
-        let policy = policy.clone();
-        let prompt = compaction_prompt.clone();
-        let session = session.clone();
-        Box::pin(async move {
-            let prefix_len = policy.evaluate(&ctx.context.messages)?;
+    compaction_prepare_next_turn_with_notify(summarizer, policy, compaction_prompt, session, None)
+}
 
-            // We need an owned `Model` for the summarizer call. Reuse the
-            // assistant message's model when present; otherwise fall back
-            // to `Model::unknown()` — the summarizer can override.
-            let model = if !ctx.message.model.is_empty() {
-                Model {
-                    id: ctx.message.model.clone(),
-                    name: ctx.message.model.clone(),
-                    api: ctx.message.api.clone(),
-                    provider: ctx.message.provider.clone(),
-                    ..Default::default()
+pub fn compaction_prepare_next_turn_with_notify(
+    summarizer: Arc<dyn LlmStream>,
+    policy: Arc<dyn CompactionPolicy>,
+    compaction_prompt: String,
+    session: Session,
+    notify: Option<CompactionNotifyFn>,
+) -> PrepareNextTurnFn {
+    Arc::new(
+        move |ctx: PrepareNextTurnContext, cancel: CancellationToken| {
+            let summarizer = summarizer.clone();
+            let policy = policy.clone();
+            let prompt = compaction_prompt.clone();
+            let session = session.clone();
+            let notify = notify.clone();
+            Box::pin(async move {
+                let prefix_len = policy.evaluate(&ctx.context.messages)?;
+                let prefix = &ctx.context.messages[..prefix_len];
+                let tokens_before = approximate_token_count(prefix);
+                let message_count = ctx.context.messages.len();
+
+                if let Some(notify) = notify.as_ref() {
+                    notify(
+                        CompactionNotice {
+                            phase: CompactionNoticePhase::Started,
+                            prefix_len,
+                            message_count,
+                            tokens_before,
+                            summary_bytes: 0,
+                            messages: None,
+                            reason: None,
+                        },
+                        cancel.clone(),
+                    )
+                    .await;
                 }
-            } else {
-                Model::unknown()
-            };
-
-            // Build the summary directly via `produce_summary` (rather than
-            // `compact_transcript`) so we have the raw text in hand for
-            // `Session::append_compaction` — `compact_transcript` only
-            // returns the woven `Vec<AgentMessage>`.
-            let prefix = &ctx.context.messages[..prefix_len];
-            let tokens_before = approximate_token_count(prefix);
-            let summary = match produce_summary(
-                &summarizer,
-                &model,
-                &ctx.context.system_prompt,
-                prefix,
-                &prompt,
-                CancellationToken::new(),
-            )
-            .await
-            {
-                Ok(s) if !s.trim().is_empty() => s,
-                Ok(_) => {
-                    eprintln!(
-                        "[warn] grain-agent-harness: compaction skipped this turn: empty summary"
-                    );
+                if cancel.is_cancelled() {
+                    if let Some(notify) = notify.as_ref() {
+                        notify(
+                            CompactionNotice {
+                                phase: CompactionNoticePhase::Skipped,
+                                prefix_len,
+                                message_count,
+                                tokens_before,
+                                summary_bytes: 0,
+                                messages: None,
+                                reason: Some("cancelled before compaction".into()),
+                            },
+                            cancel.clone(),
+                        )
+                        .await;
+                    }
                     return None;
                 }
-                Err(e) => {
-                    eprintln!("[warn] grain-agent-harness: compaction skipped this turn: {e}");
-                    return None;
-                }
-            };
 
-            // Persist the compaction node so `/resume` rebuilds the
-            // session as `[summary, ...]` instead of replaying the full
-            // pre-compaction history. Failure here is non-fatal — we
-            // still rewrite the in-memory transcript so the current
-            // run benefits.
-            let leaf = session.leaf_id().await.unwrap_or_default();
-            if let Err(e) = session
-                .append_compaction(summary.clone(), leaf, tokens_before, None, Some(true))
+                // We need an owned `Model` for the summarizer call. Reuse the
+                // assistant message's model when present; otherwise fall back
+                // to `Model::unknown()` — the summarizer can override.
+                let model = if !ctx.message.model.is_empty() {
+                    Model {
+                        id: ctx.message.model.clone(),
+                        name: ctx.message.model.clone(),
+                        api: ctx.message.api.clone(),
+                        provider: ctx.message.provider.clone(),
+                        ..Default::default()
+                    }
+                } else {
+                    Model::unknown()
+                };
+
+                // Build the summary directly via `produce_summary` (rather than
+                // `compact_transcript`) so we have the raw text in hand for
+                // `Session::append_compaction` — `compact_transcript` only
+                // returns the woven `Vec<AgentMessage>`.
+                let summary = match produce_summary(
+                    &summarizer,
+                    &model,
+                    &ctx.context.system_prompt,
+                    prefix,
+                    &prompt,
+                    cancel.clone(),
+                )
                 .await
-            {
-                eprintln!("[warn] grain-agent-harness: compaction session persist failed: {e}");
-            }
+                {
+                    Ok(s) if !s.trim().is_empty() => s,
+                    Ok(_) => {
+                        eprintln!(
+                            "[warn] grain-agent-harness: compaction skipped this turn: empty summary"
+                        );
+                        if let Some(notify) = notify.as_ref() {
+                            notify(
+                                CompactionNotice {
+                                    phase: CompactionNoticePhase::Skipped,
+                                    prefix_len,
+                                    message_count,
+                                    tokens_before,
+                                    summary_bytes: 0,
+                                    messages: None,
+                                    reason: Some("empty summary".into()),
+                                },
+                                cancel.clone(),
+                            )
+                            .await;
+                        }
+                        return None;
+                    }
+                    Err(e) => {
+                        eprintln!("[warn] grain-agent-harness: compaction skipped this turn: {e}");
+                        if let Some(notify) = notify.as_ref() {
+                            notify(
+                                CompactionNotice {
+                                    phase: CompactionNoticePhase::Failed,
+                                    prefix_len,
+                                    message_count,
+                                    tokens_before,
+                                    summary_bytes: 0,
+                                    messages: None,
+                                    reason: Some(e.to_string()),
+                                },
+                                cancel.clone(),
+                            )
+                            .await;
+                        }
+                        return None;
+                    }
+                };
 
-            // Weave the in-memory transcript: [summary_message, ...tail].
-            let tail: Vec<AgentMessage> = ctx.context.messages[prefix_len..].to_vec();
-            let mut new_messages: Vec<AgentMessage> = Vec::with_capacity(tail.len() + 1);
-            new_messages.push(compaction_summary_message(
-                summary,
-                tokens_before,
-                current_time_ms(),
-            ));
-            new_messages.extend(tail);
+                // Persist the compaction node so `/resume` rebuilds the
+                // session as `[summary, ...]` instead of replaying the full
+                // pre-compaction history. Failure here is non-fatal — we
+                // still rewrite the in-memory transcript so the current
+                // run benefits.
+                let first_kept = match first_kept_context_entry_id(&session, prefix_len).await {
+                    Some(id) => id,
+                    None => session.leaf_id().await.unwrap_or_default(),
+                };
+                if let Err(e) = session
+                    .append_compaction(summary.clone(), first_kept, tokens_before, None, Some(true))
+                    .await
+                {
+                    eprintln!("[warn] grain-agent-harness: compaction session persist failed: {e}");
+                }
 
-            let new_ctx = AgentContext {
-                system_prompt: ctx.context.system_prompt.clone(),
-                messages: new_messages,
-                tools: ctx.context.tools.clone(),
-            };
-            Some(AgentLoopTurnUpdate {
-                context: Some(new_ctx),
-                ..Default::default()
+                // Weave the in-memory transcript: [summary_message, ...tail].
+                let tail: Vec<AgentMessage> = ctx.context.messages[prefix_len..].to_vec();
+                let mut new_messages: Vec<AgentMessage> = Vec::with_capacity(tail.len() + 1);
+                new_messages.push(compaction_summary_message(
+                    summary.clone(),
+                    tokens_before,
+                    current_time_ms(),
+                ));
+                new_messages.extend(tail);
+
+                if let Some(notify) = notify.as_ref() {
+                    notify(
+                        CompactionNotice {
+                            phase: CompactionNoticePhase::Finished,
+                            prefix_len,
+                            message_count,
+                            tokens_before,
+                            summary_bytes: summary.len(),
+                            messages: Some(new_messages.clone()),
+                            reason: None,
+                        },
+                        cancel.clone(),
+                    )
+                    .await;
+                }
+
+                let new_ctx = AgentContext {
+                    system_prompt: ctx.context.system_prompt.clone(),
+                    messages: new_messages,
+                    tools: ctx.context.tools.clone(),
+                };
+                Some(AgentLoopTurnUpdate {
+                    context: Some(new_ctx),
+                    ..Default::default()
+                })
             })
-        })
-    })
+        },
+    )
+}
+
+pub(crate) fn entry_contributes_context_message(entry: &SessionTreeEntry) -> bool {
+    matches!(
+        &entry.kind,
+        SessionTreeEntryKind::Message { .. }
+            | SessionTreeEntryKind::CustomMessage { .. }
+            | SessionTreeEntryKind::BranchSummary { .. }
+            | SessionTreeEntryKind::Compaction { .. }
+    )
+}
+
+pub(crate) async fn first_kept_context_entry_id(
+    session: &Session,
+    prefix_len: usize,
+) -> Option<String> {
+    session
+        .branch(None)
+        .await
+        .into_iter()
+        .filter(entry_contributes_context_message)
+        .nth(prefix_len)
+        .map(|entry| entry.id)
 }
 
 async fn produce_summary(
@@ -698,6 +854,9 @@ async fn produce_summary(
     compaction_prompt: &str,
     cancel: CancellationToken,
 ) -> Result<String, CompactionError> {
+    if cancel.is_cancelled() {
+        return Err(CompactionError::StreamFailed("operation aborted".into()));
+    }
     // Build the LLM context fed to the summarizer:
     // - Reuse the agent's system prompt so the model already has context.
     // - Project the prefix to plain LLM messages (drop Custom variants;
@@ -740,12 +899,15 @@ async fn produce_summary(
     };
 
     let mut stream = summarizer
-        .stream(model, &llm_ctx, &StreamOptions::default(), cancel)
+        .stream(model, &llm_ctx, &StreamOptions::default(), cancel.clone())
         .await
         .map_err(|e| CompactionError::StreamFailed(e.to_string()))?;
 
     let mut summary = String::new();
     while let Some(event) = stream.next().await {
+        if cancel.is_cancelled() {
+            return Err(CompactionError::StreamFailed("operation aborted".into()));
+        }
         match event {
             AssistantMessageEvent::Done { result } => {
                 for c in result.content {
@@ -884,25 +1046,27 @@ pub fn truncate_tool_results(messages: &mut [AgentMessage], cap_chars: usize) ->
 /// compaction hook (via [`super::chain_prepare_next_turn`]) so compaction
 /// summarises already-truncated results rather than the original blobs.
 pub fn tool_result_truncation_hook(cap_chars: usize) -> PrepareNextTurnFn {
-    Arc::new(move |ctx: PrepareNextTurnContext| {
-        let cap = cap_chars;
-        Box::pin(async move {
-            let mut new_messages = (*ctx.context.messages).to_vec();
-            let n_truncated = truncate_tool_results(&mut new_messages, cap);
-            let n_compressed = semantic_compress_tool_results(&mut new_messages);
-            if n_truncated == 0 && n_compressed == 0 {
-                return None;
-            }
-            Some(AgentLoopTurnUpdate {
-                context: Some(AgentContext {
-                    system_prompt: ctx.context.system_prompt.clone(),
-                    messages: new_messages,
-                    tools: ctx.context.tools.clone(),
-                }),
-                ..Default::default()
+    Arc::new(
+        move |ctx: PrepareNextTurnContext, _cancel: CancellationToken| {
+            let cap = cap_chars;
+            Box::pin(async move {
+                let mut new_messages = (*ctx.context.messages).to_vec();
+                let n_truncated = truncate_tool_results(&mut new_messages, cap);
+                let n_compressed = semantic_compress_tool_results(&mut new_messages);
+                if n_truncated == 0 && n_compressed == 0 {
+                    return None;
+                }
+                Some(AgentLoopTurnUpdate {
+                    context: Some(AgentContext {
+                        system_prompt: ctx.context.system_prompt.clone(),
+                        messages: new_messages,
+                        tools: ctx.context.tools.clone(),
+                    }),
+                    ..Default::default()
+                })
             })
-        })
-    })
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1111,11 +1275,13 @@ fn semantic_compress_tool_results(messages: &mut [AgentMessage]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::{InMemorySessionRepo, SessionRepo};
     use async_trait::async_trait;
     use futures::stream;
     use grain_agent_core::{
         AssistantMessage, AssistantStream, StopReason, StreamError, Usage, UserMessage,
     };
+    use std::sync::{Mutex, RwLock};
 
     fn user(text: &str) -> AgentMessage {
         AgentMessage::user(UserMessage {
@@ -1125,7 +1291,11 @@ mod tests {
     }
 
     fn assistant(text: &str) -> AgentMessage {
-        AgentMessage::assistant(AssistantMessage {
+        AgentMessage::assistant(assistant_msg(text))
+    }
+
+    fn assistant_msg(text: &str) -> AssistantMessage {
+        AssistantMessage {
             content: vec![AssistantContent::Text(TextContent { text: text.into() })],
             api: "test".into(),
             provider: "test".into(),
@@ -1134,7 +1304,7 @@ mod tests {
             stop_reason: StopReason::Stop,
             error_message: None,
             timestamp: 0,
-        })
+        }
     }
 
     struct StaticSummarizer {
@@ -1277,6 +1447,152 @@ mod tests {
         assert!(matches!(err, CompactionError::EmptySummary));
     }
 
+    #[tokio::test]
+    async fn compaction_prepare_next_turn_notifies_finished_and_persists() {
+        let repo = InMemorySessionRepo::new();
+        let session = repo.create(None).await.unwrap();
+        let messages: Vec<AgentMessage> = (0..4).map(|i| user(&format!("u{i}"))).collect();
+        for message in messages.iter().cloned() {
+            session.append_message(message).await.unwrap();
+        }
+
+        let phases = Arc::new(Mutex::new(Vec::new()));
+        let notice_message_count = Arc::new(Mutex::new(0usize));
+        let notify: CompactionNotifyFn = {
+            let phases = phases.clone();
+            let notice_message_count = notice_message_count.clone();
+            Arc::new(move |notice, _cancel| {
+                let phases = phases.clone();
+                let notice_message_count = notice_message_count.clone();
+                Box::pin(async move {
+                    if let Some(messages) = &notice.messages {
+                        *notice_message_count.lock().unwrap() = messages.len();
+                    }
+                    phases.lock().unwrap().push(notice.phase.clone());
+                })
+            })
+        };
+
+        let hook = compaction_prepare_next_turn_with_notify(
+            Arc::new(StaticSummarizer {
+                text: "rolled up".into(),
+            }),
+            Arc::new(MessageCountPolicy {
+                threshold: 3,
+                keep_recent: 1,
+            }),
+            DEFAULT_COMPACTION_PROMPT.to_string(),
+            session.clone(),
+            Some(notify),
+        );
+        let ctx = PrepareNextTurnContext {
+            message: assistant_msg("done"),
+            tool_results: Vec::new(),
+            context: Arc::new(AgentContext {
+                system_prompt: "system".into(),
+                messages: messages.clone(),
+                tools: Vec::new(),
+            }),
+            new_messages: Vec::new(),
+        };
+
+        let update = (hook)(ctx, CancellationToken::new())
+            .await
+            .expect("expected compaction update");
+        let new_messages = update.context.expect("expected rewritten context").messages;
+
+        assert_eq!(
+            *phases.lock().unwrap(),
+            vec![
+                CompactionNoticePhase::Started,
+                CompactionNoticePhase::Finished
+            ]
+        );
+        assert_eq!(*notice_message_count.lock().unwrap(), new_messages.len());
+        match &new_messages[0] {
+            AgentMessage::Custom(v) => {
+                assert_eq!(
+                    v.get("role").and_then(|r| r.as_str()),
+                    Some("compactionSummary")
+                );
+                assert_eq!(v.get("summary").and_then(|s| s.as_str()), Some("rolled up"));
+            }
+            other => panic!("expected compactionSummary, got {other:?}"),
+        }
+        let compactions = session
+            .entries()
+            .await
+            .into_iter()
+            .filter(|entry| matches!(entry.kind, SessionTreeEntryKind::Compaction { .. }))
+            .count();
+        assert_eq!(compactions, 1);
+    }
+
+    #[tokio::test]
+    async fn compaction_prepare_next_turn_can_be_cancelled_from_started_notice() {
+        let repo = InMemorySessionRepo::new();
+        let session = repo.create(None).await.unwrap();
+        let messages: Vec<AgentMessage> = (0..4).map(|i| user(&format!("u{i}"))).collect();
+        for message in messages.iter().cloned() {
+            session.append_message(message).await.unwrap();
+        }
+
+        let phases = Arc::new(Mutex::new(Vec::new()));
+        let notify: CompactionNotifyFn = {
+            let phases = phases.clone();
+            Arc::new(move |notice, cancel| {
+                let phases = phases.clone();
+                Box::pin(async move {
+                    if notice.phase == CompactionNoticePhase::Started {
+                        cancel.cancel();
+                    }
+                    phases.lock().unwrap().push(notice.phase.clone());
+                })
+            })
+        };
+
+        let hook = compaction_prepare_next_turn_with_notify(
+            Arc::new(StaticSummarizer {
+                text: "should not run".into(),
+            }),
+            Arc::new(MessageCountPolicy {
+                threshold: 3,
+                keep_recent: 1,
+            }),
+            DEFAULT_COMPACTION_PROMPT.to_string(),
+            session.clone(),
+            Some(notify),
+        );
+        let ctx = PrepareNextTurnContext {
+            message: assistant_msg("done"),
+            tool_results: Vec::new(),
+            context: Arc::new(AgentContext {
+                system_prompt: "system".into(),
+                messages,
+                tools: Vec::new(),
+            }),
+            new_messages: Vec::new(),
+        };
+
+        let update = (hook)(ctx, CancellationToken::new()).await;
+
+        assert!(update.is_none());
+        assert_eq!(
+            *phases.lock().unwrap(),
+            vec![
+                CompactionNoticePhase::Started,
+                CompactionNoticePhase::Skipped
+            ]
+        );
+        let compactions = session
+            .entries()
+            .await
+            .into_iter()
+            .filter(|entry| matches!(entry.kind, SessionTreeEntryKind::Compaction { .. }))
+            .count();
+        assert_eq!(compactions, 0);
+    }
+
     #[test]
     fn approximate_token_count_scales_with_content_size() {
         let small = vec![user("hi")];
@@ -1367,8 +1683,6 @@ mod tests {
     }
 
     // Helpers for TokenBudgetPolicy tests
-    use std::sync::RwLock;
-
     fn make_test_registry(
         models: Vec<grain_llm_models::descriptor::ModelDescriptor>,
     ) -> Arc<Registry> {
@@ -1465,6 +1779,37 @@ mod tests {
         let n = prefix_len.unwrap();
         assert!(n >= 2, "prefix_len must be >= 2");
         assert!(n < msgs.len(), "must keep some tail");
+    }
+
+    #[test]
+    fn token_budget_policy_applies_settings_resolver() {
+        let registry = make_test_registry(vec![test_model_descriptor("test/window", 10_000)]);
+        let handle: ActiveModelHandle = Arc::new(RwLock::new(ActiveModelInfo::id("test/window")));
+        let policy = TokenBudgetPolicy::new(
+            registry,
+            handle,
+            CompactionSettings {
+                threshold_tokens: 9_000,
+                keep_recent_tokens: 100,
+                ..DEFAULT_COMPACTION_SETTINGS
+            },
+            TokenEstimator::approximate(),
+        )
+        .with_settings_resolver(Arc::new(|_active_model, base| {
+            let mut settings = base.clone();
+            settings.threshold_tokens = 1_000;
+            settings.keep_recent_tokens = 50;
+            settings
+        }));
+
+        let msgs: Vec<AgentMessage> = (0..10)
+            .map(|i| user(&format!("msg{i}: {}", "x".repeat(1000))))
+            .collect();
+
+        assert!(
+            policy.evaluate(&msgs).is_some(),
+            "resolver should lower threshold enough to trigger compaction"
+        );
     }
 
     #[test]

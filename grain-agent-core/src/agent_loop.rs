@@ -109,7 +109,12 @@ pub struct AgentLoopTurnUpdate {
 }
 
 pub type PrepareNextTurnFn = Arc<
-    dyn Fn(PrepareNextTurnContext) -> BoxFuture<'static, Option<AgentLoopTurnUpdate>> + Send + Sync,
+    dyn Fn(
+            PrepareNextTurnContext,
+            CancellationToken,
+        ) -> BoxFuture<'static, Option<AgentLoopTurnUpdate>>
+        + Send
+        + Sync,
 >;
 
 // ---------------------------------------------------------------------------
@@ -440,12 +445,15 @@ async fn run_loop(
             // prepare_next_turn: allow swapping context/model/thinking before next turn.
             if let Some(hook) = config.prepare_next_turn.clone() {
                 let ctx_snapshot = Arc::new(context.clone());
-                let snapshot = hook(ShouldStopAfterTurnContext {
-                    message: assistant.clone(),
-                    tool_results: tool_results.clone(),
-                    context: ctx_snapshot,
-                    new_messages: new_messages.clone(),
-                })
+                let snapshot = hook(
+                    ShouldStopAfterTurnContext {
+                        message: assistant.clone(),
+                        tool_results: tool_results.clone(),
+                        context: ctx_snapshot,
+                        new_messages: new_messages.clone(),
+                    },
+                    cancel.clone(),
+                )
                 .await;
                 if let Some(update) = snapshot {
                     if let Some(new_ctx) = update.context {

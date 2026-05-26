@@ -102,6 +102,51 @@ pub fn apply_config_to_args(cfg: &ConfigFile, args: &mut Args, explicit: &HashSe
     {
         args.workspace_skills_only = b;
     }
+    if !explicit.contains("memory_dir")
+        && args.memory_dir.is_none()
+        && let Some(d) = &cfg.memory_dir
+    {
+        args.memory_dir = Some(d.clone());
+    }
+    if !explicit.contains("disable_memory")
+        && let Some(enabled) = cfg.memory_enabled
+    {
+        args.disable_memory = !enabled;
+    }
+    if !explicit.contains("disable_auto_compaction")
+        && let Some(enabled) = cfg.auto_compaction_enabled
+    {
+        args.disable_auto_compaction = !enabled;
+    }
+    if !explicit.contains("compaction_threshold_tokens")
+        && args.compaction_threshold_tokens.is_none()
+        && let Some(v) = cfg.compaction_threshold_tokens
+    {
+        args.compaction_threshold_tokens = Some(v);
+    }
+    if !explicit.contains("compaction_threshold_percent")
+        && args.compaction_threshold_percent.is_none()
+        && let Some(v) = cfg.compaction_threshold_percent
+    {
+        args.compaction_threshold_percent = Some(v);
+    }
+    if !explicit.contains("compaction_reserve_tokens")
+        && args.compaction_reserve_tokens.is_none()
+        && let Some(v) = cfg.compaction_reserve_tokens
+    {
+        args.compaction_reserve_tokens = Some(v);
+    }
+    if !explicit.contains("compaction_keep_recent_tokens")
+        && args.compaction_keep_recent_tokens.is_none()
+        && let Some(v) = cfg.compaction_keep_recent_tokens
+    {
+        args.compaction_keep_recent_tokens = Some(v);
+    }
+    if !explicit.contains("disable_deepseek_cache_first")
+        && let Some(enabled) = cfg.deepseek_cache_first
+    {
+        args.disable_deepseek_cache_first = !enabled;
+    }
 }
 
 fn parse_openai_compat(s: &str) -> Option<OpenAiCompatChoice> {
@@ -285,5 +330,60 @@ mod tests {
         apply_config_to_args(&cfg, &mut args, &explicit);
 
         assert!(args.workspace_skills_only);
+    }
+
+    #[test]
+    fn memory_config_can_disable_default() {
+        let mut args = parse(&[]);
+        let explicit = HashSet::new();
+        let cfg = ConfigFile {
+            memory_enabled: Some(false),
+            ..ConfigFile::default()
+        };
+
+        apply_config_to_args(&cfg, &mut args, &explicit);
+
+        assert!(args.disable_memory);
+    }
+
+    #[test]
+    fn memory_dir_config_applies_when_cli_silent() {
+        let mut args = parse(&[]);
+        let explicit = HashSet::new();
+        let cfg = ConfigFile {
+            memory_dir: Some("/tmp/grain-memory".into()),
+            ..ConfigFile::default()
+        };
+
+        apply_config_to_args(&cfg, &mut args, &explicit);
+
+        assert_eq!(
+            args.memory_dir.as_deref().unwrap().to_str(),
+            Some("/tmp/grain-memory")
+        );
+    }
+
+    #[test]
+    fn compaction_config_applies_when_cli_silent() {
+        let mut args = parse(&[]);
+        let explicit = HashSet::new();
+        let cfg = ConfigFile {
+            auto_compaction_enabled: Some(false),
+            compaction_threshold_tokens: Some(12345),
+            compaction_threshold_percent: Some(88),
+            compaction_reserve_tokens: Some(4096),
+            compaction_keep_recent_tokens: Some(12000),
+            deepseek_cache_first: Some(false),
+            ..ConfigFile::default()
+        };
+
+        apply_config_to_args(&cfg, &mut args, &explicit);
+
+        assert!(args.disable_auto_compaction);
+        assert_eq!(args.compaction_threshold_tokens, Some(12345));
+        assert_eq!(args.compaction_threshold_percent, Some(88));
+        assert_eq!(args.compaction_reserve_tokens, Some(4096));
+        assert_eq!(args.compaction_keep_recent_tokens, Some(12000));
+        assert!(args.disable_deepseek_cache_first);
     }
 }

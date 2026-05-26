@@ -1866,7 +1866,7 @@ dependencies = [
 
 [[package]]
 name = "grain-agent-core"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1880,9 +1880,10 @@ dependencies = [
 
 [[package]]
 name = "grain-agent-harness"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "async-trait",
+ "fs2",
  "futures",
  "grain-agent-core",
  "grain-llm-models",
@@ -1897,7 +1898,7 @@ dependencies = [
 
 [[package]]
 name = "grain-ai-agent-headless"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1931,7 +1932,7 @@ dependencies = [
 
 [[package]]
 name = "grain-ai-agent-tui"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "arboard",
  "async-trait",
@@ -1969,16 +1970,17 @@ dependencies = [
 
 [[package]]
 name = "grain-deepseek-pack"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "grain-agent-core",
+ "grain-agent-harness",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
 name = "grain-llm-genai"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2002,7 +2004,7 @@ dependencies = [
 
 [[package]]
 name = "grain-llm-models"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "grain-agent-core",
  "reqwest 0.12.28",
@@ -2014,7 +2016,7 @@ dependencies = [
 
 [[package]]
 name = "grain-pi-compat"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "async-trait",
  "dirs",
@@ -2030,7 +2032,7 @@ dependencies = [
 
 [[package]]
 name = "grain-plugin-wasm"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "async-trait",
  "grain-agent-core",
@@ -2049,7 +2051,7 @@ dependencies = [
 
 [[package]]
 name = "grain-script-boa"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "async-trait",
  "boa_engine",
@@ -2064,7 +2066,7 @@ dependencies = [
 
 [[package]]
 name = "grain-script-rhai"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "async-trait",
  "grain-agent-core",
