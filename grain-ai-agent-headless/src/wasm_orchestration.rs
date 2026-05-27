@@ -20,6 +20,7 @@ use grain_plugin_wasm::{HookPoint, HostAction, OrchestrationDef, RoleDef, WasmPl
 pub struct WasmUiUpdate {
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub context_window: Option<u64>,
     pub status: Option<String>,
 }
 
@@ -201,6 +202,7 @@ impl WasmOrchestrator {
                 self.emit_ui(WasmUiUpdate {
                     provider: header.provider,
                     model: header.model,
+                    context_window: None,
                     status: None,
                 });
             }
@@ -208,6 +210,7 @@ impl WasmOrchestrator {
                 self.emit_ui(WasmUiUpdate {
                     provider: None,
                     model: None,
+                    context_window: None,
                     status: Some(status),
                 });
             }
@@ -215,8 +218,7 @@ impl WasmOrchestrator {
     }
 
     fn apply_role(&self, plugin_id: &str, role: &RoleDef, draft: &mut DraftUpdate) {
-        let Some(model) = self.registry.to_core_model(&role.model) else {
-            warn(plugin_id, format!("unknown model '{}'", role.model));
+        let Some(model) = self.resolve_model(plugin_id, &role.model) else {
             return;
         };
         let Some(tools) = self.resolve_tools(plugin_id, &role.tools) else {
@@ -241,9 +243,30 @@ impl WasmOrchestrator {
     }
 
     fn apply_model(&self, plugin_id: &str, model_id: &str, draft: &mut DraftUpdate) {
-        match self.registry.to_core_model(model_id) {
-            Some(model) => self.apply_model_value(model, draft),
-            None => warn(plugin_id, format!("unknown model '{model_id}'")),
+        if let Some(model) = self.resolve_model(plugin_id, model_id) {
+            self.apply_model_value(model, draft);
+        }
+    }
+
+    fn resolve_model(&self, plugin_id: &str, model_id: &str) -> Option<Model> {
+        let spec = match grain_llm_genai::parse_model_spec(model_id) {
+            Ok(spec) => spec,
+            Err(e) => {
+                warn(plugin_id, e);
+                return None;
+            }
+        };
+        match self.registry.to_core_model(&spec.id) {
+            Some(mut model) => {
+                if let Some(context_window) = spec.context_window {
+                    model.context_window = context_window;
+                }
+                Some(model)
+            }
+            None => {
+                warn(plugin_id, format!("unknown model '{}'", spec.id));
+                None
+            }
         }
     }
 
@@ -251,6 +274,7 @@ impl WasmOrchestrator {
         self.emit_ui(WasmUiUpdate {
             provider: Some(model.provider.clone()),
             model: Some(model.id.clone()),
+            context_window: Some(model.context_window),
             status: None,
         });
         draft.model = Some(model);
@@ -295,13 +319,19 @@ impl DraftUpdate {
     }
 
     fn finish(self) -> Option<AgentLoopTurnUpdate> {
-        if !self.context_changed && self.model.is_none() && self.thinking_level.is_none() {
+        let mut this = self;
+        if let Some(model) = this.model.as_ref() {
+            this.context.system_prompt =
+                crate::with_runtime_model_identity(&this.context.system_prompt, model);
+            this.context_changed = true;
+        }
+        if !this.context_changed && this.model.is_none() && this.thinking_level.is_none() {
             return None;
         }
         Some(AgentLoopTurnUpdate {
-            context: self.context_changed.then_some(self.context),
-            model: self.model,
-            thinking_level: self.thinking_level,
+            context: this.context_changed.then_some(this.context),
+            model: this.model,
+            thinking_level: this.thinking_level,
         })
     }
 }

@@ -24,6 +24,7 @@
 //! - `disable_model_invocation` defaults to `false`.
 
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use grain_agent_harness::Skill;
@@ -289,13 +290,26 @@ fn unquote(s: &str) -> String {
     }
 }
 
+/// Synthesize skill entries for project-level agent guidance files in
+/// the workspace root. The model sees lightweight `<skill>` tags and
+/// can read the full files on demand via the `read` tool — no bloat
+/// injected into every request.
+pub fn load_project_context_skills(workspace_root: &Path) -> Vec<Skill> {
+    ["AGENTS.md", "CLAUDE.md"]
+        .into_iter()
+        .filter_map(|name| maybe_load_project_context_md(workspace_root, name))
+        .collect()
+}
+
 /// Synthesize a skill entry for `<workspace>/AGENTS.md` when the file
 /// exists, implementing support for the [AGENTS.md](https://agents.md/)
-/// standard. The model sees a lightweight `<skill>` tag in the system
-/// prompt (~100 bytes) and can read the full file on demand via the
-/// `read` tool — no bloat injected into every request.
+/// standard. Retained as a narrow helper for legacy call sites.
 pub fn maybe_load_agents_md(workspace_root: &Path) -> Option<Skill> {
-    let path = workspace_root.join("AGENTS.md");
+    maybe_load_project_context_md(workspace_root, "AGENTS.md")
+}
+
+fn maybe_load_project_context_md(workspace_root: &Path, filename: &str) -> Option<Skill> {
+    let path = workspace_root.join(filename);
     if path.is_file() {
         // Refuse symlinks for the same reason we refuse symlinked skill
         // directories: a malicious workspace shouldn't be able to inject
@@ -305,14 +319,30 @@ pub fn maybe_load_agents_md(workspace_root: &Path) -> Option<Skill> {
             .unwrap_or(true)
         {
             eprintln!(
-                "[warn] grain-headless: skipping symlinked AGENTS.md {}",
+                "[warn] grain-headless: skipping symlinked {filename} {}",
                 path.display()
             );
             return None;
         }
+        let digest = match std::fs::read(&path) {
+            Ok(bytes) => {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                bytes.hash(&mut hasher);
+                hasher.finish()
+            }
+            Err(e) => {
+                eprintln!(
+                    "[warn] grain-headless: skipping unreadable {filename} {}: {e}",
+                    path.display()
+                );
+                return None;
+            }
+        };
         Some(Skill {
-            name: "AGENTS.md".into(),
-            description: "Project-level guidance for coding agents (AGENTS.md standard)".into(),
+            name: filename.into(),
+            description: format!(
+                "Project-level guidance for coding agents ({filename}, content digest {digest:016x})"
+            ),
             file_path: path.to_string_lossy().into_owned(),
             disable_model_invocation: false,
             body: String::new(),
@@ -567,6 +597,18 @@ mod tests {
     fn agents_md_missing_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         assert!(maybe_load_agents_md(dir.path()).is_none());
+    }
+
+    #[test]
+    fn project_context_skills_include_agents_and_claude() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "# Agents\n").unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "# Claude\n").unwrap();
+
+        let skills = load_project_context_skills(dir.path());
+        assert_eq!(skills.len(), 2);
+        assert!(skills.iter().any(|s| s.name == "AGENTS.md"));
+        assert!(skills.iter().any(|s| s.name == "CLAUDE.md"));
     }
 
     #[test]

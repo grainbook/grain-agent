@@ -64,6 +64,11 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub disable_dynamic_tools: bool,
 
+    /// Disable automatic clipboard copy when releasing an in-app
+    /// transcript drag selection. Selection highlighting still works.
+    #[arg(long, default_value_t = false)]
+    pub disable_selection_copy: bool,
+
     /// Session tree directory: prior branch context is loaded on
     /// start; new session entries are appended as they finalize.
     /// Overrides `--sessions-dir` auto-create.
@@ -130,6 +135,11 @@ pub struct Args {
     /// are scanned; passing this flag uses only that path.
     #[arg(long)]
     pub skills_dir: Option<PathBuf>,
+
+    /// Additional `.gitignore`-syntax pattern for input `@` path search.
+    /// Repeat to hide multiple files or directories from completion.
+    #[arg(long = "search-ignore", value_name = "PATTERN")]
+    pub search_ignore: Vec<String>,
 
     /// Ignore user-global and ancestor skill directories; scan only
     /// workspace-local skill directories unless `--skills-dir` is set.

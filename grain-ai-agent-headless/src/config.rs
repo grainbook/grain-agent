@@ -10,6 +10,7 @@
 //!
 //! ```toml
 //! model = "anthropic/claude-sonnet-4-5"
+//! # Optional context override suffix: model = "deepseek-v4-pro[1m]"
 //! headroom_tokens = 4096
 //! show_thinking = false
 //! openai_compat = "common"        # "none" | "common"
@@ -18,6 +19,8 @@
 //! allow_web = false
 //! allow_semantic_search = false
 //! dynamic_tools_enabled = true
+//! copy_selection_to_clipboard = true
+//! search_ignore = ["target/", "node_modules/", "*.log"]
 //! skills_dir = ".claude/skills"
 //! workspace_skills_only = true
 //! session_dir = ".grain/sessions" # base dir for JSONL sessions; --session overrides
@@ -25,6 +28,14 @@
 //! memory_dir = ".grain/memory"
 //! auto_compaction_enabled = true
 //! compaction_threshold_percent = 92
+//!
+//! [[hook]]
+//! name = "block-dangerous-shell"
+//! event = "before_tool_call"
+//! tool = "bash"
+//! when = "args.command contains 'rm -rf'"
+//! action = "deny"
+//! reason = "refusing dangerous shell command"
 //!
 //! # Declarative plugin set. Equivalent to a hand-edited
 //! # plugin.toml entry. The runtime plugin manager
@@ -56,6 +67,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::hooks::HookRule;
 use crate::plugin_spec::PluginSpec;
 use grain_llm_genai::ProfileEntry;
 
@@ -75,6 +87,13 @@ pub struct ConfigFile {
     /// Enable prompt-based tool schema pruning. Enabled by default in
     /// CLIs; set false to expose every registered tool every turn.
     pub dynamic_tools_enabled: Option<bool>,
+    /// TUI-only: copy transcript drag selections to the OS clipboard
+    /// on mouse release. Defaults to true.
+    pub copy_selection_to_clipboard: Option<bool>,
+    /// Additional `.gitignore`-syntax patterns for TUI `@` path search.
+    /// These patterns are layered on top of normal gitignore handling and
+    /// are matched relative to the workspace root.
+    pub search_ignore: Option<Vec<String>>,
     pub skills_dir: Option<PathBuf>,
     /// When true, default skill discovery ignores user-global and
     /// ancestor `.agents/skills` directories and scans only the current
@@ -119,6 +138,10 @@ pub struct ConfigFile {
     /// keep this one's comments / ordering intact.
     #[serde(default, rename = "plugin")]
     pub plugins: Vec<PluginSpec>,
+    /// Runtime hook rules compiled into agent lifecycle hooks. These
+    /// are declarative and do not require recompiling the binary.
+    #[serde(default, rename = "hook")]
+    pub hooks: Vec<HookRule>,
     /// Declarative provider entries — same shape as the legacy
     /// `providers.toml` `[[profile]]` blocks but renamed to
     /// `[[provider]]` so the section reads naturally. If both
@@ -293,6 +316,12 @@ fn merge_into(dst: &mut ConfigFile, src: ConfigFile) {
     if src.dynamic_tools_enabled.is_some() {
         dst.dynamic_tools_enabled = src.dynamic_tools_enabled;
     }
+    if src.copy_selection_to_clipboard.is_some() {
+        dst.copy_selection_to_clipboard = src.copy_selection_to_clipboard;
+    }
+    if src.search_ignore.is_some() {
+        dst.search_ignore = src.search_ignore;
+    }
     if src.skills_dir.is_some() {
         dst.skills_dir = src.skills_dir;
     }
@@ -399,12 +428,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_toml(
             &workspace_config_path(dir.path()),
-            "model = \"openai/gpt-4o\"\nallow_write = true\nheadroom_tokens = 8192\n",
+            "model = \"openai/gpt-4o\"\nallow_write = true\nheadroom_tokens = 8192\ncopy_selection_to_clipboard = false\nsearch_ignore = [\"target/\", \"*.log\"]\n",
         );
         let cfg = ConfigFile::load(dir.path()).unwrap();
         assert_eq!(cfg.model.as_deref(), Some("openai/gpt-4o"));
         assert_eq!(cfg.allow_write, Some(true));
         assert_eq!(cfg.headroom_tokens, Some(8192));
+        assert_eq!(cfg.copy_selection_to_clipboard, Some(false));
+        assert_eq!(
+            cfg.search_ignore.as_deref(),
+            Some(&["target/".to_string(), "*.log".to_string()][..])
+        );
     }
 
     #[test]

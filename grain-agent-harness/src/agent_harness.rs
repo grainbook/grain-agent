@@ -680,6 +680,11 @@ impl AgentHarness {
         self.emit(AgentHarnessEvent::ModelSelect { model }).await;
     }
 
+    /// Replace the system prompt for subsequent turns.
+    pub async fn set_system_prompt(&self, prompt: String) {
+        self.agent.set_system_prompt(prompt).await;
+    }
+
     /// Replace the thinking level. Forwards to `Agent::set_thinking_level`
     /// and emits [`AgentHarnessEvent::ThinkingLevelSelect`].
     pub async fn set_thinking_level(&self, level: ThinkingLevel) {

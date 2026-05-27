@@ -353,6 +353,7 @@ async fn event_loop(
         providers,
         initial_provider_idx,
         cny_rate,
+        !args.disable_selection_copy,
         ctx.persisted.prompt_history.clone(),
     );
 

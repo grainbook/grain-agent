@@ -257,11 +257,14 @@ impl ActiveModelInfo {
     }
 
     pub fn resolve_context_window(&self, registry: &Registry) -> Option<u64> {
-        registry
-            .lookup(&self.id)
-            .map(|m| m.context_window)
-            .filter(|w| *w > 0)
-            .or_else(|| (self.context_window > 0).then_some(self.context_window))
+        (self.context_window > 0)
+            .then_some(self.context_window)
+            .or_else(|| {
+                registry
+                    .lookup(&self.id)
+                    .map(|m| m.context_window)
+                    .filter(|w| *w > 0)
+            })
     }
 }
 
@@ -676,6 +679,14 @@ mod tests {
         let messages = large_transcript();
         let result = transform(messages.clone(), CancellationToken::new()).await;
         assert!(result.len() < messages.len());
+    }
+
+    #[test]
+    fn explicit_context_window_overrides_registry_window() {
+        let registry = make_registry(vec![small_model()]);
+        let active = ActiveModelInfo::new("test/small", 10_000);
+
+        assert_eq!(active.resolve_context_window(&registry), Some(10_000));
     }
 
     #[tokio::test]

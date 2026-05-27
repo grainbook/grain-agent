@@ -23,6 +23,9 @@
 //! base_url = "https://api.openai.com/v1"
 //! model = "openai/gpt-4o"
 //! auth = { kind = "api_key", env = "OPENAI_API_KEY_WORK" }
+//! # Optional: append `[1m]`, `[128k]`, or `[1000000]` to override
+//! # the host-side context window while sending `model` without the suffix.
+//! # model = "deepseek-v4-pro[1m]"
 //!
 //! [[profile]]
 //! name = "claude-pro"
@@ -52,7 +55,16 @@ pub struct ProviderProfile {
     /// its provider field is then rewritten to [`Self::name`] so
     /// custom-named profiles route through the right endpoint.
     pub model: String,
+    /// Optional host-side context-window override parsed from a model id
+    /// suffix such as `deepseek-v4-pro[1m]`.
+    pub context_window: Option<u64>,
     pub auth: ProviderAuth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelSpec {
+    pub id: String,
+    pub context_window: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +224,8 @@ pub fn load_profiles(path: &Path) -> (Vec<ProviderProfile>, Vec<String>) {
 /// `grain-ai-agent-headless::config` consolidated TOML) bubble them
 /// up the same way.
 pub fn profile_from_entry(entry: ProfileEntry) -> Result<ProviderProfile, String> {
+    let model_spec =
+        parse_model_spec(&entry.model).map_err(|e| format!("profile '{}': {e}", entry.name))?;
     let kind = match entry.kind.as_str() {
         "anthropic" => ProviderKind::Anthropic,
         "openai" => ProviderKind::OpenAi,
@@ -267,9 +281,78 @@ pub fn profile_from_entry(entry: ProfileEntry) -> Result<ProviderProfile, String
         name: entry.name,
         kind,
         base_url: entry.base_url,
-        model: entry.model,
+        model: model_spec.id,
+        context_window: model_spec.context_window,
         auth,
     })
+}
+
+/// Parse a model id with an optional context-window suffix.
+///
+/// Examples:
+/// - `deepseek-v4-pro[1m]` -> id `deepseek-v4-pro`, context `1_000_000`
+/// - `local-model[128k]` -> id `local-model`, context `128_000`
+/// - `openai/gpt-4o` -> id unchanged, no override
+pub fn parse_model_spec(raw: &str) -> Result<ModelSpec, String> {
+    let raw = raw.trim();
+    let Some(start) = raw.rfind('[') else {
+        return Ok(ModelSpec {
+            id: raw.to_string(),
+            context_window: None,
+        });
+    };
+    let (id, suffix) = raw.split_at(start);
+    let id = id.trim();
+    if id.is_empty() {
+        return Err(format!(
+            "invalid model '{raw}': missing model id before '['"
+        ));
+    }
+    let suffix = suffix.trim_start_matches('[').trim_end_matches(']').trim();
+    if suffix.is_empty() {
+        return Err(format!(
+            "invalid model '{raw}': missing context window inside brackets"
+        ));
+    }
+    Ok(ModelSpec {
+        id: id.to_string(),
+        context_window: Some(
+            parse_context_window(suffix)
+                .map_err(|e| format!("invalid context suffix in model '{raw}': {e}"))?,
+        ),
+    })
+}
+
+fn parse_context_window(raw: &str) -> Result<u64, String> {
+    let normalized = raw.trim().replace('_', "");
+    if normalized.is_empty() {
+        return Err("empty value".to_string());
+    }
+    let split_at = normalized
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(normalized.len());
+    let (digits, unit) = normalized.split_at(split_at);
+    if digits.is_empty() {
+        return Err("expected a number, optionally followed by k or m".to_string());
+    }
+    let n: u64 = digits
+        .parse()
+        .map_err(|_| "number is too large".to_string())?;
+    let multiplier = match unit.to_ascii_lowercase().as_str() {
+        "" | "t" | "tok" | "token" | "tokens" => 1,
+        "k" | "kt" | "ktok" | "k_token" | "k_tokens" => 1_000,
+        "m" | "mt" | "mtok" | "m_token" | "m_tokens" => 1_000_000,
+        "ki" | "kib" => 1_024,
+        "mi" | "mib" => 1_048_576,
+        other => {
+            return Err(format!(
+                "unknown unit '{other}' (use plain tokens, k, m, ki, or mi)"
+            ));
+        }
+    };
+    n.checked_mul(multiplier)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "context window must be greater than zero".to_string())
 }
 
 fn dirs_home() -> Option<PathBuf> {
@@ -319,10 +402,47 @@ auth = { kind = "api_key", env = "OPENAI_API_KEY_WORK" }
         assert_eq!(profiles[0].name, "openai-work");
         assert_eq!(profiles[0].kind, ProviderKind::OpenAiCompat);
         assert_eq!(profiles[0].model, "openai/gpt-4o");
+        assert_eq!(profiles[0].context_window, None);
         assert!(matches!(
             &profiles[0].auth,
             ProviderAuth::ApiKey { env } if env == "OPENAI_API_KEY_WORK"
         ));
+    }
+
+    #[test]
+    fn parses_model_context_suffix() {
+        let spec = parse_model_spec("deepseek-v4-pro[1m]").unwrap();
+        assert_eq!(spec.id, "deepseek-v4-pro");
+        assert_eq!(spec.context_window, Some(1_000_000));
+
+        let spec = parse_model_spec("local-model[128k]").unwrap();
+        assert_eq!(spec.id, "local-model");
+        assert_eq!(spec.context_window, Some(128_000));
+
+        let spec = parse_model_spec("plain/model").unwrap();
+        assert_eq!(spec.id, "plain/model");
+        assert_eq!(spec.context_window, None);
+    }
+
+    #[test]
+    fn profile_model_context_suffix_is_stripped_and_stored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_providers(
+            tmp.path(),
+            r#"
+[[profile]]
+name = "opencodezen"
+kind = "openai-compat"
+base_url = "https://opencode.ai/zen/go/v1/"
+model = "deepseek-v4-pro[1m]"
+auth = { kind = "api_key", env = "OPENCODE_API_KEY" }
+"#,
+        );
+        let (profiles, warnings) = load_profiles(&path);
+        assert!(warnings.is_empty(), "no warnings: {:?}", warnings);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].model, "deepseek-v4-pro");
+        assert_eq!(profiles[0].context_window, Some(1_000_000));
     }
 
     #[test]

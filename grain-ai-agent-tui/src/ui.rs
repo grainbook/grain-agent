@@ -207,28 +207,38 @@ fn input_cursor_offset(
     area_width: u16,
     prefix_cols: u16,
 ) -> (u16, u16) {
-    let width = area_width.max(prefix_cols.saturating_add(1));
-    let mut row: u16 = 0;
-    let mut col: u16 = prefix_cols;
     let cursor = byte_cursor.min(input.len());
-    let mut bytes_consumed = 0usize;
-    for ch in input.chars() {
-        if bytes_consumed >= cursor {
-            break;
-        }
-        if ch == '\n' {
+    let prefix = &input[..cursor];
+    let lines = wrap_input_to_lines(prefix, area_width, prefix_cols);
+    let row = lines.len().saturating_sub(1) as u16;
+    let line_width = lines
+        .last()
+        .map(|line| UnicodeWidthStr::width(line.as_str()) as u16)
+        .unwrap_or(0);
+    let col = if row == 0 {
+        prefix_cols.saturating_add(line_width)
+    } else {
+        line_width
+    };
+    (row, col)
+}
+
+fn input_cursor_position(
+    input: &str,
+    byte_cursor: usize,
+    area_width: u16,
+    prefix_cols: u16,
+) -> (u16, u16) {
+    let width = area_width.max(prefix_cols.saturating_add(1));
+    let visible_rows = wrap_input_to_lines(input, area_width, prefix_cols);
+    let (mut row, mut col) = input_cursor_offset(input, byte_cursor, area_width, prefix_cols);
+    if let Some(line) = visible_rows.get(row as usize) {
+        let line_width = UnicodeWidthStr::width(line.as_str()) as u16;
+        let row_start_col = if row == 0 { prefix_cols } else { 0 };
+        if line_width > 0 && col == row_start_col.saturating_add(line_width) && col >= width {
             row = row.saturating_add(1);
             col = 0;
-            bytes_consumed += ch.len_utf8();
-            continue;
         }
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
-        if col + w > width {
-            row = row.saturating_add(1);
-            col = 0;
-        }
-        col += w;
-        bytes_consumed += ch.len_utf8();
     }
     (row, col)
 }
@@ -1177,7 +1187,8 @@ fn draw_input(frame: &mut Frame<'_>, area: Rect, state: &AppState, palette: &Pal
         // input has grown past the visible budget (rare — input rows
         // are dynamic, so the cap kicks in only when transcript would
         // be squeezed below 1 row).
-        let (row, col) = input_cursor_offset(&state.input, state.cursor, area.width, prompt.width);
+        let (row, col) =
+            input_cursor_position(&state.input, state.cursor, area.width, prompt.width);
         let max_row = area.height.saturating_sub(1);
         let cursor_row = row.min(max_row);
         let cursor_col = col.min(area.width.saturating_sub(1));
@@ -3946,6 +3957,30 @@ mod ui_format_tests {
     }
 
     #[test]
+    fn input_cursor_position_moves_past_full_rendered_line() {
+        // Ratatui Paragraph wraps once a row is exactly full; the terminal
+        // cursor must land on the next visual row, not on the last occupied
+        // cell where it appears hidden inside text.
+        let s = "abcdefgh";
+        let (row, col) = input_cursor_position(s, s.len(), 10, 2);
+        assert_eq!((row, col), (1, 0));
+    }
+
+    #[test]
+    fn input_cursor_position_handles_full_line_after_hard_break() {
+        let s = "first\nabcdefghij";
+        let (row, col) = input_cursor_position(s, s.len(), 10, 2);
+        assert_eq!((row, col), (2, 0));
+    }
+
+    #[test]
+    fn input_cursor_position_multiline_paste_final_partial_line() {
+        let s = "line one\nline two\npartial";
+        let (row, col) = input_cursor_position(s, s.len(), 20, 2);
+        assert_eq!((row, col), (2, 7));
+    }
+
+    #[test]
     fn wrap_input_caps_implicitly_at_max_rows_via_input_height() {
         // We can't construct a full `AppState` here without going through
         // the wider crate test seam, but `wrap_input_to_lines` is the
@@ -3986,6 +4021,7 @@ mod ui_format_tests {
             Vec::new(),
             None,
             None,
+            true,
             Vec::new(),
         );
         state.git_prompt.branch = Some("very-long-branch-name-that-used-to-overflow".into());
@@ -4041,6 +4077,7 @@ mod ui_format_tests {
             Vec::new(),
             None,
             None,
+            true,
             Vec::new(),
         );
         let line = TranscriptLine {

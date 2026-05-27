@@ -90,6 +90,11 @@ pub fn apply_config_to_args(cfg: &ConfigFile, args: &mut Args, explicit: &HashSe
     {
         args.disable_dynamic_tools = !enabled;
     }
+    if !explicit.contains("disable_selection_copy")
+        && let Some(enabled) = cfg.copy_selection_to_clipboard
+    {
+        args.disable_selection_copy = !enabled;
+    }
     if !explicit.contains("bypass_proxy")
         && args.bypass_proxy.is_none()
         && cfg.bypass_proxy.is_some()
@@ -101,6 +106,12 @@ pub fn apply_config_to_args(cfg: &ConfigFile, args: &mut Args, explicit: &HashSe
         && let Some(d) = &cfg.skills_dir
     {
         args.skills_dir = Some(d.clone());
+    }
+    if !explicit.contains("search_ignore")
+        && args.search_ignore.is_empty()
+        && let Some(patterns) = &cfg.search_ignore
+    {
+        args.search_ignore.clone_from(patterns);
     }
     if !explicit.contains("workspace_skills_only")
         && let Some(b) = cfg.workspace_skills_only
@@ -236,6 +247,55 @@ mod tests {
         };
         apply_config_to_args(&cfg, &mut args, &HashSet::new());
         assert!(args.disable_dynamic_tools);
+    }
+
+    #[test]
+    fn selection_copy_config_can_disable_default() {
+        let mut args = parse(&[]);
+        assert!(!args.disable_selection_copy);
+        let cfg = ConfigFile {
+            copy_selection_to_clipboard: Some(false),
+            ..ConfigFile::default()
+        };
+        apply_config_to_args(&cfg, &mut args, &HashSet::new());
+        assert!(args.disable_selection_copy);
+    }
+
+    #[test]
+    fn selection_copy_cli_beats_config() {
+        let mut args = parse(&["--disable-selection-copy"]);
+        let cfg = ConfigFile {
+            copy_selection_to_clipboard: Some(true),
+            ..ConfigFile::default()
+        };
+        let mut explicit = HashSet::new();
+        explicit.insert("disable_selection_copy".to_string());
+        apply_config_to_args(&cfg, &mut args, &explicit);
+        assert!(args.disable_selection_copy);
+    }
+
+    #[test]
+    fn search_ignore_config_applies_when_cli_silent() {
+        let mut args = parse(&[]);
+        let cfg = ConfigFile {
+            search_ignore: Some(vec!["target/".into(), "*.log".into()]),
+            ..ConfigFile::default()
+        };
+        apply_config_to_args(&cfg, &mut args, &HashSet::new());
+        assert_eq!(args.search_ignore, vec!["target/", "*.log"]);
+    }
+
+    #[test]
+    fn search_ignore_cli_beats_config() {
+        let mut args = parse(&["--search-ignore", "target/"]);
+        let cfg = ConfigFile {
+            search_ignore: Some(vec!["node_modules/".into()]),
+            ..ConfigFile::default()
+        };
+        let mut explicit = HashSet::new();
+        explicit.insert("search_ignore".to_string());
+        apply_config_to_args(&cfg, &mut args, &explicit);
+        assert_eq!(args.search_ignore, vec!["target/"]);
     }
 
     #[test]

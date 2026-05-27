@@ -7,16 +7,16 @@
 
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use clap::{CommandFactory, Parser, ValueEnum, parser::ValueSource};
 use grain_agent_core::{
     Agent, AgentEvent, AgentMessage, AgentOptions, AssistantMessageEvent, Message,
 };
-use grain_agent_harness::context_guard::{ContextGuard, ContextGuardPolicy};
+use grain_agent_harness::context_guard::{ActiveModelInfo, ContextGuard, ContextGuardPolicy};
 use grain_llm_genai::{
-    GenaiStream, OpenAiCompatPreset, ProviderAuth, ProviderKind, ProviderProfile, load_profiles,
-    resolve_providers_file,
+    GenaiStream, ModelSpec, OpenAiCompatPreset, ProviderAuth, ProviderKind, ProviderProfile,
+    load_profiles, parse_model_spec, resolve_providers_file,
 };
 use grain_llm_models::Registry;
 use serde::Serialize;
@@ -25,7 +25,7 @@ use std::io::BufRead;
 use crate::config::{ArgDefaults, ConfigFile};
 use crate::diagnostics::{render_doctor_report, render_source_info_block};
 use crate::dynamic_tools::{filter_tools_by_names, select_dynamic_tool_names};
-use crate::prompt::coding_agent_system_prompt;
+use crate::prompt::{coding_agent_system_prompt, with_runtime_model_identity};
 use crate::runtime::{coding_bash_tools, coding_read_tools, coding_write_tools};
 use crate::session::{SessionWriter, load_messages};
 use crate::skills::{find_skills_in_dirs, resolve_skill_dirs_with_scope};
@@ -341,12 +341,20 @@ pub async fn run(args: Args) -> Result<(), CliError> {
 
     // Resolve the model id we'll actually drive: profile overrides
     // `--model` when active.
-    let resolved_model_id = active_profile
-        .map(|p| p.model.clone())
-        .unwrap_or_else(|| args.model.clone());
+    let model_spec = match active_profile {
+        Some(p) => ModelSpec {
+            id: p.model.clone(),
+            context_window: p.context_window,
+        },
+        None => parse_model_spec(&args.model)?,
+    };
+    let resolved_model_id = model_spec.id.clone();
     let mut model = registry.to_core_model(&resolved_model_id).ok_or_else(|| {
         format!("unknown model id '{resolved_model_id}': not in the embedded models.dev snapshot")
     })?;
+    if let Some(context_window) = model_spec.context_window {
+        model.context_window = context_window;
+    }
     if let Some(p) = active_profile
         && matches!(p.kind, ProviderKind::OpenAiCompat)
     {
@@ -385,7 +393,8 @@ pub async fn run(args: Args) -> Result<(), CliError> {
     } else {
         Some(resolve_prompt(&args)?)
     };
-    let mut system_prompt = resolve_system_prompt(&args)?;
+    let raw_system_prompt = resolve_system_prompt(&args)?;
+    let mut system_prompt = with_runtime_model_identity(&raw_system_prompt, &model);
     let skills_block = resolve_skills_block(&args, workspace.root());
     if !skills_block.is_empty() {
         system_prompt.push_str("\n\n");
@@ -399,6 +408,7 @@ pub async fn run(args: Args) -> Result<(), CliError> {
             "[info] DeepSeek pack active — reasoning scavenge + subagent.done detection enabled"
         );
     }
+    let model_context_window = model.context_window;
     let mut opts = AgentOptions::new(model, stream);
     let mut tools = coding_read_tools(workspace.clone());
     if args.allow_write {
@@ -468,7 +478,7 @@ pub async fn run(args: Args) -> Result<(), CliError> {
     let all_tools = tools.clone();
 
     // --- Context guard -----------------------------------------------------
-    let estimator = grain_agent_harness::TokenEstimator::for_model(&args.model);
+    let estimator = grain_agent_harness::TokenEstimator::for_model(&resolved_model_id);
     let mut system_overhead_tokens = estimator.estimate_string(&system_prompt);
     for t in &tools {
         let def = t.definition();
@@ -478,7 +488,11 @@ pub async fn run(args: Args) -> Result<(), CliError> {
             estimator.estimate_string(&serde_json::to_string(&def.parameters).unwrap_or_default());
     }
     system_overhead_tokens = (system_overhead_tokens as f64 * 1.3).ceil() as u64;
-    let guard = ContextGuard::new(registry.clone(), args.model.clone())
+    let active_model_handle = Arc::new(RwLock::new(ActiveModelInfo::new(
+        resolved_model_id.clone(),
+        model_context_window,
+    )));
+    let guard = ContextGuard::with_active_model_handle(registry.clone(), active_model_handle)
         .with_policy(ContextGuardPolicy::DropOldest)
         .with_estimator(estimator)
         .with_headroom_tokens(args.headroom_tokens)
@@ -760,11 +774,7 @@ fn resolve_skills_block(args: &Args, workspace_root: &std::path::Path) -> String
             return String::new();
         }
     };
-    // AGENTS.md standard (<https://agents.md/>) — treat it as an auto-
-    // discovered skill when present in the workspace root.
-    if let Some(s) = crate::skills::maybe_load_agents_md(workspace_root) {
-        skills.push(s);
-    }
+    skills.extend(crate::skills::load_project_context_skills(workspace_root));
     grain_agent_harness::format_skills_for_system_prompt(&skills)
 }
 

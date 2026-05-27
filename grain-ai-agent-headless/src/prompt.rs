@@ -13,6 +13,11 @@
 //! Skill registration via
 //! [`grain_agent_harness::format_skills_for_system_prompt`] appends after.
 
+use grain_agent_core::Model;
+
+const RUNTIME_MODEL_IDENTITY_BEGIN: &str = "<runtime_model_identity>";
+const RUNTIME_MODEL_IDENTITY_END: &str = "</runtime_model_identity>";
+
 /// Read-only coding-agent base prompt.
 pub const DEFAULT_CODING_AGENT_SYSTEM_PROMPT: &str = "\
 You are a careful, terse coding assistant operating headlessly against a single workspace.
@@ -88,4 +93,59 @@ pub fn coding_agent_system_prompt(allow_write: bool, allow_bash: bool) -> &'stat
         // single-bash and full to the FULL prompt.
         (_, true) => FULL_CODING_AGENT_SYSTEM_PROMPT,
     }
+}
+
+/// Append or replace the host-observed runtime model identity.
+///
+/// Most providers do not expose the request's `model` field to the model as
+/// conversational context. Without this block, asking "what model are you?"
+/// invites the model to guess from its own training or provider defaults.
+pub fn with_runtime_model_identity(base: &str, model: &Model) -> String {
+    let base = strip_runtime_model_identity(base);
+    let base = base.trim_end();
+    let provider = runtime_identity_value(&model.provider);
+    let model_id = runtime_identity_value(&model.id);
+    let model_name = runtime_identity_value(&model.name);
+    let api = runtime_identity_value(&model.api);
+    format!(
+        "{base}\n\n{RUNTIME_MODEL_IDENTITY_BEGIN}\n\
+provider: {provider}\n\
+model_id: {model_id}\n\
+model_name: {model_name}\n\
+api: {api}\n\
+When asked what model or provider you are running as, answer using the \
+provider and model_id in this block. Do not claim to be Claude unless \
+model_id is an Anthropic Claude model.\n\
+{RUNTIME_MODEL_IDENTITY_END}"
+    )
+}
+
+fn strip_runtime_model_identity(base: &str) -> String {
+    let Some(start) = base.find(RUNTIME_MODEL_IDENTITY_BEGIN) else {
+        return base.to_string();
+    };
+    let Some(end_rel) = base[start..].find(RUNTIME_MODEL_IDENTITY_END) else {
+        return base.to_string();
+    };
+    let end = start + end_rel + RUNTIME_MODEL_IDENTITY_END.len();
+    let mut out = String::with_capacity(base.len());
+    out.push_str(base[..start].trim_end());
+    out.push_str("\n\n");
+    out.push_str(base[end..].trim_start());
+    out.trim_end().to_string()
+}
+
+fn runtime_identity_value(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            '\r' | '\n' | '\t' => ' ',
+            '<' => '(',
+            '>' => ')',
+            ch if ch.is_control() => ' ',
+            ch => ch,
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
 }

@@ -34,6 +34,7 @@ pub mod deepseek;
 pub mod diagnostics;
 pub mod dynamic_tools;
 pub mod extensions;
+pub mod hooks;
 pub mod memory;
 pub mod migrations;
 pub mod plugin_lock;
@@ -69,6 +70,10 @@ pub use dynamic_tools::{
     filter_tools_by_names, select_dynamic_tool_names,
 };
 pub use extensions::{Extension, ExtensionRegistry};
+pub use hooks::{
+    HookAction, HookEvent, HookRegistry, HookRule, HookTrace, HookTraceSink, after_tool_call_hook,
+    before_tool_call_hook, chain_after_hooks, chain_before_hooks, prepare_next_turn_hook,
+};
 pub use memory::{
     DEFAULT_MAX_RECORDS as MEMORY_DEFAULT_MAX_RECORDS,
     DEFAULT_MAX_SESSIONS as MEMORY_DEFAULT_MAX_SESSIONS,
@@ -105,6 +110,7 @@ pub use plugins::{
 pub use prompt::{
     DEFAULT_CODING_AGENT_SYSTEM_PROMPT, FULL_CODING_AGENT_SYSTEM_PROMPT,
     WRITE_ENABLED_CODING_AGENT_SYSTEM_PROMPT, coding_agent_system_prompt,
+    with_runtime_model_identity,
 };
 pub use runtime::{
     coding_all_tools, coding_bash_tools, coding_full_tools, coding_read_tools, coding_web_tools,
@@ -117,8 +123,8 @@ pub use session_discovery::{
     parse_session_meta, session_id_from_path,
 };
 pub use skills::{
-    DEFAULT_SKILLS_DIR, SkillsError, find_skills, find_skills_in_dirs, maybe_load_agents_md,
-    resolve_skill_dirs, resolve_skill_dirs_with_scope, resolve_skills_dir,
+    DEFAULT_SKILLS_DIR, SkillsError, find_skills, find_skills_in_dirs, load_project_context_skills,
+    maybe_load_agents_md, resolve_skill_dirs, resolve_skill_dirs_with_scope, resolve_skills_dir,
 };
 pub use slash::{HELP_TEXT, SlashCommand, parse as parse_slash_command};
 pub use telemetry::{TelemetryError, TelemetrySink};

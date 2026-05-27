@@ -176,6 +176,10 @@ pub(crate) struct AgentLoopResult {
     pub new_messages: Vec<AgentMessage>,
     /// Final context after any `prepare_next_turn` rewrites.
     pub context: AgentContext,
+    /// Final model after any `prepare_next_turn` rewrites.
+    pub model: Model,
+    /// Final thinking level after any `prepare_next_turn` rewrites.
+    pub thinking_level: ThinkingLevel,
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +254,8 @@ pub(crate) async fn run_agent_loop_with_result(
     Ok(AgentLoopResult {
         new_messages,
         context,
+        model: config.model,
+        thinking_level: config.thinking_level,
     })
 }
 
@@ -311,6 +317,8 @@ pub(crate) async fn run_agent_loop_continue_with_result(
     Ok(AgentLoopResult {
         new_messages,
         context: current_context,
+        model: config.model,
+        thinking_level: config.thinking_level,
     })
 }
 

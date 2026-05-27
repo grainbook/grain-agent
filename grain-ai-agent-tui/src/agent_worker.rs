@@ -14,15 +14,16 @@
 //! ingredients (model, tools, hooks, etc.) so each rebuild only has
 //! to feed in a fresh transcript.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 use grain_agent_core::{
-    AgentLoopTurnUpdate, AgentMessage, AgentTool, BeforeToolCallFn, ConvertToLlmFn, Message, Model,
-    PrepareNextTurnFn, StreamFn, TransformContextFn,
+    AfterToolCallFn, AfterToolCallResult, AgentContext, AgentLoopTurnUpdate, AgentMessage,
+    AgentTool, BeforeToolCallFn, BeforeToolCallResult, ConvertToLlmFn, Message, Model,
+    PrepareNextTurnFn, StreamFn, TransformContextFn, UserContent, UserMessage,
 };
 use grain_agent_harness::{
-    AgentHarness, AgentHarnessOptions, JsonlSessionRepo, Session,
+    AgentHarness, AgentHarnessOptions, JsonlSessionRepo, PinnedSystemPrompt, Session,
     SessionError as HarnessSessionError, SystemPrompt,
     context_guard::{ActiveModelHandle, ActiveModelInfo, ContextGuard, ContextGuardPolicy},
 };
@@ -42,33 +43,166 @@ use crate::cli::Args;
 use crate::event::TuiEvent;
 use grain_llm_genai::{ProviderAuth, ProviderKind, ProviderProfile};
 
-fn workspace_file_candidates(root: &std::path::Path) -> Vec<String> {
-    const MAX_FILE_CANDIDATES: usize = 20_000;
+#[cfg(feature = "hot-reload")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotReloadKind {
+    Rhai,
+    PromptCatalog,
+    RestartSuggested,
+}
+
+#[derive(Debug, Clone)]
+enum PromptSource {
+    BuiltIn { allow_write: bool, allow_bash: bool },
+    File(PathBuf),
+}
+
+fn project_system_prompt_path(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(".grain").join("SYSTEM.md")
+}
+
+fn resolve_prompt_source(
+    workspace_root: &Path,
+    explicit: Option<&Path>,
+    allow_write: bool,
+    allow_bash: bool,
+) -> PromptSource {
+    if let Some(path) = explicit {
+        return PromptSource::File(path.to_path_buf());
+    }
+    let project = project_system_prompt_path(workspace_root);
+    if project.is_file() {
+        PromptSource::File(project)
+    } else {
+        PromptSource::BuiltIn {
+            allow_write,
+            allow_bash,
+        }
+    }
+}
+
+fn load_raw_prompt_source(source: &PromptSource) -> std::io::Result<String> {
+    match source {
+        PromptSource::BuiltIn {
+            allow_write,
+            allow_bash,
+        } => Ok(coding_agent_system_prompt(*allow_write, *allow_bash).to_string()),
+        PromptSource::File(path) => std::fs::read_to_string(path),
+    }
+}
+
+fn append_memory_fragment(base_prompt: &mut String, fragment: Option<&str>) {
+    if let Some(fragment) = fragment {
+        base_prompt.push_str("\n\n");
+        base_prompt.push_str(fragment);
+    }
+}
+
+fn workspace_path_candidates(
+    root: &std::path::Path,
+    search_ignore: &[String],
+) -> (Vec<String>, Vec<String>) {
+    const MAX_PATH_CANDIDATES: usize = 20_000;
     let mut out = Vec::new();
-    let walker = ignore::WalkBuilder::new(root)
+    let (search_ignore, warnings) = build_search_ignore(root, search_ignore);
+    let search_ignore = search_ignore.map(Arc::new);
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
         .hidden(false)
         .git_ignore(true)
         .git_exclude(true)
         .ignore(true)
-        .parents(true)
-        .build();
+        .parents(true);
+    if let Some(matcher) = search_ignore {
+        let root = root.to_path_buf();
+        builder.filter_entry(move |entry| {
+            if entry.path() == root {
+                return true;
+            }
+            let is_dir = entry.file_type().map(|ty| ty.is_dir()).unwrap_or(false);
+            !matcher
+                .matched_path_or_any_parents(entry.path(), is_dir)
+                .is_ignore()
+        });
+    }
+    let walker = builder.build();
     for entry in walker.flatten() {
-        if out.len() >= MAX_FILE_CANDIDATES {
+        if out.len() >= MAX_PATH_CANDIDATES {
             break;
         }
         let path = entry.path();
-        if path == root || !entry.file_type().map(|ty| ty.is_file()).unwrap_or(false) {
+        if path == root {
+            continue;
+        }
+        let Some(file_type) = entry.file_type() else {
+            continue;
+        };
+        let is_dir = file_type.is_dir();
+        if !is_dir && !file_type.is_file() {
             continue;
         }
         if let Ok(rel) = path.strip_prefix(root) {
-            let rel = rel.to_string_lossy().replace('\\', "/");
+            let mut rel = rel.to_string_lossy().replace('\\', "/");
             if !rel.is_empty() {
+                if is_dir && !rel.ends_with('/') {
+                    rel.push('/');
+                }
                 out.push(rel);
             }
         }
     }
     out.sort();
-    out
+    (out, warnings)
+}
+
+fn build_search_ignore(
+    root: &std::path::Path,
+    patterns: &[String],
+) -> (Option<ignore::gitignore::Gitignore>, Vec<String>) {
+    if patterns.is_empty() {
+        return (None, Vec::new());
+    }
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
+    let mut warnings = Vec::new();
+    for pattern in patterns {
+        if let Err(e) = builder.add_line(None, pattern) {
+            warnings.push(format!("search_ignore pattern '{pattern}' ignored: {e}"));
+        }
+    }
+    match builder.build() {
+        Ok(matcher) => (Some(matcher), warnings),
+        Err(e) => {
+            warnings.push(format!("search_ignore disabled: {e}"));
+            (None, warnings)
+        }
+    }
+}
+
+fn runtime_skills_with_project_context(
+    base_skills: &[grain_agent_harness::Skill],
+    workspace_root: &Path,
+) -> Vec<grain_agent_harness::Skill> {
+    let mut skills = base_skills.to_vec();
+    skills.extend(grain_ai_agent_headless::load_project_context_skills(
+        workspace_root,
+    ));
+    skills
+}
+
+fn build_runtime_system_prompt(
+    base_prompt: &str,
+    skills: &[grain_agent_harness::Skill],
+    model: &Model,
+) -> PinnedSystemPrompt {
+    let base_prompt = grain_ai_agent_headless::with_runtime_model_identity(base_prompt, model);
+    PinnedSystemPrompt::build(base_prompt, skills)
+}
+
+fn apply_context_window_override(mut model: Model, context_window: Option<u64>) -> Model {
+    if let Some(context_window) = context_window {
+        model.context_window = context_window;
+    }
+    model
 }
 
 fn dir_contains_extension(dir: &std::path::Path, extension: &str) -> bool {
@@ -115,6 +249,7 @@ pub struct WorkerConfig {
     pub allow_semantic_search: bool,
     pub dynamic_tools_enabled: bool,
     pub skills_dir: Option<PathBuf>,
+    pub search_ignore: Vec<String>,
     pub workspace_skills_only: bool,
     pub session: Option<PathBuf>,
     pub telemetry_file: Option<PathBuf>,
@@ -184,6 +319,7 @@ impl From<&Args> for WorkerConfig {
             allow_semantic_search: a.allow_semantic_search,
             dynamic_tools_enabled: !a.disable_dynamic_tools,
             skills_dir: a.skills_dir.clone(),
+            search_ignore: a.search_ignore.clone(),
             workspace_skills_only: a.workspace_skills_only,
             session: a.session.clone(),
             telemetry_file: a.telemetry_file.clone(),
@@ -286,11 +422,22 @@ pub struct Worker {
 struct HarnessBuilder {
     model: Model,
     stream: StreamFn,
-    system_prompt: String,
+    /// Latest pinned prompt text. Project-context hot-reload swaps this in
+    /// place so future `/resume` rebuilds inherit the same live prompt
+    /// the current harness is using.
+    system_prompt: Arc<RwLock<String>>,
+    /// Latest base prompt before the `<available_skills>` block.
+    base_prompt: Arc<RwLock<String>>,
+    prompt_source: PromptSource,
+    discovered_plugins: Vec<grain_ai_agent_headless::Plugin>,
+    memory_prompt_fragment: Option<String>,
+    skill_dirs: Vec<PathBuf>,
+    workspace_root: PathBuf,
     tools: Vec<Arc<dyn AgentTool>>,
     dynamic_tools_enabled: bool,
     transform_context: TransformContextFn,
     before_tool_call: Option<BeforeToolCallFn>,
+    after_tool_call: Option<AfterToolCallFn>,
     /// Compaction summarizer (= a clone of the live LlmStream).
     compaction_summarizer: Arc<dyn grain_agent_core::LlmStream>,
     /// Token-budget policy that decides when compaction fires.
@@ -303,6 +450,7 @@ struct HarnessBuilder {
     /// [`Self::build_with_model`]. Compaction is built fresh per-build
     /// so it can capture the just-created `Session`; escalation has no
     /// session affinity, so it stays cloned.
+    configured_prepare_hook: Option<PrepareNextTurnFn>,
     escalation_hook: Option<PrepareNextTurnFn>,
     /// Optional v2 WASM role/hook mapper. Runs after compaction and
     /// escalation so explicit plugin orchestration has the final say
@@ -381,7 +529,7 @@ impl HarnessBuilder {
             session.clone(),
             Some(compaction_notify),
         );
-        // Chain: truncation → compaction → escalation → WASM orchestration.
+        // Chain: truncation → compaction → configured hooks → escalation → WASM orchestration.
         // Truncation runs first so compaction sees already-capped tool
         // results; compaction summarises the truncated prefix; WASM
         // orchestration runs last so explicit role handoffs can swap
@@ -394,20 +542,75 @@ impl HarnessBuilder {
             chain_prepare_next_turn(
                 Some(compaction_hook),
                 chain_prepare_next_turn(
-                    self.escalation_hook.clone(),
-                    self.wasm_orchestration_hook.clone(),
+                    self.configured_prepare_hook.clone(),
+                    chain_prepare_next_turn(
+                        self.escalation_hook.clone(),
+                        self.wasm_orchestration_hook.clone(),
+                    ),
                 ),
             ),
         );
 
         let mut opts = AgentHarnessOptions::new(session, model, self.stream.clone());
-        opts.system_prompt = SystemPrompt::Static(self.system_prompt.clone());
+        opts.system_prompt = SystemPrompt::Static(self.current_system_prompt());
         opts.tools = self.tools.clone();
         opts.transform_context = Some(self.transform_context.clone());
         opts.before_tool_call = self.before_tool_call.clone();
+        opts.after_tool_call = self.after_tool_call.clone();
         opts.prepare_next_turn = prepare_next_turn;
         opts.convert_to_llm = self.convert_to_llm.clone();
         Arc::new(AgentHarness::new(opts).await)
+    }
+
+    fn current_system_prompt(&self) -> String {
+        match self.system_prompt.read() {
+            Ok(prompt) => prompt.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn rebuild_runtime_system_prompt(
+        &self,
+        model: &Model,
+    ) -> Result<(String, Vec<grain_agent_harness::Skill>, u64), String> {
+        let raw =
+            load_raw_prompt_source(&self.prompt_source).map_err(|e| match &self.prompt_source {
+                PromptSource::BuiltIn { .. } => format!("load built-in prompt failed: {e}"),
+                PromptSource::File(path) => {
+                    format!("read system prompt {} failed: {e}", path.display())
+                }
+            })?;
+        let mut base_prompt = grain_ai_agent_headless::compose_system_prompt_with_plugins(
+            &raw,
+            &self.discovered_plugins,
+        );
+        append_memory_fragment(&mut base_prompt, self.memory_prompt_fragment.as_deref());
+        let base_skills = grain_ai_agent_headless::find_skills_in_dirs_with_plugins(
+            &self.skill_dirs,
+            &self.discovered_plugins,
+        )
+        .map_err(|e| format!("skills scan: {e}"))?;
+        let skills = runtime_skills_with_project_context(&base_skills, &self.workspace_root);
+        let pinned = build_runtime_system_prompt(&base_prompt, &skills, model);
+        let digest = pinned.digest();
+        match self.base_prompt.write() {
+            Ok(mut guard) => *guard = base_prompt,
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = base_prompt;
+            }
+        }
+        Ok((pinned.to_string_owned(), skills, digest))
+    }
+
+    fn store_system_prompt(&self, prompt: String) {
+        match self.system_prompt.write() {
+            Ok(mut guard) => *guard = prompt,
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = prompt;
+            }
+        }
     }
 }
 
@@ -506,8 +709,10 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
             None => {
                 eprintln!(
                     "[info] model '{}' not in registry; synthesizing \
-                         from profile '{}' (context 32k, no pricing)",
-                    profile.model, profile.name
+                         from profile '{}' (context {}, no pricing)",
+                    profile.model,
+                    profile.name,
+                    profile.context_window.unwrap_or(32_768)
                 );
                 synthetic_model_from_profile(profile)
             }
@@ -515,10 +720,13 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         let m = override_model_provider(m, profile);
         (m, profile.model.clone(), Some(profile.name.clone()))
     } else {
+        let model_spec = grain_llm_genai::parse_model_spec(&cfg.model)
+            .map_err(|_| WorkerInitError::UnknownModel(cfg.model.clone()))?;
         let m = registry
-            .to_core_model(&cfg.model)
+            .to_core_model(&model_spec.id)
             .ok_or_else(|| WorkerInitError::UnknownModel(cfg.model.clone()))?;
-        (m, cfg.model.clone(), None)
+        let m = apply_context_window_override(m, model_spec.context_window);
+        (m, model_spec.id, None)
     };
 
     // --- Plugins -----------------------------------------------------------
@@ -589,21 +797,28 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // appended (with a `## Plugin: <name>` banner) onto the base
     // prompt before pinning. This lets a plugin contribute domain
     // rules ("always run clippy") without forking the base prompt.
-    let raw_base = match &cfg.system_prompt_file {
-        Some(path) => std::fs::read_to_string(path).map_err(|e| WorkerInitError::SystemPrompt {
-            path: path.clone(),
-            source: e,
-        })?,
-        None => coding_agent_system_prompt(cfg.allow_write, cfg.allow_bash).to_string(),
-    };
+    let prompt_source = resolve_prompt_source(
+        workspace.root(),
+        cfg.system_prompt_file.as_deref(),
+        cfg.allow_write,
+        cfg.allow_bash,
+    );
+    let raw_base = load_raw_prompt_source(&prompt_source).map_err(|e| {
+        let path = match &prompt_source {
+            PromptSource::File(path) => path.clone(),
+            PromptSource::BuiltIn { .. } => PathBuf::from("<built-in>"),
+        };
+        WorkerInitError::SystemPrompt { path, source: e }
+    })?;
     let mut base_prompt =
         grain_ai_agent_headless::compose_system_prompt_with_plugins(&raw_base, &discovered_plugins);
+    let mut memory_prompt_fragment: Option<String> = None;
     if let Some(settings) = &memory_settings {
         match grain_ai_agent_headless::load_project_memory_prompt(&settings.memory_dir) {
             Ok(Some(fragment)) => {
                 let bytes = fragment.len();
-                base_prompt.push_str("\n\n");
-                base_prompt.push_str(&fragment);
+                append_memory_fragment(&mut base_prompt, Some(&fragment));
+                memory_prompt_fragment = Some(fragment);
                 memory_boot_info = Some(format!(
                     "(project memory injected: {bytes} bytes from {})",
                     settings.memory_dir.join("memory_summary.md").display()
@@ -620,17 +835,15 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     );
     // Phase A/B: `find_skills_with_plugins` walks the primary skills
     // dir, then folds in each plugin's `<plugin>/skills/`.
-    let mut skills =
+    let base_skills =
         grain_ai_agent_headless::find_skills_in_dirs_with_plugins(&skill_dirs, &discovered_plugins)
             .unwrap_or_default();
-    // AGENTS.md standard — auto-discovered skill when present in workspace root.
-    if let Some(s) = grain_ai_agent_headless::maybe_load_agents_md(workspace.root()) {
-        skills.push(s);
-    }
+    // Project context standards — auto-discovered skills when present in workspace root.
+    let skills = runtime_skills_with_project_context(&base_skills, workspace.root());
     // Clone for the UI's slash-palette skill injection — the original
     // moves into `PinnedSystemPrompt::build` below.
     let skills_for_ui = skills.clone();
-    let pinned = grain_agent_harness::PinnedSystemPrompt::build(base_prompt, &skills);
+    let pinned = build_runtime_system_prompt(&base_prompt, &skills, &model);
     eprintln!(
         "[info] system prompt pinned ({} bytes, digest {:016x})",
         pinned.len(),
@@ -872,6 +1085,8 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         tools.extend(bundle.tools.clone());
         bundle
     };
+    #[cfg(feature = "scripts-rhai")]
+    let rhai_hook_handles = Arc::new(RwLock::new(rhai_bundle.handles.clone()));
 
     // --- WASM plugin tools (optional, behind `wasm-plugins` feature) ------
     // Walk discovered plugins for those with a `.wasm` module, load them
@@ -1019,9 +1234,13 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                 }
                 if update.provider.is_some() || update.model.is_some() {
                     if let Some(model_id) = update.model.as_ref() {
-                        let context_window = registry_for_wasm_ui
-                            .to_core_model(model_id)
-                            .map(|m| m.context_window)
+                        let context_window = update
+                            .context_window
+                            .or_else(|| {
+                                registry_for_wasm_ui
+                                    .to_core_model(model_id)
+                                    .map(|m| m.context_window)
+                            })
                             .unwrap_or(0);
                         if let Ok(mut w) = active_model_for_wasm_ui.write() {
                             *w = ActiveModelInfo::new(model_id.clone(), context_window);
@@ -1111,10 +1330,60 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     // having to hunt for stderr behind the alt screen.
     let _ = evt_tx.send(TuiEvent::Info(format!("({overhead_banner_for_replay})")));
 
-    // --- Hooks: storm suppressor + optional escalation ---------------------
-    let before_tool_call: Option<BeforeToolCallFn> = Some(grain_agent_harness::storm_hook(
+    // --- Hooks: declarative/script hooks + storm suppressor + escalation ---
+    let hook_rules = {
+        let mut hooks = grain_ai_agent_headless::ConfigFile::load(workspace.root())
+            .map(|config| config.hooks)
+            .unwrap_or_default();
+        for plugin in &discovered_plugins {
+            hooks.extend(plugin.manifest.hooks.clone());
+        }
+        hooks
+    };
+    let hook_registry = Arc::new(
+        grain_ai_agent_headless::HookRegistry::new(hook_rules).with_trace_sink({
+            let evt_tx = evt_tx.clone();
+            Arc::new(move |trace| {
+                let _ = evt_tx.send(TuiEvent::Info(format!(
+                    "(hook '{}' {:?}: {})",
+                    trace.name, trace.action, trace.message
+                )));
+            })
+        }),
+    );
+    if !hook_registry.is_empty() {
+        let _ = evt_tx.send(TuiEvent::Info(format!(
+            "(loaded {} runtime hook rule(s))",
+            hook_registry.rules().len()
+        )));
+    }
+    let declarative_before = grain_ai_agent_headless::before_tool_call_hook(hook_registry.clone());
+    let declarative_after = grain_ai_agent_headless::after_tool_call_hook(hook_registry.clone());
+    let declarative_prepare =
+        grain_ai_agent_headless::prepare_next_turn_hook(hook_registry.clone(), registry.clone());
+
+    #[cfg(feature = "scripts-rhai")]
+    let rhai_before = rhai_before_tool_call_hook(rhai_hook_handles.clone(), evt_tx.clone());
+    #[cfg(not(feature = "scripts-rhai"))]
+    let rhai_before: Option<BeforeToolCallFn> = None;
+    #[cfg(feature = "scripts-rhai")]
+    let rhai_after = rhai_after_tool_call_hook(rhai_hook_handles.clone(), evt_tx.clone());
+    #[cfg(not(feature = "scripts-rhai"))]
+    let rhai_after: Option<AfterToolCallFn> = None;
+    #[cfg(feature = "scripts-rhai")]
+    let rhai_prepare = rhai_prepare_next_turn_hook(rhai_hook_handles.clone(), evt_tx.clone());
+    #[cfg(not(feature = "scripts-rhai"))]
+    let rhai_prepare: Option<PrepareNextTurnFn> = None;
+
+    let storm_before: Option<BeforeToolCallFn> = Some(grain_agent_harness::storm_hook(
         grain_agent_harness::StormConfig::default(),
     ));
+    let before_tool_call = grain_ai_agent_headless::chain_before_hooks(
+        storm_before,
+        grain_ai_agent_headless::chain_before_hooks(declarative_before, rhai_before),
+    );
+    let after_tool_call = grain_ai_agent_headless::chain_after_hooks(declarative_after, rhai_after);
+    let configured_prepare_hook = chain_prepare_next_turn(declarative_prepare, rhai_prepare);
     let escalation_hook: Option<PrepareNextTurnFn> = match &cfg.escalate_to {
         Some(target_id) => match registry.to_core_model(target_id) {
             Some(target) => {
@@ -1257,14 +1526,22 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         model,
         compaction_summarizer: stream.clone(),
         stream,
-        system_prompt,
+        system_prompt: Arc::new(RwLock::new(system_prompt)),
+        base_prompt: Arc::new(RwLock::new(base_prompt)),
+        prompt_source: prompt_source.clone(),
+        discovered_plugins: discovered_plugins.clone(),
+        memory_prompt_fragment,
+        skill_dirs: skill_dirs.clone(),
+        workspace_root: workspace.root().to_path_buf(),
         tools,
         dynamic_tools_enabled: cfg.dynamic_tools_enabled,
         transform_context: guard,
         before_tool_call,
+        after_tool_call,
         compaction_policy,
         compaction_prompt,
         evt_tx: evt_tx.clone(),
+        configured_prepare_hook,
         escalation_hook,
         wasm_orchestration_hook,
         convert_to_llm,
@@ -1306,6 +1583,7 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     let plugins_dir_for_task = plugins_dir.clone();
     let evt_tx_for_task = evt_tx.clone();
     let model_cost_for_task = model_cost.clone();
+    let search_ignore_for_task = cfg.search_ignore.clone();
     // Snapshot the on-disk session directory the harness is currently
     // persisting to. The worker loop updates this on `/clear` and
     // `/resume` so `DeleteSession` can refuse to remove the active
@@ -1331,11 +1609,12 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         script_dirs: rhai_dirs.clone(),
         base_tools,
         ui_handlers: Arc::new(build_ui_handler_map(&rhai_bundle.handles)),
+        hook_handles: rhai_hook_handles.clone(),
     };
 
-    // Hot-reload: install a notify watcher on every Rhai script dir
-    // and forward "something changed" pulses (debounced) into the
-    // worker via `Command::ReloadRhaiScripts`. The keepalive tuple
+    // Hot-reload: install notify watchers on runtime context files,
+    // configured skill dirs, and every Rhai script dir. Debounced pulses are
+    // forwarded into the worker as reload commands. The keepalive tuple
     // (watcher + bridge thread) lives alongside the boa keepalive
     // so it gets torn down at the same time. When the cmd_tx
     // channel closes, the bridge thread sees the send error and
@@ -1347,31 +1626,69 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
     )> = {
         use notify::{RecursiveMode, Watcher};
 
-        if !has_rhai_scripts {
-            None
-        } else {
-            let (event_tx, event_rx) = std::sync::mpsc::channel::<()>();
-            let watcher_result =
-                notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                    // Filter: only fire on data changes / file creation /
-                    // removal. notify can also emit `Access` events on some
-                    // platforms which would spam the bridge.
-                    let should_fire = match res {
-                        Ok(ev) => matches!(
-                            ev.kind,
-                            notify::EventKind::Create(_)
-                                | notify::EventKind::Modify(_)
-                                | notify::EventKind::Remove(_)
-                        ),
-                        Err(_) => false,
-                    };
-                    if should_fire {
-                        let _ = event_tx.send(());
+        let (event_tx, event_rx) = std::sync::mpsc::channel::<HotReloadKind>();
+        let prompt_source_path = match &prompt_source {
+            PromptSource::File(path) => Some(path.clone()),
+            PromptSource::BuiltIn { .. } => None,
+        };
+        let watcher_result =
+            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                let Ok(ev) = res else {
+                    return;
+                };
+                if !matches!(
+                    ev.kind,
+                    notify::EventKind::Create(_)
+                        | notify::EventKind::Modify(_)
+                        | notify::EventKind::Remove(_)
+                ) {
+                    return;
+                }
+                let touches_prompt_catalog = ev.paths.iter().any(|path| {
+                    if prompt_source_path
+                        .as_ref()
+                        .is_some_and(|target| path == target)
+                    {
+                        return true;
                     }
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            matches!(name, "AGENTS.md" | "CLAUDE.md" | "SYSTEM.md" | "SKILL.md")
+                        })
                 });
-            match watcher_result {
-                Ok(mut watcher) => {
-                    let mut watched_any = false;
+                let touches_restart_config = ev.paths.iter().any(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            matches!(
+                                name,
+                                "config.toml"
+                                    | "plugin.toml"
+                                    | "plugin-lock.toml"
+                                    | "providers.toml"
+                            )
+                        })
+                });
+                let touches_rhai = ev.paths.iter().any(|path| {
+                    path.extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("rhai"))
+                });
+                if touches_prompt_catalog {
+                    let _ = event_tx.send(HotReloadKind::PromptCatalog);
+                }
+                if touches_restart_config {
+                    let _ = event_tx.send(HotReloadKind::RestartSuggested);
+                }
+                if touches_rhai {
+                    let _ = event_tx.send(HotReloadKind::Rhai);
+                }
+            });
+        match watcher_result {
+            Ok(mut watcher) => {
+                let mut watched_rhai_dirs = 0usize;
+                if has_rhai_scripts {
                     for dir in &rhai_dirs {
                         if !dir.exists() {
                             continue;
@@ -1379,40 +1696,100 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
                         if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
                             eprintln!("[warn] notify watch {}: {e}", dir.display());
                         } else {
-                            watched_any = true;
+                            watched_rhai_dirs += 1;
                         }
                     }
-                    if watched_any {
-                        let cmd_tx_for_watcher = cmd_tx.clone();
-                        let bridge = std::thread::spawn(move || {
-                            // First-event blocks; bursts coalesce inside
-                            // the DEBOUNCE window so an editor's "atomic
-                            // save" (write-temp + rename) only triggers
-                            // one reload.
-                            const DEBOUNCE: std::time::Duration =
-                                std::time::Duration::from_millis(250);
-                            while event_rx.recv().is_ok() {
-                                while event_rx.recv_timeout(DEBOUNCE).is_ok() {
-                                    // drain
-                                }
-                                if cmd_tx_for_watcher.send(Command::ReloadRhaiScripts).is_err() {
-                                    break;
-                                }
-                            }
-                        });
-                        eprintln!(
-                            "[info] hot-reload: watching {} Rhai dir(s) for changes",
-                            rhai_dirs.len()
-                        );
-                        Some((watcher, bridge))
+                }
+                let mut watched_agents_md = false;
+                if let Err(e) = watcher.watch(workspace.root(), RecursiveMode::NonRecursive) {
+                    eprintln!(
+                        "[warn] notify watch {} for project context: {e}",
+                        workspace.root().display()
+                    );
+                } else {
+                    watched_agents_md = true;
+                }
+                let grain_dir = workspace.root().join(".grain");
+                if grain_dir.is_dir()
+                    && let Err(e) = watcher.watch(&grain_dir, RecursiveMode::NonRecursive)
+                {
+                    eprintln!("[warn] notify watch {}: {e}", grain_dir.display());
+                }
+                if let PromptSource::File(path) = &prompt_source
+                    && let Some(parent) = path.parent()
+                    && parent.is_dir()
+                    && parent != workspace.root()
+                    && parent != grain_dir
+                    && let Err(e) = watcher.watch(parent, RecursiveMode::NonRecursive)
+                {
+                    eprintln!("[warn] notify watch {}: {e}", parent.display());
+                }
+                let mut watched_skill_dirs = 0usize;
+                for dir in &skill_dirs {
+                    if !dir.exists() {
+                        continue;
+                    }
+                    if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
+                        eprintln!("[warn] notify watch {}: {e}", dir.display());
                     } else {
-                        None
+                        watched_skill_dirs += 1;
                     }
                 }
-                Err(e) => {
-                    eprintln!("[warn] hot-reload init failed: {e}");
+
+                if watched_rhai_dirs > 0 || watched_agents_md {
+                    let cmd_tx_for_watcher = cmd_tx.clone();
+                    let bridge = std::thread::spawn(move || {
+                        // First-event blocks; bursts coalesce inside
+                        // the DEBOUNCE window so an editor's "atomic
+                        // save" (write-temp + rename) only triggers
+                        // one reload per kind.
+                        const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
+                        while let Ok(first) = event_rx.recv() {
+                            let mut reload_rhai = first == HotReloadKind::Rhai;
+                            let mut reload_prompt_catalog = first == HotReloadKind::PromptCatalog;
+                            let mut restart_suggested = first == HotReloadKind::RestartSuggested;
+                            while let Ok(kind) = event_rx.recv_timeout(DEBOUNCE) {
+                                match kind {
+                                    HotReloadKind::Rhai => reload_rhai = true,
+                                    HotReloadKind::PromptCatalog => reload_prompt_catalog = true,
+                                    HotReloadKind::RestartSuggested => restart_suggested = true,
+                                }
+                            }
+                            if reload_rhai
+                                && cmd_tx_for_watcher.send(Command::ReloadRhaiScripts).is_err()
+                            {
+                                break;
+                            }
+                            if reload_prompt_catalog
+                                && cmd_tx_for_watcher
+                                    .send(Command::ReloadProjectContext)
+                                    .is_err()
+                            {
+                                break;
+                            }
+                            if restart_suggested {
+                                let _ = cmd_tx_for_watcher.send(Command::RuntimeConfigChanged(
+                                    "configuration/plugin files changed; restart TUI to fully apply provider/plugin changes".into(),
+                                ));
+                            }
+                        }
+                    });
+                    eprintln!(
+                        "[info] hot-reload: watching project context + {watched_skill_dirs} skill dir(s){}",
+                        if watched_rhai_dirs > 0 {
+                            format!(" + {watched_rhai_dirs} Rhai dir(s)")
+                        } else {
+                            String::new()
+                        }
+                    );
+                    Some((watcher, bridge))
+                } else {
                     None
                 }
+            }
+            Err(e) => {
+                eprintln!("[warn] hot-reload init failed: {e}");
+                None
             }
         }
     };
@@ -1433,9 +1810,12 @@ pub async fn spawn(mut cfg: WorkerConfig) -> Result<Worker, WorkerInitError> {
         // Send loaded skills to the UI so the slash-palette can offer
         // skill prompt injection alongside built-in commands.
         let _ = evt_tx_for_task.send(TuiEvent::SkillsLoaded(skills_for_ui));
-        let _ = evt_tx_for_task.send(TuiEvent::FileCandidatesLoaded(workspace_file_candidates(
-            workspace_for_task.root(),
-        )));
+        let (path_candidates, search_ignore_warnings) =
+            workspace_path_candidates(workspace_for_task.root(), &search_ignore_for_task);
+        for warning in search_ignore_warnings {
+            let _ = evt_tx_for_task.send(TuiEvent::Info(format!("({warning})")));
+        }
+        let _ = evt_tx_for_task.send(TuiEvent::FileCandidatesLoaded(path_candidates));
         // Ship plugin-contributed slash command overrides so the
         // TUI's dispatch_slash consults them before the built-in
         // table — that's how lazy-gagent claims `/plugins`.
@@ -1557,6 +1937,10 @@ pub struct RhaiReloadCtx {
     /// scripts + manifest `[[ui_command]]` declarations. Looked up
     /// on `Command::InvokePluginUi`.
     pub ui_handlers: Arc<std::collections::HashMap<String, grain_script_rhai::ScriptHandle>>,
+    /// Current script handles for runtime hook functions. Hook closures
+    /// read this cell at call time, so `/reload` can swap scripts without
+    /// rebuilding the Agent.
+    pub hook_handles: Arc<RwLock<Vec<grain_script_rhai::ScriptHandle>>>,
 }
 
 /// Build the handler→ScriptHandle map. Registers **every** function
@@ -1587,6 +1971,234 @@ fn build_ui_handler_map(
         }
     }
     out
+}
+
+#[cfg(feature = "scripts-rhai")]
+fn rhai_before_tool_call_hook(
+    handles: Arc<RwLock<Vec<grain_script_rhai::ScriptHandle>>>,
+    evt_tx: mpsc::UnboundedSender<TuiEvent>,
+) -> Option<BeforeToolCallFn> {
+    Some(Arc::new(move |ctx, _cancel| {
+        let handles = handles.clone();
+        let evt_tx = evt_tx.clone();
+        Box::pin(async move {
+            let payload = serde_json::json!({
+                "event": "before_tool_call",
+                "tool": ctx.tool_call.name,
+                "toolCall": ctx.tool_call,
+                "args": ctx.args,
+                "messageCount": ctx.context.messages.len(),
+            });
+            for handle in script_handles_snapshot(&handles)
+                .into_iter()
+                .filter(|h| h.has_fn("hook_before_tool_call"))
+            {
+                let label = handle.label.clone();
+                let args = payload.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    handle.call_fn_json("hook_before_tool_call", args)
+                })
+                .await;
+                match result {
+                    Ok(Ok(value)) => {
+                        if value.get("block").and_then(|v| v.as_bool()) == Some(true) {
+                            let reason = value
+                                .get("reason")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("blocked by Rhai hook")
+                                .to_string();
+                            let _ = evt_tx.send(TuiEvent::Info(format!(
+                                "(hook '{label}' denied {}: {reason})",
+                                payload["tool"].as_str().unwrap_or("tool")
+                            )));
+                            return Some(BeforeToolCallResult {
+                                block: true,
+                                reason: Some(reason),
+                            });
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "rhai hook_before_tool_call {label}: {e}"
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "rhai hook_before_tool_call {label} join: {e}"
+                        )));
+                    }
+                }
+            }
+            None
+        })
+    }))
+}
+
+#[cfg(feature = "scripts-rhai")]
+fn rhai_after_tool_call_hook(
+    handles: Arc<RwLock<Vec<grain_script_rhai::ScriptHandle>>>,
+    evt_tx: mpsc::UnboundedSender<TuiEvent>,
+) -> Option<AfterToolCallFn> {
+    Some(Arc::new(move |ctx, _cancel| {
+        let handles = handles.clone();
+        let evt_tx = evt_tx.clone();
+        Box::pin(async move {
+            let payload = serde_json::json!({
+                "event": "after_tool_call",
+                "tool": ctx.tool_call.name,
+                "toolCall": ctx.tool_call,
+                "args": ctx.args,
+                "result": ctx.result,
+                "isError": ctx.is_error,
+                "messageCount": ctx.context.messages.len(),
+            });
+            let mut out = AfterToolCallResult::default();
+            for handle in script_handles_snapshot(&handles)
+                .into_iter()
+                .filter(|h| h.has_fn("hook_after_tool_call"))
+            {
+                let label = handle.label.clone();
+                let args = payload.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    handle.call_fn_json("hook_after_tool_call", args)
+                })
+                .await;
+                match result {
+                    Ok(Ok(value)) => {
+                        if let Some(content) = value.get("content").and_then(|v| v.as_str()) {
+                            out.content = Some(vec![UserContent::text(content)]);
+                        }
+                        if let Some(is_error) = value.get("is_error").and_then(|v| v.as_bool()) {
+                            out.is_error = Some(is_error);
+                        }
+                        if let Some(is_error) = value.get("isError").and_then(|v| v.as_bool()) {
+                            out.is_error = Some(is_error);
+                        }
+                        if let Some(terminate) = value.get("terminate").and_then(|v| v.as_bool()) {
+                            out.terminate = Some(terminate);
+                        }
+                        if value != serde_json::Value::Null && value != serde_json::json!({}) {
+                            let _ = evt_tx
+                                .send(TuiEvent::Info(format!("(hook '{label}' updated result)")));
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "rhai hook_after_tool_call {label}: {e}"
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "rhai hook_after_tool_call {label} join: {e}"
+                        )));
+                    }
+                }
+            }
+            if out.content.is_some()
+                || out.details.is_some()
+                || out.is_error.is_some()
+                || out.terminate.is_some()
+            {
+                Some(out)
+            } else {
+                None
+            }
+        })
+    }))
+}
+
+#[cfg(feature = "scripts-rhai")]
+fn rhai_prepare_next_turn_hook(
+    handles: Arc<RwLock<Vec<grain_script_rhai::ScriptHandle>>>,
+    evt_tx: mpsc::UnboundedSender<TuiEvent>,
+) -> Option<PrepareNextTurnFn> {
+    Some(Arc::new(move |ctx, _cancel| {
+        let handles = handles.clone();
+        let evt_tx = evt_tx.clone();
+        Box::pin(async move {
+            let payload = serde_json::json!({
+                "event": "prepare_next_turn",
+                "messageCount": ctx.context.messages.len(),
+                "newMessages": ctx.new_messages,
+                "toolResults": ctx.tool_results,
+                "systemPrompt": ctx.context.system_prompt,
+            });
+            let mut context: Option<AgentContext> = None;
+            for handle in script_handles_snapshot(&handles)
+                .into_iter()
+                .filter(|h| h.has_fn("hook_prepare_next_turn"))
+            {
+                let label = handle.label.clone();
+                let args = payload.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    handle.call_fn_json("hook_prepare_next_turn", args)
+                })
+                .await;
+                match result {
+                    Ok(Ok(value)) => {
+                        if let Some(message) = value
+                            .get("inject_user_message")
+                            .or_else(|| value.get("injectUserMessage"))
+                            .and_then(|v| v.as_str())
+                        {
+                            let target = context.get_or_insert_with(|| (*ctx.context).clone());
+                            target.messages.push(AgentMessage::user(UserMessage {
+                                content: vec![UserContent::text(message)],
+                                timestamp: current_time_ms(),
+                            }));
+                            let _ = evt_tx.send(TuiEvent::Info(format!(
+                                "(hook '{label}' injected user message)"
+                            )));
+                        }
+                        if let Some(system_prompt) = value
+                            .get("system_prompt")
+                            .or_else(|| value.get("systemPrompt"))
+                            .and_then(|v| v.as_str())
+                        {
+                            let target = context.get_or_insert_with(|| (*ctx.context).clone());
+                            target.system_prompt = system_prompt.to_string();
+                            let _ = evt_tx.send(TuiEvent::Info(format!(
+                                "(hook '{label}' set system prompt)"
+                            )));
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "rhai hook_prepare_next_turn {label}: {e}"
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "rhai hook_prepare_next_turn {label} join: {e}"
+                        )));
+                    }
+                }
+            }
+            context.map(|context| AgentLoopTurnUpdate {
+                context: Some(context),
+                model: None,
+                thinking_level: None,
+            })
+        })
+    }))
+}
+
+#[cfg(feature = "scripts-rhai")]
+fn script_handles_snapshot(
+    handles: &Arc<RwLock<Vec<grain_script_rhai::ScriptHandle>>>,
+) -> Vec<grain_script_rhai::ScriptHandle> {
+    match handles.read() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+fn current_time_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Chain two optional [`PrepareNextTurnFn`] hooks: run `a` first, then
@@ -1761,6 +2373,7 @@ async fn run_command_loop(
             }
             Command::ReturnSkills => match find_skills_in_dirs(&skill_dirs) {
                 Ok(skills) => {
+                    let skills = runtime_skills_with_project_context(&skills, workspace.root());
                     let payload: Vec<(String, String, bool)> = skills
                         .into_iter()
                         .map(|s| (s.name, s.description, s.disable_model_invocation))
@@ -2035,9 +2648,40 @@ async fn run_command_loop(
                 combined.extend(fresh.tools);
                 harness.agent().set_tools(combined).await;
                 rhai_ctx.ui_handlers = Arc::new(build_ui_handler_map(&fresh.handles));
+                match rhai_ctx.hook_handles.write() {
+                    Ok(mut guard) => *guard = fresh.handles.clone(),
+                    Err(poisoned) => {
+                        let mut guard = poisoned.into_inner();
+                        *guard = fresh.handles.clone();
+                    }
+                }
                 let _ = evt_tx.send(TuiEvent::Info(format!(
                     "(reloaded — {count} Rhai tool(s) active)"
                 )));
+            }
+            Command::ReloadProjectContext => {
+                match builder.rebuild_runtime_system_prompt(&current_model) {
+                    Ok((system_prompt, skills, digest)) => {
+                        builder.store_system_prompt(system_prompt.clone());
+                        harness.set_system_prompt(system_prompt).await;
+                        let context_count = skills
+                            .iter()
+                            .filter(|s| matches!(s.name.as_str(), "AGENTS.md" | "CLAUDE.md"))
+                            .count();
+                        let _ = evt_tx.send(TuiEvent::SkillsLoaded(skills));
+                        let _ = evt_tx.send(TuiEvent::Info(format!(
+                            "(project context reloaded — {context_count} context file(s), system prompt digest {digest:016x})"
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "project context reload: {e}"
+                        )));
+                    }
+                }
+            }
+            Command::RuntimeConfigChanged(reason) => {
+                let _ = evt_tx.send(TuiEvent::Info(format!("({reason})")));
             }
             #[cfg(feature = "scripts-rhai")]
             Command::InvokePluginUi { handler, args } => {
@@ -2282,6 +2926,17 @@ async fn run_command_loop(
                 let model = override_model_provider(model, profile);
                 let cost = model.cost.clone();
                 harness.set_model(model.clone()).await;
+                match builder.rebuild_runtime_system_prompt(&model) {
+                    Ok((system_prompt, _, _)) => {
+                        builder.store_system_prompt(system_prompt.clone());
+                        harness.set_system_prompt(system_prompt).await;
+                    }
+                    Err(e) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "provider prompt refresh: {e}"
+                        )));
+                    }
+                }
                 // Update the shared handle so ContextGuard and
                 // TokenBudgetPolicy see the new model immediately.
                 if let Ok(mut w) = active_model_handle.write() {
@@ -2345,27 +3000,46 @@ async fn run_command_loop(
                 let _ = evt_tx.send(TuiEvent::ModelsListed(pairs));
             }
             Command::SetModel(model_id) => {
+                let model_spec = match grain_llm_genai::parse_model_spec(&model_id) {
+                    Ok(spec) => spec,
+                    Err(e) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(e));
+                        continue;
+                    }
+                };
                 // Resolve via registry; fall back to a clone of the
                 // current model with just the id swapped so
                 // openai-compat endpoints can drive arbitrary
                 // server-side ids (e.g. opencode-zen's "kimi-k2.6"
                 // which isn't in models.dev).
-                let model = registry.to_core_model(&model_id).unwrap_or_else(|| {
+                let model = registry.to_core_model(&model_spec.id).unwrap_or_else(|| {
                     let mut m = current_model.clone();
-                    m.id = model_id.clone();
-                    m.name = model_id.clone();
+                    m.id = model_spec.id.clone();
+                    m.name = model_spec.id.clone();
                     m
                 });
+                let model = apply_context_window_override(model, model_spec.context_window);
                 let cost = model.cost.clone();
                 harness.set_model(model.clone()).await;
+                match builder.rebuild_runtime_system_prompt(&model) {
+                    Ok((system_prompt, _, _)) => {
+                        builder.store_system_prompt(system_prompt.clone());
+                        harness.set_system_prompt(system_prompt).await;
+                    }
+                    Err(e) => {
+                        let _ = evt_tx.send(TuiEvent::AgentWorkerError(format!(
+                            "model prompt refresh: {e}"
+                        )));
+                    }
+                }
                 // Update the shared handle so ContextGuard and
                 // TokenBudgetPolicy see the new model immediately.
                 if let Ok(mut w) = active_model_handle.write() {
-                    *w = ActiveModelInfo::new(model_id.clone(), model.context_window);
+                    *w = ActiveModelInfo::new(model_spec.id.clone(), model.context_window);
                 }
                 current_model = model;
                 let _ = evt_tx.send(TuiEvent::ModelApplied {
-                    model: model_id,
+                    model: model_spec.id,
                     cost,
                 });
             }
@@ -2675,6 +3349,9 @@ fn override_model_provider(
     if matches!(profile.kind, ProviderKind::OpenAiCompat) {
         model.provider = profile.name.clone();
     }
+    if let Some(context_window) = profile.context_window {
+        model.context_window = context_window;
+    }
     model
 }
 
@@ -2683,8 +3360,8 @@ fn override_model_provider(
 /// info (provider kind + base_url + model id) to drive `grain-llm-genai`;
 /// the synthetic descriptor fills in the registry-supplied fields with
 /// conservative defaults:
-/// - `context_window = 32_768` (most local models advertise ≥ 8k; 32k
-///   is a sweet spot — pass `--headroom-tokens` for smaller windows).
+/// - `context_window = profile.context_window.unwrap_or(32_768)` (most
+///   local models advertise ≥ 8k; 32k is a conservative default).
 /// - `max_tokens = 4_096`.
 /// - `cost = zero` (suppresses the footer cost chip — providers without
 ///   public pricing shouldn't lie).
@@ -2728,8 +3405,139 @@ fn synthetic_model_from_profile(profile: &ProviderProfile) -> grain_agent_core::
         provider: profile.name.clone(),
         base_url: profile.base_url.clone().unwrap_or_default(),
         reasoning: false,
-        context_window: 32_768,
+        context_window: profile.context_window.unwrap_or(32_768),
         max_tokens: 4_096,
         cost: grain_agent_core::Cost::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_file(root: &std::path::Path, rel: &str, body: &str) {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn test_model() -> grain_agent_core::Model {
+        grain_agent_core::Model {
+            id: "test/model".into(),
+            name: "test/model".into(),
+            api: "openai".into(),
+            provider: "test".into(),
+            base_url: String::new(),
+            reasoning: false,
+            context_window: 32_768,
+            max_tokens: 4_096,
+            cost: grain_agent_core::Cost::default(),
+        }
+    }
+
+    #[test]
+    fn workspace_path_candidates_include_files_and_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/main.rs", "fn main() {}\n");
+        write_file(dir.path(), "src/nested/mod.rs", "mod nested;\n");
+
+        let (paths, warnings) = workspace_path_candidates(dir.path(), &[]);
+
+        assert!(warnings.is_empty());
+        assert!(paths.contains(&"src/".to_string()));
+        assert!(paths.contains(&"src/main.rs".to_string()));
+        assert!(paths.contains(&"src/nested/".to_string()));
+        assert!(paths.contains(&"src/nested/mod.rs".to_string()));
+    }
+
+    #[test]
+    fn workspace_path_candidates_apply_search_ignore_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/main.rs", "fn main() {}\n");
+        write_file(dir.path(), "src/app.log", "debug\n");
+        write_file(dir.path(), "target/debug/app", "binary\n");
+
+        let patterns = vec!["target/".to_string(), "*.log".to_string()];
+        let (paths, warnings) = workspace_path_candidates(dir.path(), &patterns);
+
+        assert!(warnings.is_empty());
+        assert!(paths.contains(&"src/".to_string()));
+        assert!(paths.contains(&"src/main.rs".to_string()));
+        assert!(!paths.contains(&"src/app.log".to_string()));
+        assert!(!paths.iter().any(|path| path.starts_with("target/")));
+    }
+
+    #[test]
+    fn synthetic_profile_model_uses_context_window_override() {
+        let profile = ProviderProfile {
+            name: "opencodezen".into(),
+            kind: ProviderKind::OpenAiCompat,
+            base_url: Some("https://opencode.ai/zen/go/v1/".into()),
+            model: "deepseek-v4-pro".into(),
+            context_window: Some(1_000_000),
+            auth: ProviderAuth::ApiKey {
+                env: "OPENCODE_API_KEY".into(),
+            },
+        };
+
+        let model = synthetic_model_from_profile(&profile);
+
+        assert_eq!(model.id, "opencodezen/deepseek-v4-pro");
+        assert_eq!(model.context_window, 1_000_000);
+    }
+
+    #[test]
+    fn runtime_skills_with_project_context_reflects_workspace_file_presence() {
+        let dir = tempfile::tempdir().unwrap();
+        let base_skills = Vec::new();
+
+        assert!(runtime_skills_with_project_context(&base_skills, dir.path()).is_empty());
+
+        write_file(dir.path(), "AGENTS.md", "# Project\n\n- Prefer tests.\n");
+        let with_agents = runtime_skills_with_project_context(&base_skills, dir.path());
+        assert_eq!(with_agents.len(), 1);
+        assert_eq!(with_agents[0].name, "AGENTS.md");
+        assert_eq!(
+            with_agents[0].file_path,
+            dir.path().join("AGENTS.md").to_string_lossy()
+        );
+
+        write_file(
+            dir.path(),
+            "CLAUDE.md",
+            "# Claude\n\n- Keep responses concise.\n",
+        );
+        let with_both = runtime_skills_with_project_context(&base_skills, dir.path());
+        assert_eq!(with_both.len(), 2);
+        assert!(with_both.iter().any(|s| s.name == "AGENTS.md"));
+        assert!(with_both.iter().any(|s| s.name == "CLAUDE.md"));
+
+        std::fs::remove_file(dir.path().join("AGENTS.md")).unwrap();
+        let with_claude = runtime_skills_with_project_context(&base_skills, dir.path());
+        assert_eq!(with_claude.len(), 1);
+        assert_eq!(with_claude[0].name, "CLAUDE.md");
+    }
+
+    #[test]
+    fn runtime_system_prompt_digest_changes_when_agents_md_skill_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = test_model();
+        let base_skills = Vec::new();
+        let empty_skills = runtime_skills_with_project_context(&base_skills, dir.path());
+        let empty = build_runtime_system_prompt("base", &empty_skills, &model);
+
+        write_file(dir.path(), "AGENTS.md", "# Project\n");
+        let with_agents_skills = runtime_skills_with_project_context(&base_skills, dir.path());
+        let with_agents = build_runtime_system_prompt("base", &with_agents_skills, &model);
+
+        assert_ne!(empty.digest(), with_agents.digest());
+        assert!(with_agents.as_str().contains("AGENTS.md"));
+
+        write_file(dir.path(), "AGENTS.md", "# Project\n\nUpdated guidance.\n");
+        let updated_agents_skills = runtime_skills_with_project_context(&base_skills, dir.path());
+        let updated_agents = build_runtime_system_prompt("base", &updated_agents_skills, &model);
+        assert_ne!(with_agents.digest(), updated_agents.digest());
     }
 }

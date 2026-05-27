@@ -38,6 +38,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::hooks::HookRule;
 use crate::plugin_ui::{SlashCommand, UiCommand};
 use crate::skills::{SkillsError, find_skills, find_skills_in_dirs};
 use grain_agent_harness::Skill;
@@ -91,6 +92,9 @@ pub struct PluginManifest {
     /// ```
     #[serde(default, rename = "slash_command")]
     pub slash_commands: Vec<SlashCommand>,
+    /// Declarative runtime hooks contributed by this plugin.
+    #[serde(default, rename = "hook")]
+    pub hooks: Vec<HookRule>,
     /// Optional WebAssembly Component Model configuration. When
     /// present (or when `<root>/plugin.wasm` exists on disk), the
     /// plugin engine loads the `.wasm` module and registers the

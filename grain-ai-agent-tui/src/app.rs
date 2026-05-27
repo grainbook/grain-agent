@@ -601,6 +601,15 @@ pub enum Command {
     /// slash command or automatically by the `hot-reload` feature's
     /// file watcher. Worker emits a [`TuiEvent::Info`] on success.
     ReloadRhaiScripts,
+    /// Re-read project context files (`AGENTS.md`, `CLAUDE.md`),
+    /// configured skills, and the active system-prompt source, then
+    /// update the live system prompt plus UI skill catalog. Sent
+    /// automatically by the `hot-reload` feature's file watcher.
+    ReloadProjectContext,
+    /// A boot-time config/plugin file changed. The worker surfaces a
+    /// restart hint instead of trying to half-rebuild provider/plugin
+    /// state in place.
+    RuntimeConfigChanged(String),
     /// Run the OAuth PKCE login flow for a provider kind
     /// (`"anthropic"` or `"openai"`). The worker will emit
     /// `TuiEvent::Info` for progress and a terminal
@@ -731,7 +740,7 @@ pub enum PaletteAction {
     /// review / edit before submitting to the LLM.
     InjectBody(String),
     /// Replace the active `@...` token with this workspace-relative
-    /// file path.
+    /// file or directory path.
     InsertFile(String),
 }
 
@@ -1021,6 +1030,10 @@ pub struct AppState {
     /// finalized on `MouseUp` (the drag flag flips off but the
     /// highlight stays until the next event).
     pub selection: Option<Selection>,
+    /// When true, releasing a non-empty in-app transcript selection
+    /// writes it to the OS clipboard. When false, selection stays
+    /// visual-only so users can disable clipboard side effects.
+    pub copy_selection_to_clipboard: bool,
     /// Ring buffer of the most recent outbound request bodies
     /// (pretty-printed JSON of the projected LLM messages). Populated
     /// only when the worker was started with `--debug-log`; the
@@ -1315,6 +1328,7 @@ impl AppState {
         providers: Vec<ProviderProfile>,
         initial_provider_idx: Option<usize>,
         cny_rate: Option<f64>,
+        copy_selection_to_clipboard: bool,
         initial_history: Vec<String>,
     ) -> Self {
         assert!(!themes.is_empty(), "AppState needs at least one theme");
@@ -1377,6 +1391,7 @@ impl AppState {
             rendered_rows: RefCell::new(Vec::new()),
             transcript_area: Cell::new(Rect::default()),
             selection: None,
+            copy_selection_to_clipboard,
             request_log: VecDeque::new(),
             // Defaults match the prevailing UX preference of
             // "fold the noisy bits, keep the conversation
@@ -1774,7 +1789,7 @@ impl AppState {
                 .take(MAX_FILE_MATCHES)
                 .map(|path| PaletteItem {
                     trigger: format!("@{path}"),
-                    description: "file".to_string(),
+                    description: file_candidate_description(path).to_string(),
                     action: PaletteAction::InsertFile(path.clone()),
                 })
                 .collect();
@@ -1794,7 +1809,7 @@ impl AppState {
             .take(MAX_FILE_MATCHES)
             .map(|(path, _)| PaletteItem {
                 trigger: format!("@{path}"),
-                description: "file".to_string(),
+                description: file_candidate_description(path).to_string(),
                 action: PaletteAction::InsertFile(path.to_string()),
             })
             .collect()
@@ -2471,6 +2486,9 @@ impl AppState {
                     let text = extract_selection(&rendered, *sel);
                     if text.is_empty() {
                         return Some(Err(String::from("empty")));
+                    }
+                    if !self.copy_selection_to_clipboard {
+                        return None;
                     }
                     Some(write_clipboard(&text).map(|()| text))
                 });
@@ -4218,6 +4236,14 @@ impl AppState {
     }
 }
 
+fn file_candidate_description(path: &str) -> &'static str {
+    if path.ends_with('/') {
+        "folder"
+    } else {
+        "file"
+    }
+}
+
 /// Concatenate every Text block in `partial.content` into one string.
 /// Multiple Text blocks arise when reasoning chunks interrupt the
 /// model's prose (DeepSeek's thinking mode is the most common
@@ -4899,6 +4925,7 @@ mod tests {
             Vec::new(),
             None,
             None,
+            true,
             Vec::new(),
         )
     }
@@ -4917,6 +4944,7 @@ mod tests {
             providers,
             None,
             None,
+            true,
             Vec::new(),
         )
     }
@@ -4927,6 +4955,7 @@ mod tests {
             kind: grain_llm_genai::ProviderKind::Anthropic,
             base_url: None,
             model: model.into(),
+            context_window: None,
             auth: grain_llm_genai::ProviderAuth::ApiKey {
                 env: "ANTHROPIC_API_KEY".into(),
             },
@@ -4939,6 +4968,7 @@ mod tests {
             kind: grain_llm_genai::ProviderKind::Anthropic,
             base_url: None,
             model: "anthropic/claude-sonnet-4-5".into(),
+            context_window: None,
             auth: grain_llm_genai::ProviderAuth::AnthropicOauth,
         }
     }
@@ -6035,6 +6065,7 @@ mod tests {
     fn at_file_token_opens_file_palette() {
         let mut s = fresh();
         s.on_event(TuiEvent::FileCandidatesLoaded(vec![
+            "grain-ai-agent-tui/src/app/".into(),
             "grain-ai-agent-tui/src/app.rs".into(),
             "grain-ai-agent-tui/src/ui.rs".into(),
             "README.md".into(),
@@ -6049,6 +6080,12 @@ mod tests {
             matches
                 .iter()
                 .any(|item| item.trigger == "@grain-ai-agent-tui/src/app.rs")
+        );
+        assert!(
+            matches
+                .iter()
+                .any(|item| item.trigger == "@grain-ai-agent-tui/src/app/"
+                    && item.description == "folder")
         );
     }
 
@@ -6297,6 +6334,25 @@ mod tests {
         s.on_event(TuiEvent::MouseDown { row: 0, col: 1 });
         s.on_event(TuiEvent::MouseUp);
         assert!(s.selection.is_none(), "click-without-drag clears selection");
+    }
+
+    #[test]
+    fn mouse_up_with_selection_copy_disabled_keeps_visual_selection_only() {
+        let mut s = fresh();
+        s.copy_selection_to_clipboard = false;
+        s.transcript_area.set(Rect::new(0, 0, 80, 20));
+        *s.rendered_rows.borrow_mut() = rrows(&[("abcdef", TranscriptKind::AssistantText)]);
+        let before = s.transcript.len();
+
+        s.on_event(TuiEvent::MouseDown { row: 0, col: 1 });
+        s.on_event(TuiEvent::MouseDrag { row: 0, col: 4 });
+        s.on_event(TuiEvent::MouseUp);
+
+        let sel = s.selection.expect("selection remains visible");
+        assert!(!sel.dragging);
+        assert_eq!(sel.anchor, (0, 1));
+        assert_eq!(sel.active, (0, 4));
+        assert_eq!(s.transcript.len(), before, "no clipboard status line");
     }
 
     #[test]

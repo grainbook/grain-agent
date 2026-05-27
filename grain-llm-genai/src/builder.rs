@@ -339,6 +339,7 @@ mod tests {
             kind: ProviderKind::OpenAi,
             base_url: None,
             model: "openai/gpt-5".to_string(),
+            context_window: None,
             auth: ProviderAuth::OpenAiOauth,
         }];
 

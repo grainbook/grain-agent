@@ -495,11 +495,11 @@ impl Agent {
         )
         .await;
 
-        let (loop_error, final_context) = match result {
-            Ok(result) => (None, Some(result.context)),
+        let (loop_error, final_result) = match result {
+            Ok(result) => (None, Some(result)),
             Err(err) => (Some(err), None),
         };
-        self.finish_run(inner, loop_error, final_context, cancel.is_cancelled())
+        self.finish_run(inner, loop_error, final_result, cancel.is_cancelled())
             .await;
         Ok(())
     }
@@ -521,11 +521,11 @@ impl Agent {
         )
         .await;
 
-        let (loop_error, final_context) = match result {
-            Ok(result) => (None, Some(result.context)),
+        let (loop_error, final_result) = match result {
+            Ok(result) => (None, Some(result)),
             Err(err) => (Some(err), None),
         };
-        self.finish_run(inner, loop_error, final_context, cancel.is_cancelled())
+        self.finish_run(inner, loop_error, final_result, cancel.is_cancelled())
             .await;
         Ok(())
     }
@@ -547,7 +547,7 @@ impl Agent {
         &self,
         inner: Arc<Mutex<Inner>>,
         loop_error: Option<agent_loop::AgentLoopError>,
-        final_context: Option<AgentContext>,
+        final_result: Option<agent_loop::AgentLoopResult>,
         aborted: bool,
     ) {
         if let Some(err) = loop_error {
@@ -600,8 +600,12 @@ impl Agent {
         }
 
         let mut g = inner.lock().await;
-        if let Some(context) = final_context {
-            g.messages = context.messages;
+        if let Some(result) = final_result {
+            g.system_prompt = result.context.system_prompt;
+            g.messages = result.context.messages;
+            g.tools = result.context.tools;
+            g.model = result.model;
+            g.thinking_level = result.thinking_level;
         }
         g.is_streaming = false;
         g.streaming_message = None;

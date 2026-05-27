@@ -37,7 +37,7 @@ pub enum TuiEvent {
     /// Worker loaded skills at startup (includes body content for
     /// slash-palette injection).
     SkillsLoaded(Vec<grain_agent_harness::Skill>),
-    /// Worker scanned workspace files for input `@` completion.
+    /// Worker scanned workspace files/directories for input `@` completion.
     FileCandidatesLoaded(Vec<String>),
     /// Worker hit a fatal-ish error (e.g. agent ended with `error_message`,
     /// or a slash command sub-call failed). Already user-facing.
